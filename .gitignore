@@ -26,3 +26,5 @@ NEXT-SESSION.md
 REVIEW-*.md
 *PLAYBOOK*.md
 *-DESIGN.md
+.storage/
+.agent/constitution
