@@ -1,0 +1,28 @@
+# secrets & local env
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.python-version
+
+# data / dumps
+*.dump
+*.sql.bak
+pgdata/
+
+# os
+.DS_Store
+
+# personal / memory workspace files — never commit (constitution rule 040)
+TODO.md
+SESSION.md
+TASKS.md
+ROADMAP.md
+*.session.md
+*.local.md
+NEXT-SESSION.md
+REVIEW-*.md
+*PLAYBOOK*.md
+*-DESIGN.md

@@ -1,0 +1,29 @@
+# AI-Router data plane. Runtime-agnostic: works with Docker Desktop, Colima, or Podman.
+#   Phase 1 (this file):        db  — Postgres 17 + pgvector (source of truth)
+#   Phase 2 (profile: monitoring): prometheus + grafana + exporter (observability)
+#
+# Quickstart:
+#   cp .env.example .env      # then edit the password
+#   docker compose up -d      # start Postgres only
+#   docker compose --profile monitoring up -d   # Phase 2, once the exporter exists
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: ai-router-db
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # SQL files here run once, in order, on first cluster init.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
