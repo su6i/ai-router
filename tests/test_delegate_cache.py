@@ -127,6 +127,6 @@ def test_delegate_writes_audit_line_with_cached_flag(monkeypatch):
 
     lines = d.AUDIT.read_text().strip().splitlines()
     assert len(lines) == 2
-    rec1, rec2 = (json.loads(l) for l in lines)
+    rec1, rec2 = (json.loads(line) for line in lines)
     assert rec1["cached"] is False
     assert rec2["cached"] is True

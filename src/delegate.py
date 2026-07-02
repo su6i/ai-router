@@ -20,15 +20,24 @@ Usage:
   python3 delegate.py --session code --new              # reset that conversation
   python3 delegate.py --audit                           # print the ledger
 
+  # worker mode (SPEC v1) — cheap model reads/rewrites files on disk directly;
+  # the generated code NEVER enters this process's stdout/context, only a
+  # short summary does.
+  python3 delegate.py --model flash --files "src/foo.py,tests/test_foo.py" \
+      --allow-write "src/**,tests/**" --verify "uv run pytest -q" \
+      -p "add a docstring to foo()"
+
 Keys come from the vault .env (_shared, then this project's own override — rule 035
 layered secrets). No key is printed in full.
 Claude is intentionally NOT reachable here — grunt work never falls back to the
 subscription. See STRATEGY.md (source of truth) for the routing policy.
 """
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -175,8 +184,10 @@ def cache_get(key):
         con = _cache_conn()
         row = con.execute("SELECT response FROM cache WHERE key=?", (key,)).fetchone()
         if row:
-            con.execute("UPDATE cache SET hits=hits+1 WHERE key=?", (key,)); con.commit()
-        con.close(); return row[0] if row else None
+            con.execute("UPDATE cache SET hits=hits+1 WHERE key=?", (key,))
+            con.commit()
+        con.close()
+        return row[0] if row else None
     except Exception:
         return None      # fail-open: cache never breaks a call
 
@@ -187,7 +198,8 @@ def cache_put(key, model, prompt, response):
         con.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?,?,?,0)",
                     (key, model, prompt, response,
                      dt.datetime.now().astimezone().isoformat(timespec="seconds")))
-        con.commit(); con.close()
+        con.commit()
+        con.close()
     except Exception:
         pass
 
@@ -239,6 +251,258 @@ def call_gemini(spec, key, history, system):
     return (text, d.get("modelVersion", spec["api"]), d.get("responseId"),
             um.get("promptTokenCount", 0), um.get("candidatesTokenCount", 0),
             um.get("cachedContentTokenCount", 0))
+
+
+# ---- worker mode (--files) — SPEC v1, DELEGATE-TOOL-DESIGN.md ---------------
+# Sentinel-line protocol (not markdown fences: file content may itself contain
+# backticks). Full-file replacement only — cheap models are unreliable with diffs.
+WORKER_PROTOCOL_SYSTEM = """You are a coding worker. You are given a task and the \
+current content of one or more files. Make the requested change and respond using \
+EXACTLY this format — no markdown code fences, no commentary outside these markers:
+
+===FILE: relative/path/from/project/root.py===
+<entire new file content — full replacement, never a diff or patch>
+===END FILE===
+(repeat the FILE block for every file you changed)
+===SUMMARY===
+3-5 lines: what was done, what was NOT done, any assumption you made.
+===END SUMMARY===
+
+Rules:
+- Always emit the FULL file content, never a partial diff.
+- Only emit FILE blocks for files you are actually changing.
+- Never wrap file content in markdown fences.
+- Paths are relative to the project root: no leading slash, no ".." segments.
+"""
+
+_FILE_START_RE = re.compile(r"^===FILE: (.+)===$")
+_FILE_END = "===END FILE==="
+_SUMMARY_START = "===SUMMARY==="
+_SUMMARY_END = "===END SUMMARY==="
+
+
+def parse_worker_response(text: str):
+    """Parse sentinel-line blocks. Returns (files: list[(path, content)], summary: str|None).
+
+    Regex on line starts per SPEC v1 — content between markers is written verbatim
+    (a trailing newline is added by the caller if missing, never here).
+    """
+    lines = text.split("\n")
+    files, summary = [], None
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i].rstrip("\r")
+        m = _FILE_START_RE.match(line)
+        if m:
+            path = m.group(1).strip()
+            i += 1
+            body = []
+            while i < n and lines[i].rstrip("\r") != _FILE_END:
+                body.append(lines[i])
+                i += 1
+            files.append((path, "\n".join(body)))
+            i += 1  # skip ===END FILE===
+            continue
+        if line == _SUMMARY_START:
+            i += 1
+            body = []
+            while i < n and lines[i].rstrip("\r") != _SUMMARY_END:
+                body.append(lines[i])
+                i += 1
+            summary = "\n".join(body).strip()
+            i += 1
+            continue
+        i += 1
+    return files, summary
+
+
+def _safe_write_path(rel: str, project_root: Path, allow_patterns: list):
+    """Path safety per SPEC v1. Returns (resolved_path, None) or (None, reason)."""
+    if not rel:
+        return None, "empty path"
+    norm = rel.replace("\\", "/")
+    if norm.startswith("/") or (len(norm) > 1 and norm[1] == ":"):
+        return None, "absolute path"
+    if ".." in norm.split("/"):
+        return None, "path traversal (..)"
+    if not allow_patterns:
+        return None, "no --allow-write patterns given"
+    if not any(fnmatch.fnmatch(norm, pat) for pat in allow_patterns):
+        return None, "not covered by --allow-write"
+    root = project_root.resolve()
+    candidate = (root / norm).resolve()
+    if candidate != root and root not in candidate.parents:
+        return None, "escapes project root"
+    return candidate, None
+
+
+def _write_files(files: list, project_root: Path, allow_patterns: list):
+    written, rejected = [], []
+    for rel, content in files:
+        path, err = _safe_write_path(rel, project_root, allow_patterns)
+        if err:
+            rejected.append((rel, err))
+            continue
+        data = content if content.endswith("\n") else content + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data)
+        written.append((rel, len(data.encode())))
+    return written, rejected
+
+
+def _human_size(n: int) -> str:
+    return f"{n}b" if n < 1024 else f"{n / 1024:.1f}k"
+
+
+def _tail_lines(text: str, n: int) -> str:
+    return "\n".join(text.splitlines()[-n:])
+
+
+def run_verify(cmd: str, cwd: Path):
+    """Run --verify. Output is captured, NEVER printed in full. Returns (ok, output, elapsed_s)."""
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
+                           text=True, timeout=600)
+        ok = r.returncode == 0
+        output = (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired:
+        ok, output = False, "TIMEOUT after 600s"
+    return ok, output, time.time() - t0
+
+
+def build_worker_prompt(task: str, file_specs: list) -> str:
+    parts = [f"Task:\n{task}\n"]
+    for path, content in file_specs:
+        parts.append(f"===CURRENT FILE: {path}===\n{content}\n===END CURRENT FILE===\n")
+    return "\n".join(parts)
+
+
+def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
+                            max_attempts, elapsed, summary, total_files, cost,
+                            echoed_model, fail_tail):
+    def fmt_written(items):
+        return ", ".join(f"{p} ({_human_size(sz)})" for p, sz in items) if items else "(none)"
+
+    def fmt_rejected(items):
+        return ", ".join(f"REJECTED: {p} ({reason})" for p, reason in items) if items else "(none)"
+
+    lines = [
+        f"files written : {fmt_written(written)}",
+        f"rejected      : {fmt_rejected(rejected)}",
+    ]
+    if verify_cmd:
+        v = f"verify        : {verify_cmd} → {verify_status}"
+        if verify_status != "SKIPPED":
+            v += f" ({elapsed:.1f}s)   [attempt {attempt}/{max_attempts}]"
+        lines.append(v)
+    else:
+        lines.append("verify        : (skipped — no --verify given)")
+    lines.append(f"worker summary: {summary or f'worker returned {total_files} files, no summary'}")
+    lines.append(f"cost          : ${cost:.6f} · model echoed: {echoed_model}")
+    if verify_status == "FAIL" and fail_tail:
+        lines.append("")
+        lines.append("verify output (last 15 lines):")
+        lines.append(_tail_lines(fail_tail, 15))
+    return "\n".join(lines)
+
+
+def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
+                     verify_cmd: str, retries: int, project_root: Path = None) -> str:
+    """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
+    (≤25 lines) is meant to reach Claude's context — golden rule."""
+    spec = MODELS[model]
+    key = os.environ.get(spec["key"], "")
+    if not key:
+        sys.exit(f"❌ {spec['key']} not set in vault .env")
+
+    project_root = project_root or Path.cwd()
+    rel_files = [f.strip() for f in files_arg.split(",") if f.strip()] if files_arg else []
+    allow_patterns = [p.strip() for p in allow_write_arg.split(",") if p.strip()] if allow_write_arg else []
+    max_attempts = min(max(retries, 0), 2) + 1
+
+    file_specs = []
+    for rel in rel_files:
+        p = project_root / rel
+        content = p.read_text() if p.exists() else "(file does not exist yet)"
+        file_specs.append((rel, content))
+
+    caller = call_gemini if spec["provider"] == "gemini" else call_openai
+    history = [{"role": "user", "content": build_worker_prompt(task, file_specs)}]
+    total_cost = 0.0
+    echoed_model = spec["api"]
+
+    def call_once():
+        nonlocal total_cost, echoed_model
+        answer, echoed, rid, pin, pout, _ = caller(spec, key, history, WORKER_PROTOCOL_SYSTEM)
+        total_cost += pin / 1e6 * spec["cin"] + pout / 1e6 * spec["cout"]
+        echoed_model = echoed or echoed_model
+        return answer
+
+    answer = call_once()
+    files, summary = parse_worker_response(answer)
+    if not files:
+        # Protocol failure: exactly one automatic re-prompt, then fail loudly.
+        history.append({"role": "assistant", "content": answer})
+        history.append({"role": "user",
+                        "content": "your output did not follow the FILE protocol, re-emit"})
+        answer = call_once()
+        files, summary = parse_worker_response(answer)
+        if not files:
+            sys.exit("❌ worker returned no ===FILE=== blocks after one re-prompt "
+                     "— protocol failure")
+    history.append({"role": "assistant", "content": answer})
+
+    written, rejected = _write_files(files, project_root, allow_patterns)
+    total_files = len(files)
+
+    attempt = 1
+    verify_status, elapsed, fail_output = "SKIPPED", 0.0, ""
+    if verify_cmd:
+        while True:
+            ok, output, elapsed = run_verify(verify_cmd, project_root)
+            verify_status = "PASS" if ok else "FAIL"
+            if ok or attempt >= max_attempts:
+                fail_output = output if not ok else ""
+                break
+            history.append({"role": "user",
+                            "content": f"verify failed:\n{_tail_lines(output, 40)}\n"
+                                       f"fix the files and re-emit the full FILE protocol."})
+            attempt += 1
+            answer = call_once()
+            history.append({"role": "assistant", "content": answer})
+            retry_files, retry_summary = parse_worker_response(answer)
+            if retry_summary:
+                summary = retry_summary
+            if retry_files:
+                more_written, more_rejected = _write_files(retry_files, project_root, allow_patterns)
+                written.extend(more_written)
+                rejected.extend(more_rejected)
+                total_files += len(retry_files)
+
+    project, commit = project_info()
+    _write_worker_audit(model, echoed_model, project, commit, written, rejected,
+                        verify_cmd, verify_status, attempt, total_cost)
+
+    return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
+                                  max_attempts, elapsed, summary, total_files, total_cost,
+                                  echoed_model, fail_output)
+
+
+def _write_worker_audit(model, echoed, project, commit, written, rejected,
+                        verify_cmd, verify_status, attempts, cost):
+    AUDIT.parent.mkdir(parents=True, exist_ok=True)
+    with AUDIT.open("a") as fh:
+        fh.write(json.dumps({
+            "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "model_asked": model, "model_echoed": echoed,
+            "session": None, "project": project, "commit": commit,
+            "cost_usd": round(cost, 6), "cached": False,
+            "mode": "worker",
+            "files_written": [p for p, _ in written],
+            "files_rejected": [p for p, _ in rejected],
+            "verify_cmd": verify_cmd, "verify_status": verify_status,
+            "attempts": attempts}) + "\n")
 
 
 def delegate(prompt: str, model: str, session: str = "", system: str = "",
@@ -307,10 +571,20 @@ def main():
     ap.add_argument("--audit", action="store_true", help="print the delegation ledger and exit")
     ap.add_argument("--no-cache", action="store_true",
                     help="bypass the exact-hash cache (always call the provider)")
+    ap.add_argument("--files", default="",
+                    help="worker mode: comma-separated files to read/rewrite")
+    ap.add_argument("--allow-write", default="",
+                    help="worker mode: comma-separated globs (relative to cwd) the "
+                         "worker is allowed to write; no flag = no writes")
+    ap.add_argument("--verify", default="",
+                    help="worker mode: shell command run after writing (never guessed)")
+    ap.add_argument("--retries", type=int, default=1,
+                    help="worker mode: verify-failure retries (default 1, max 2)")
     a = ap.parse_args()
 
     if a.audit:
-        show_audit(); return
+        show_audit()
+        return
     if a.new and a.session:
         f = SESSIONS / f"{a.session}.json"
         f.exists() and f.unlink()
@@ -324,6 +598,11 @@ def main():
         sys.exit("❌ need -p PROMPT or --plan FILE (or --audit / --new)")
 
     model = resolve_model(a.model)
+
+    if a.files:
+        print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries))
+        return
+
     use_cache = not a.no_cache
     try:
         answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache)

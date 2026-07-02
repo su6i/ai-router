@@ -59,7 +59,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 
 | Component | Tech | Responsibility |
 |---|---|---|
-| **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). |
+| **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, worker mode (`--files`: cheap model reads/writes files on disk directly, verified via a caller-supplied command, only a short summary returns to the caller — see private `DELEGATE-TOOL-DESIGN.md`), audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). |
 | **Postgres + pgvector** | `pgvector/pgvector:pg17` | System of record. `usage` (ledger) + `prompt_cache` (RAG). |
 | **ingest** | Python + psycopg | Idempotent load of `audit.log` → `usage` (INSERT … ON CONFLICT DO NOTHING on `response_id`). |
 | **cost dashboard** | Python + psycopg | `amir router cost` — ad-hoc SQL aggregations (run/session/commit/project/model × day/week/month/year). |
