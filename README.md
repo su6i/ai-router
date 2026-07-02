@@ -1,10 +1,11 @@
 # ai-router
 
-[فارسی](README.fa.md)
+[فارسی](README.fa.md) · **[Architecture](docs/ARCHITECTURE.md)**
 
 Cost-accounting LLM gateway: one door to every model, every call tagged,
 budgeted and ledgered. Companion infrastructure for multi-agent projects that
-need **cost-per-task as a SQL query** instead of a guess.
+need **cost-per-task as a SQL query** instead of a guess. Full design:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## What's here
 
@@ -20,30 +21,109 @@ need **cost-per-task as a SQL query** instead of a guess.
 `delegate.py` keeps no state in the repo: cache, audit log and session memory
 live in the vault (`~/.local/share/agent-projects/ai-router/data/`, override
 with `AI_ROUTER_DATA_DIR`); secrets load from `<vault>/secrets/.env` layered
-over `_shared/secrets/.env`. Run the tests with:
+over `_shared/secrets/.env`.
+
+## Usage
+
+### One-shot chat
 
 ```bash
-uv run --with pytest --with httpx pytest
+python3 src/delegate.py --model flash -p "summarize this changelog"
+```
+
+`--model` accepts an alias (default `minimax`; also `flash`, `pro`, `grok`,
+`gemini`, `gemini-lite`, `gemma`, or a full model name — see `ALIASES` in
+`src/delegate.py`). `--plan <file>` reads the prompt from a file instead of
+`-p`; `--out <file>` writes the answer to a file instead of stdout.
+
+### Sessions
+
+```bash
+python3 src/delegate.py --model flash --session refactor-foo \
+  -p "list the functions in src/foo.py that need docstrings"
+python3 src/delegate.py --model flash --session refactor-foo \
+  -p "now write docstrings for the ones you listed"
+```
+
+`--session <name>` remembers the conversation across calls, keyed by name, in
+the vault (never in the repo). `--new` resets a named session before running.
+`--system <text>` sets a persona/system instruction.
+
+### Cache
+
+Identical one-shot calls (same model + system + prompt) hit the exact-hash
+cache automatically — the repeat costs $0 and never touches the provider.
+`--session` calls are never cached (a multi-turn conversation isn't safe to
+serve from a single cached turn). Force a live call with `--no-cache`:
+
+```bash
+python3 src/delegate.py --model flash -p "same prompt as before"            # cache HIT, $0
+python3 src/delegate.py --model flash -p "same prompt as before" --no-cache  # forces a real call
 ```
 
 ### Worker mode
 
 `delegate.py --files` hands a cheap model direct read/write access to files on
 disk instead of returning code as chat text — the generated code never enters
-the caller's context, only a short (≤25-line) summary does:
+the caller's context, only a short summary does:
 
 ```bash
 python3 src/delegate.py --model flash \
   --files "src/foo.py,tests/test_foo.py" \
   --allow-write "src/**,tests/**" \
   --verify "uv run pytest -q" \
+  --retries 1 \
   -p "add a docstring to foo()"
 ```
 
-`--allow-write` (globs relative to cwd) gates every write — no flag means no
-writes. `--verify` is a caller-supplied shell command run after writing
-(never guessed). Full protocol: `docs/ARCHITECTURE.md` links to the design
-doc; wire format lives in the private `DELEGATE-TOOL-DESIGN.md` (vault).
+- `--files` — comma-separated files the worker reads and may rewrite.
+- `--allow-write` — comma-separated globs (relative to cwd) gating every
+  write; no flag means no writes.
+- `--verify` — caller-supplied shell command run after writing (never
+  guessed).
+- `--retries` — verify-failure retries (default 1, max 2); the worker gets
+  the verify output back and one more attempt per retry.
+
+Output — the only thing that reaches the caller's context:
+
+```
+files written : src/foo.py (312B)
+rejected      : (none)
+verify        : uv run pytest -q → PASS (1.2s)   [attempt 1/2]
+worker summary: added a one-line docstring to foo()
+cost          : $0.000421 · model echoed: deepseek-v4-flash
+```
+
+Full wire protocol: the private `DELEGATE-TOOL-DESIGN.md` (vault).
+
+### Audit
+
+```bash
+python3 src/delegate.py --audit
+```
+
+Prints `audit.log` (one JSON line per call: model asked/echoed, session,
+project, commit, cost, cached; worker-mode calls add files written/rejected,
+verify command/status, attempts).
+
+## Models
+
+From `MODELS` in `src/delegate.py` (cost per 1M tokens):
+
+| `--model` | API model | Provider | Cost in / out | Role |
+| --- | --- | --- | --- | --- |
+| `minimax` | `MiniMax-M3` | MiniMax | $0.30 / $1.20 | Default — one-time prepaid credit, spend first |
+| `flash` | `deepseek-v4-flash` | DeepSeek | $0.14 / $0.28 | General grunt work — implementation, refactor, tests, boilerplate |
+| `pro` | `deepseek-v4-pro` | DeepSeek | $0.435 / $0.87 | Reasoner — escalation target when `flash` fails or needs deeper reasoning |
+| `grok` | `grok-4.3` | xAI | $1.25 / $2.50 | Second opinion / current-events knowledge — not for routine work |
+| `gemini` | `gemini-2.5-flash` | Google (free tier) | $0 / $0 | Free-tier grunt work — commit messages, format conversion, categorization |
+| `gemini-lite` | `gemini-2.5-flash-lite` | Google (free tier) | $0 / $0 | Free-tier, lighter/faster variant of `gemini` |
+| `gemma` | `gemma-4-31b-it` | Google (free tier) | $0 / $0 | Free-tier, open-weight model |
+
+Priority order and full routing rationale (MiniMax credit-exhaustion
+fallback, why Claude is never in this router, provider vs. subscription-CLI
+distinction): `STRATEGY.md` and `ROLES.md` in
+`~/.local/share/agent-projects/_router/` (vault, not in this repo).
 
 ## Status
 
@@ -58,3 +138,13 @@ docker compose up -d
 ```
 
 Requires Docker (tested with Colima on macOS).
+
+## Testing
+
+```bash
+cd /Users/su6i/@-github/ai-router
+uv run --with pytest --with httpx pytest
+```
+
+Expected: `28 passed` (`tests/test_delegate_cache.py` +
+`tests/test_delegate_worker.py`).

@@ -7,6 +7,16 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Docs
+
+- README.md/README.fa.md rewritten with a real Usage guide (one-shot chat,
+  sessions, cache behavior + `--no-cache`, worker mode with a full
+  `--files`/`--allow-write`/`--verify`/`--retries` example and the actual
+  output shape, `--audit`), a Models table sourced from `MODELS` in
+  `src/delegate.py` (provider, cost in/out, role), a prominent link to
+  `docs/ARCHITECTURE.md` at the top of the file, and a Testing section with
+  an absolute-path command.
+
 ### Added
 
 - **Worker mode (`delegate.py --files`)** — a cheap model can now read and
