@@ -34,10 +34,10 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
       │               │        │ pro, minimax     │            │ fable5           │
       └───────────────┘        └──────────────────┘            └──────────────────┘
                                          │
-                       delegate.py (single gateway, provider-echoed proof)
+                       src/delegate.py (single gateway, provider-echoed proof)
                                          │  appends one JSON line per call
                                          ▼
-                              ~/.local/share/.../_router/audit.log   (source ledger)
+                    ~/.local/share/.../ai-router/data/audit.log   (source ledger)
                                          │  ingest (idempotent, keyed by response_id)
                                          ▼
         ┌──────────────────────────────────────────────────────────────────────┐
@@ -59,7 +59,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 
 | Component | Tech | Responsibility |
 |---|---|---|
-| **delegate.py** | Python + httpx | Single LLM gateway. Provider-echoed proof, cost calc, session memory, audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). |
+| **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). |
 | **Postgres + pgvector** | `pgvector/pgvector:pg17` | System of record. `usage` (ledger) + `prompt_cache` (RAG). |
 | **ingest** | Python + psycopg | Idempotent load of `audit.log` → `usage` (INSERT … ON CONFLICT DO NOTHING on `response_id`). |
 | **cost dashboard** | Python + psycopg | `amir router cost` — ad-hoc SQL aggregations (run/session/commit/project/model × day/week/month/year). |
