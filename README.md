@@ -12,7 +12,8 @@ need **cost-per-task as a SQL query** instead of a guess. Full design:
 | Path | What |
 | --- | --- |
 | `src/delegate.py` | Single LLM gateway (grunt-work delegation) — provider-echoed proof, exact-hash cache, session memory, worker mode (`--files`), audit ledger |
-| `tests/` | pytest suite for `src/delegate.py` |
+| `mcp/server.py` | MCP-lite server — exposes `delegate_research`/`delegate_worker` as MCP tools over stdio, so any MCP host can discover cheap delegation without a CLI |
+| `tests/` | pytest suite for `src/delegate.py` and `mcp/server.py` |
 | `docs/ARCHITECTURE.md` | Full design: Postgres + pgvector schema, exact-hash prompt cache, Prometheus/Grafana observability |
 | `docker-compose.yml` | pgvector Postgres + monitoring stack |
 | `.env.example` | Required environment variables (copy, fill, keep out of git) |
@@ -127,6 +128,36 @@ alias list). If the second argument starts with `-`, everything is passed to
 `delegate.py` unchanged, so every flag works. Overrides: `AI_ROUTER_REPO`,
 `AI_ROUTER_PYTHON`.
 
+### MCP server
+
+`mcp/server.py` exposes the same `delegate.py` (same ledger, cache, caps,
+secrets path) as two MCP tools, so any MCP host — Claude Code first — can
+discover and use cheap delegation mid-task without anyone remembering to ask.
+Register it once, user scope, so it's available in every project:
+
+```bash
+claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/mcp/server.py
+```
+
+Two tools only, both capped — no uncapped chat tool, ever:
+
+- **`delegate_research`** — fact lookup / live-data checks / doc
+  verification (default model `grok` = live web/X search). Answer is capped
+  by `max_output_tokens` (default 500, max 2000) — a low default, not a
+  promise.
+- **`delegate_worker`** — grunt coding work (default model `gemini`). Same
+  contract as CLI worker mode: `files`/`allow_write`/`verify`/`retries`
+  mirror `--files`/`--allow-write`/`--verify`/`--retries`; `workdir` (an
+  absolute path) is required because the MCP server process does not
+  inherit the caller's cwd. Returns only the existing ≤25-line summary —
+  generated code never crosses the wire.
+
+Claude models stay banned inside delegate (unchanged). Audit rows from MCP
+calls get `via: "mcp"` (an extra field alongside the existing columns) so
+cost-per-door is a query; `r()`/CLI rows stay as-is (the field is absent,
+not null). Transport: stdio only, local machine, no HTTP/SSE, no auth (v1
+non-goal).
+
 ## Models
 
 From `MODELS` in `src/delegate.py` (cost per 1M tokens):
@@ -167,5 +198,6 @@ cd /Users/su6i/@-github/ai-router
 uv run --with pytest --with httpx pytest
 ```
 
-Expected: `28 passed` (`tests/test_delegate_cache.py` +
-`tests/test_delegate_worker.py`).
+Expected: `48 passed` (`tests/test_delegate_cache.py` +
+`tests/test_delegate_worker.py` + `tests/test_r_wrapper.py` +
+`tests/test_mcp_server.py`).

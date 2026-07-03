@@ -9,6 +9,24 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **`mcp/server.py` — MCP-lite server.** Hand-rolled stdio JSON-RPC server
+  (stdlib-only, no new dependency; protocol revision 2025-11-25) exposing
+  `delegate.py` as two capped MCP tools: `delegate_research` (fact lookup,
+  answer capped by `max_output_tokens`, default model `grok`) and
+  `delegate_worker` (grunt coding work, same `--files`/`--allow-write`/
+  `--verify`/`--retries` contract as CLI worker mode plus a required
+  `workdir`, default model `gemini`). No uncapped chat tool — the golden
+  rule (cheap-model output must never flood the caller's context) holds for
+  both doors. Register once at user scope:
+  `claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/mcp/server.py`.
+  `delegate.py` gained an optional `max_output_tokens: int = 8192` parameter
+  threaded into `call_openai`/`call_gemini` (gemini: previously uncapped,
+  now defaults to the same cap as openai; CLI/`r()` unaffected — no new
+  flag) and an optional `via` parameter on `delegate()`/`worker_delegate()`
+  so MCP-originated audit rows carry `via: "mcp"` (the field is absent, not
+  null, for `r()`/CLI rows). Tests: `tests/test_mcp_server.py`, subprocess
+  the server over real stdio with both providers stubbed, zero paid calls.
+
 - **`shell/r.sh` — the `r()` shell wrapper.** One `source` line in a shell
   rc gives `r <model> <prompt…>` (chat), `r <model> --<flags…>` (raw
   passthrough, worker mode included) and `r audit` from any directory, so

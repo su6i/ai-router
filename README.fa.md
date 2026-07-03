@@ -12,7 +12,8 @@
 | مسیر | توضیح |
 | --- | --- |
 | `src/delegate.py` | درگاه واحد LLM برای خرکاری — اثباتِ echo‌شده از سمت provider، کشِ exact-hash، حافظه‌ی session، worker mode (`--files`)، دفترِ audit |
-| `tests/` | مجموعه‌ی تست pytest برای `src/delegate.py` |
+| `mcp/server.py` | سرور MCP-lite — `delegate_research`/`delegate_worker` را به‌عنوان ابزارِ MCP روی stdio می‌گشاید، پس هر host ای که MCP می‌فهمد بدون CLI هم delegationِ ارزان را کشف می‌کند |
+| `tests/` | مجموعه‌ی تست pytest برای `src/delegate.py` و `mcp/server.py` |
 | `docs/ARCHITECTURE.md` | طراحی کامل: اسکیمای Postgres + pgvector، کش exact-hash پرامپت، مانیتورینگ Prometheus/Grafana |
 | `docker-compose.yml` | Postgres (pgvector) + پشته‌ی مانیتورینگ |
 | `.env.example` | متغیرهای محیطی لازم (کپی کنید، پر کنید، هرگز commit نکنید) |
@@ -124,6 +125,34 @@ r audit                                               # print the ledger
 می‌شود، پس همه‌ی فلگ‌ها کار می‌کنند. Override ها: `AI_ROUTER_REPO`،
 `AI_ROUTER_PYTHON`.
 
+### سرور MCP
+
+`mcp/server.py` همان `delegate.py` (همان دفترکل، کش، سقف، مسیرِ secretها) را
+به‌عنوان دو ابزارِ MCP می‌گشاید، پس هر MCP host ای — اول از همه Claude Code —
+می‌تواند delegationِ ارزان را وسطِ کار کشف و استفاده کند، بدون این‌که کسی یادش
+بماند بخواهد. یک‌بار با scope کاربر ثبت کن تا در همه‌ی پروژه‌ها در دسترس باشد:
+
+```bash
+claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/mcp/server.py
+```
+
+فقط دو ابزار، هر دو سقف‌دار — هیچ‌وقت ابزار چتِ بدون سقف:
+
+- **`delegate_research`** — جست‌وجوی واقعیت / چکِ داده‌ی زنده / راستی‌آزمایی
+  سند (مدلِ پیش‌فرض `grok` = جست‌وجوی زنده‌ی وب/X). پاسخ با `max_output_tokens`
+  سقف می‌خورد (پیش‌فرض ۵۰۰، سقف ۲۰۰۰) — یک پیش‌فرضِ پایین، نه یک قول.
+- **`delegate_worker`** — خرکاریِ کدنویسی (مدلِ پیش‌فرض `gemini`). همان قرارداد
+  worker mode در CLI: `files`/`allow_write`/`verify`/`retries` معادلِ
+  `--files`/`--allow-write`/`--verify`/`--retries` هستند؛ `workdir` (مسیرِ
+  مطلق) اجباری است چون فرآیندِ سرورِ MCP، cwd فراخواننده را ارث نمی‌برد. فقط
+  همان خلاصه‌ی ≤۲۵ خطیِ قبلی برمی‌گردد — کدِ تولیدی هرگز از سیم رد نمی‌شود.
+
+مدل‌های Claude همچنان داخل delegate ممنوع‌اند (بدونِ تغییر). ردیف‌های audit از
+فراخوانی‌های MCP یک فیلدِ `via: "mcp"` می‌گیرند (فیلدِ اضافه‌ای کنارِ ستون‌های
+قبلی) تا هزینه-به-ازای-هر-در یک کوئری باشد؛ ردیف‌های `r()`/CLI همان‌طور
+می‌مانند (فیلد غایب است، نه null). Transport: فقط stdio، فقط ماشینِ محلی، بدون
+HTTP/SSE، بدون auth (خارج از scope نسخه‌ی ۱).
+
 ## مدل‌ها
 
 از `MODELS` در `src/delegate.py` (هزینه به ازای هر ۱ میلیون توکن):
@@ -164,5 +193,6 @@ cd /Users/su6i/@-github/ai-router
 uv run --with pytest --with httpx pytest
 ```
 
-نتیجه‌ی انتظاری: `28 passed` (`tests/test_delegate_cache.py` +
-`tests/test_delegate_worker.py`).
+نتیجه‌ی انتظاری: `48 passed` (`tests/test_delegate_cache.py` +
+`tests/test_delegate_worker.py` + `tests/test_r_wrapper.py` +
+`tests/test_mcp_server.py`).

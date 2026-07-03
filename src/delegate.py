@@ -205,24 +205,28 @@ def cache_put(key, model, prompt, response):
 
 
 def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
-                  cache, cost, dt_s, cached=False):
+                  cache, cost, dt_s, cached=False, via=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "model_asked": model, "model_echoed": echoed, "id": rid,
+        "session": session or None, "project": project, "commit": commit,
+        "in": pin, "out": pout, "cache": cache,
+        "cost_usd": round(cost, 6), "latency_s": round(dt_s, 2),
+        "cached": cached,
+    }
+    if via is not None:
+        rec["via"] = via
     with AUDIT.open("a") as fh:
-        fh.write(json.dumps({
-            "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "model_asked": model, "model_echoed": echoed, "id": rid,
-            "session": session or None, "project": project, "commit": commit,
-            "in": pin, "out": pout, "cache": cache,
-            "cost_usd": round(cost, 6), "latency_s": round(dt_s, 2),
-            "cached": cached}) + "\n")
+        fh.write(json.dumps(rec) + "\n")
 
 
 # ---- provider calls ----------------------------------------------------------
-def call_openai(spec, key, history, system):
+def call_openai(spec, key, history, system, max_output_tokens: int = 8192):
     msgs = ([{"role": "system", "content": system}] if system else []) + history
     r = httpx.post(f"{spec['url']}/chat/completions", timeout=180,
                    headers={"Authorization": f"Bearer {key}"},
-                   json={"model": spec["api"], "messages": msgs, "max_tokens": 8192})
+                   json={"model": spec["api"], "messages": msgs, "max_tokens": max_output_tokens})
     r.raise_for_status()
     d = r.json()
     u = d.get("usage", {})
@@ -231,11 +235,11 @@ def call_openai(spec, key, history, system):
             (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
 
 
-def call_gemini(spec, key, history, system):
+def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
     # Gemini roles: user / model. Map our history (user/assistant) accordingly.
     contents = [{"role": "model" if m["role"] == "assistant" else "user",
                  "parts": [{"text": m["content"]}]} for m in history]
-    body = {"contents": contents}
+    body = {"contents": contents, "generationConfig": {"maxOutputTokens": max_output_tokens}}
     if system:
         if spec["api"].startswith("gemma") and contents:
             # Gemma models reject systemInstruction; fold it into the first user turn
@@ -408,7 +412,8 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
 
 
 def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
-                     verify_cmd: str, retries: int, project_root: Path = None) -> str:
+                     verify_cmd: str, retries: int, project_root: Path = None,
+                     via: str | None = None) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
     spec = MODELS[model]
@@ -482,7 +487,7 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
 
     project, commit = project_info()
     _write_worker_audit(model, echoed_model, project, commit, written, rejected,
-                        verify_cmd, verify_status, attempt, total_cost)
+                        verify_cmd, verify_status, attempt, total_cost, via=via)
 
     return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                                   max_attempts, elapsed, summary, total_files, total_cost,
@@ -490,23 +495,28 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
 
 
 def _write_worker_audit(model, echoed, project, commit, written, rejected,
-                        verify_cmd, verify_status, attempts, cost):
+                        verify_cmd, verify_status, attempts, cost, via=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "model_asked": model, "model_echoed": echoed,
+        "session": None, "project": project, "commit": commit,
+        "cost_usd": round(cost, 6), "cached": False,
+        "mode": "worker",
+        "files_written": [p for p, _ in written],
+        "files_rejected": [p for p, _ in rejected],
+        "verify_cmd": verify_cmd, "verify_status": verify_status,
+        "attempts": attempts,
+    }
+    if via is not None:
+        rec["via"] = via
     with AUDIT.open("a") as fh:
-        fh.write(json.dumps({
-            "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "model_asked": model, "model_echoed": echoed,
-            "session": None, "project": project, "commit": commit,
-            "cost_usd": round(cost, 6), "cached": False,
-            "mode": "worker",
-            "files_written": [p for p, _ in written],
-            "files_rejected": [p for p, _ in rejected],
-            "verify_cmd": verify_cmd, "verify_status": verify_status,
-            "attempts": attempts}) + "\n")
+        fh.write(json.dumps(rec) + "\n")
 
 
 def delegate(prompt: str, model: str, session: str = "", system: str = "",
-             use_cache: bool = True) -> str:
+             use_cache: bool = True, max_output_tokens: int = 8192,
+             via: str | None = None) -> str:
     spec = MODELS[model]
     key = os.environ.get(spec["key"], "")
     if not key:
@@ -522,7 +532,7 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
         if hit is not None:
             print(f"⚡ cache HIT ({model}, {spec['api']}) — $0.000000, 0.00s")
             _write_audit(model, spec["api"], None, session, project, commit,
-                         0, 0, 0, 0.0, 0.0, cached=True)
+                         0, 0, 0, 0.0, 0.0, cached=True, via=via)
             return hit
 
     history = load_history(session) if session else []
@@ -534,7 +544,8 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
 
     t0 = time.time()
     caller = call_gemini if spec["provider"] == "gemini" else call_openai
-    answer, echoed, rid, pin, pout, cache = caller(spec, key, history, system)
+    answer, echoed, rid, pin, pout, cache = caller(
+        spec, key, history, system, max_output_tokens=max_output_tokens)
     dt_s = time.time() - t0
     cost = pin / 1e6 * spec["cin"] + pout / 1e6 * spec["cout"]
 
@@ -554,7 +565,7 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
         cache_put(cache_key, model, prompt, answer)
 
     _write_audit(model, echoed, rid, session, project, commit, pin, pout,
-                 cache, cost, dt_s, cached=False)
+                 cache, cost, dt_s, cached=False, via=via)
     return answer
 
 

@@ -60,6 +60,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 | Component | Tech | Responsibility |
 |---|---|---|
 | **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, worker mode (`--files`: cheap model reads/writes files on disk directly, verified via a caller-supplied command, only a short summary returns to the caller — see private `DELEGATE-TOOL-DESIGN.md`), audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). |
+| **mcp/server.py** | Python, stdlib-only | Hand-rolled stdio JSON-RPC MCP server (protocol revision 2025-11-25) exposing the same `delegate.py` as two capped MCP tools (`delegate_research`, `delegate_worker`) — see private `MCP-SERVER-DESIGN.md`. Registered once at user scope so every MCP host (Claude Code first) can discover cheap delegation without a CLI call. No uncapped chat tool; ledger rows tag `via: "mcp"`. |
 | **Postgres + pgvector** | `pgvector/pgvector:pg17` | System of record. `usage` (ledger) + `prompt_cache` (RAG). |
 | **ingest** | Python + psycopg | Idempotent load of `audit.log` → `usage` (INSERT … ON CONFLICT DO NOTHING on `response_id`). |
 | **cost dashboard** | Python + psycopg | `amir router cost` — ad-hoc SQL aggregations (run/session/commit/project/model × day/week/month/year). |

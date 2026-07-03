@@ -73,7 +73,7 @@ def test_cache_put_fails_open_on_bad_db():
 def test_delegate_cache_miss_then_hit(monkeypatch):
     calls = {"n": 0}
 
-    def fake_call_gemini(spec, key, history, system):
+    def fake_call_gemini(spec, key, history, system, max_output_tokens=8192):
         calls["n"] += 1
         return ("cached answer", spec["api"], "resp-1", 10, 5, 0)
 
@@ -91,7 +91,7 @@ def test_delegate_cache_miss_then_hit(monkeypatch):
 def test_delegate_no_cache_flag_always_calls_provider(monkeypatch):
     calls = {"n": 0}
 
-    def fake_call_gemini(spec, key, history, system):
+    def fake_call_gemini(spec, key, history, system, max_output_tokens=8192):
         calls["n"] += 1
         return ("answer", spec["api"], "resp", 1, 1, 0)
 
@@ -105,7 +105,7 @@ def test_delegate_no_cache_flag_always_calls_provider(monkeypatch):
 def test_delegate_session_bypasses_cache(monkeypatch):
     calls = {"n": 0}
 
-    def fake_call_gemini(spec, key, history, system):
+    def fake_call_gemini(spec, key, history, system, max_output_tokens=8192):
         calls["n"] += 1
         return (f"answer {calls['n']}", spec["api"], "resp", 1, 1, 0)
 
@@ -117,7 +117,7 @@ def test_delegate_session_bypasses_cache(monkeypatch):
 
 
 def test_delegate_writes_audit_line_with_cached_flag(monkeypatch):
-    def fake_call_gemini(spec, key, history, system):
+    def fake_call_gemini(spec, key, history, system, max_output_tokens=8192):
         return ("answer", spec["api"], "resp", 1, 1, 0)
 
     monkeypatch.setattr(d, "call_gemini", fake_call_gemini)
