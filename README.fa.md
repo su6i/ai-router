@@ -103,6 +103,27 @@ python3 src/delegate.py --audit
 session، project، commit، هزینه، cached؛ فراخوانی‌های worker mode هم
 files written/rejected، دستور/وضعیتِ verify، تعداد attempt را اضافه می‌کنند).
 
+### Wrapper شل: `r()`
+
+یک بار `shell/r.sh` را از rc شل خودت (bash یا zsh) بارگذاری کن:
+
+```bash
+echo 'source /Users/su6i/@-github/ai-router/shell/r.sh' >> ~/.zshrc
+```
+
+بعد از هر دایرکتوری، بدون واردشدن به context هیچ ایجنتی، کار را delegate کن:
+
+```bash
+r flash "write a regex that matches ISO-8601 dates"   # chat (words → one -p)
+r gemini --files src/calc.py --allow-write "src/**" --verify "pytest -q" -p "fix the bug"
+r audit                                               # print the ledger
+```
+
+آرگومان اول همیشه مدل است (نام ناشناخته با لیست aliasها خطای بلند می‌گیرد).
+اگر آرگومان دوم با `-` شروع شود، همه‌چیز بدون تغییر به `delegate.py` پاس
+می‌شود، پس همه‌ی فلگ‌ها کار می‌کنند. Override ها: `AI_ROUTER_REPO`،
+`AI_ROUTER_PYTHON`.
+
 ## مدل‌ها
 
 از `MODELS` در `src/delegate.py` (هزینه به ازای هر ۱ میلیون توکن):

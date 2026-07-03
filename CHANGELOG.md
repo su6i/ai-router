@@ -7,6 +7,17 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+
+- **`shell/r.sh` — the `r()` shell wrapper.** One `source` line in a shell
+  rc gives `r <model> <prompt…>` (chat), `r <model> --<flags…>` (raw
+  passthrough, worker mode included) and `r audit` from any directory, so
+  grunt work reaches `delegate.py` without entering an agent's context.
+  The wrapper holds no routing/cost logic; first argument is always the
+  model and unknown names fail loudly. Env overrides `AI_ROUTER_REPO` /
+  `AI_ROUTER_PYTHON`; tested against a stub delegate on both bash and zsh
+  (`tests/test_r_wrapper.py`, zero paid calls).
+
 ### Docs
 
 - README.md/README.fa.md rewritten with a real Usage guide (one-shot chat,

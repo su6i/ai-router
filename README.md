@@ -106,6 +106,27 @@ Prints `audit.log` (one JSON line per call: model asked/echoed, session,
 project, commit, cost, cached; worker-mode calls add files written/rejected,
 verify command/status, attempts).
 
+### Shell wrapper: `r()`
+
+Source `shell/r.sh` once from your shell rc (bash or zsh):
+
+```bash
+echo 'source /Users/su6i/@-github/ai-router/shell/r.sh' >> ~/.zshrc
+```
+
+Then delegate from any directory without touching an agent's context:
+
+```bash
+r flash "write a regex that matches ISO-8601 dates"   # chat (words → one -p)
+r gemini --files src/calc.py --allow-write "src/**" --verify "pytest -q" -p "fix the bug"
+r audit                                               # print the ledger
+```
+
+The first argument is always the model (unknown names fail loudly with the
+alias list). If the second argument starts with `-`, everything is passed to
+`delegate.py` unchanged, so every flag works. Overrides: `AI_ROUTER_REPO`,
+`AI_ROUTER_PYTHON`.
+
 ## Models
 
 From `MODELS` in `src/delegate.py` (cost per 1M tokens):
