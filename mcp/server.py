@@ -40,9 +40,12 @@ TOOLS = [
     {
         "name": "delegate_research",
         "description": ("Ask a cheap/fast model a fact-lookup or live-data question "
-                         "(default grok = live web/X search). Answer is capped at "
-                         "max_output_tokens. Use for research, doc verification, "
-                         "current-knowledge checks — never for bulk chat."),
+                         "(default grok = live web/X search). USE THIS INSTEAD of "
+                         "WebSearch/WebFetch or answering from memory whenever the "
+                         "question is: a current fact, a version/license/API check, "
+                         "or doc verification — a ~$0.003 call beats burning premium "
+                         "context. Answer is capped at max_output_tokens. Never for "
+                         "bulk chat."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -56,11 +59,17 @@ TOOLS = [
     },
     {
         "name": "delegate_worker",
-        "description": ("Hand a cheap model direct read/write access to files on disk "
-                         "for grunt coding work (implementation, refactors, tests, "
-                         "boilerplate). The generated code never enters the caller's "
-                         "context — only a short (<=25-line) summary is returned. "
-                         "Claude models are never reachable here."),
+        "description": ("Delegate grunt coding to a cheap model that reads and writes "
+                         "the files on disk ITSELF — file contents never enter your "
+                         "context; only a <=25-line summary comes back. USE THIS "
+                         "INSTEAD OF Edit/Write whenever the task is: new "
+                         "implementation over ~40 lines, test files, boilerplate, or "
+                         "the same mechanical change across 2+ files. Golden rule: "
+                         "call it BEFORE reading the target files — pass paths, not "
+                         "contents. Model ladder: gemini (free, default) -> flash/pro "
+                         "(DeepSeek) when gemini fails verify. Always pass verify "
+                         "(e.g. 'uv run pytest -q') when the repo has tests. Claude "
+                         "models are never reachable here."),
         "inputSchema": {
             "type": "object",
             "properties": {

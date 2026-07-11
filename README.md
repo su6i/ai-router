@@ -158,6 +158,24 @@ cost-per-door is a query; `r()`/CLI rows stay as-is (the field is absent,
 not null). Transport: stdio only, local machine, no HTTP/SSE, no auth (v1
 non-goal).
 
+### Delegation triggers (making the architect actually call the tools)
+
+Tools that merely exist don't get called — the premium architect model
+defaults to writing code itself. Two layers push it toward the worker:
+
+- **Imperative tool descriptions** — both MCP descriptions say *when to use
+  the tool instead of* Edit/Write or WebSearch (implementation over ~40
+  lines, test files, mechanical multi-file changes; live facts / doc
+  checks), plus the golden rule: decide **before** reading the target files
+  — pass paths, not contents.
+- **`hooks/delegate_nudge.py`** — a PreToolUse hook (registered globally in
+  `~/.claude/settings.json`, matcher `Write|Edit`) that denies the *first*
+  large code write (> 40 new lines, code suffixes only; docs, config and
+  scratchpad files exempt) with a reminder to call `delegate_worker`. A
+  second attempt on the same file in the same session passes — the
+  deliberate escape hatch for architecture-critical code. Fail-open: any
+  hook error allows the write.
+
 ## Models
 
 From `MODELS` in `src/delegate.py` (cost per 1M tokens):

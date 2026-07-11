@@ -9,6 +9,22 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **Delegation triggers — imperative tool descriptions + PreToolUse nudge
+  hook.** The MCP tools existed but the premium architect model never
+  called them; two layers now push it toward the worker. (1) Both tool
+  descriptions in `mcp/server.py` are rewritten imperatively: they state
+  when to use the tool *instead of* Edit/Write or WebSearch (implementation
+  over ~40 lines, test files, mechanical multi-file changes; live facts /
+  doc verification) and carry the golden rule — decide before reading the
+  target files, pass paths not contents. (2) New `hooks/delegate_nudge.py`,
+  a Claude Code PreToolUse hook (registered globally, matcher `Write|Edit`)
+  that denies the first large code write (> 40 new lines, code suffixes
+  only; docs/config/scratchpad exempt) with a delegation reminder; a second
+  attempt on the same file passes (escape hatch for architecture-critical
+  code); fail-open on any hook error. The routing policy itself moved from
+  a one-line hint to a decision protocol in the global `~/.claude/CLAUDE.md`
+  (Cost Routing section).
+
 - **`mcp/server.py` — MCP-lite server.** Hand-rolled stdio JSON-RPC server
   (stdlib-only, no new dependency; protocol revision 2025-11-25) exposing
   `delegate.py` as two capped MCP tools: `delegate_research` (fact lookup,
