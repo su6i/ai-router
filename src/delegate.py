@@ -41,6 +41,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import logging
 import time
 import unicodedata
 import datetime as dt
@@ -53,6 +54,8 @@ GIT_TIMEOUT = 3
 SQLITE_TIMEOUT = 5
 CACHE_MAX_ROWS = 5000
 CACHE_MAX_AGE_DAYS = 90
+
+logger = logging.getLogger("ai_router")
 
 class ProviderError(Exception):
     def __init__(self, model, status, short_reason):
@@ -108,6 +111,7 @@ def _vault_root() -> Path:
 AGENT_PROJECTS = _agent_projects_root()
 VAULT = _vault_root()
 DATA_DIR = VAULT / "data"
+DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 SECRETS_DIR = VAULT / "secrets"
 AUDIT = DATA_DIR / "audit.log"
 BUDGETS = DATA_DIR / "budgets.json"
@@ -198,16 +202,16 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
     has_budgets = BUDGETS.exists()
     if not has_budgets:
         if not print_estimate:
-            print("⚠️  no budgets.json — spend uncapped", file=sys.stderr)
+            logger.info("⚠️  no budgets.json — spend uncapped")
         budgets = {}
     else:
         try:
             budgets = json.loads(BUDGETS.read_text())
             if not budgets and not print_estimate:
-                print("⚠️  no budgets.json — spend uncapped", file=sys.stderr)
+                logger.info("⚠️  no budgets.json — spend uncapped")
         except Exception:
             if not print_estimate:
-                print("⚠️  budgets.json is invalid JSON — spend uncapped", file=sys.stderr)
+                logger.info("⚠️  budgets.json is invalid JSON — spend uncapped")
             budgets = {}
 
     monthly_cap = budgets.get("monthly_usd")
@@ -302,11 +306,11 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
         if cap is not None:
             if spent > cap:
                 if model_spec and model_spec.get("cin") == 0 and model_spec.get("cout") == 0:
-                    print(f"⚠️  BUDGET WARNING: {name} cap exceeded (${spent:.6f} > ${cap:.2f}) but proceeding because model is FREE.", file=sys.stderr)
+                    logger.warning(f"⚠️  BUDGET WARNING: {name} cap exceeded (${spent:.6f} > ${cap:.2f}) but proceeding because model is FREE.")
                 else:
                     sys.exit(f"❌ BUDGET ABORT: {name} cap exceeded (${spent:.6f} > ${cap:.2f})")
             elif spent >= cap * 0.8:
-                print(f"⚠️  BUDGET WARNING: {name} spend at ${spent:.6f} (cap: ${cap:.2f})", file=sys.stderr)
+                logger.warning(f"⚠️  BUDGET WARNING: {name} spend at ${spent:.6f} (cap: ${cap:.2f})")
 
     _check("monthly_usd", spent_month, monthly_cap)
     _check("weekly_usd", spent_week, weekly_cap)
@@ -325,7 +329,7 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
             if count > cap:
                 sys.exit(f"❌ BUDGET ABORT: daily call cap exceeded for {current_channel} ({count} > {cap})")
             elif count >= cap * 0.8:
-                print(f"⚠️  BUDGET WARNING: {current_channel} daily calls at {count} (cap: {cap})", file=sys.stderr)
+                logger.warning(f"⚠️  BUDGET WARNING: {current_channel} daily calls at {count} (cap: {cap})")
 
 
 def show_cost(since: str = None, by: str = "model"):
@@ -616,9 +620,12 @@ def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
             um.get("cachedContentTokenCount", 0), None)
 
 
-# ---- worker mode (--files) — SPEC v1, DELEGATE-TOOL-DESIGN.md ---------------
 # Sentinel-line protocol (not markdown fences: file content may itself contain
 # backticks). Full-file replacement only — cheap models are unreliable with diffs.
+# Rationale: Markdown code fences fail when the target file contains fences itself.
+# Known limit: A literal `===END FILE===` line inside the target code would truncate
+# the parse. This is accepted because worker files are code, so a sentinel collision
+# is purely theoretical and extremely unlikely in practice.
 WORKER_PROTOCOL_SYSTEM = """You are a coding worker. You are given a task and the \
 current content of one or more files. Make the requested change and respond using \
 EXACTLY this format — no markdown code fences, no commentary outside these markers:
@@ -725,6 +732,8 @@ def run_verify(cmd: str, cwd: Path):
     """Run --verify. Output is captured, NEVER printed in full. Returns (ok, output, elapsed_s)."""
     t0 = time.time()
     try:
+        # shell=True is deliberate and required to support shell pipelines (e.g., cmd1 | cmd2)
+        # in verify commands. The caller is trusted by design, so shlex/shell=False is rejected.
         r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
                            text=True, timeout=VERIFY_TIMEOUT)
         ok = r.returncode == 0
@@ -918,13 +927,13 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
         return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
     except ProviderError as e:
         if model == "minimax" and e.status in (401, 402, 429):
-            print(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
+            logger.warning(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
                   f"Per policy MiniMax is NOT recharged; falling back to DeepSeek flash. "
-                  f"Make 'flash' your default from now on.", file=sys.stderr)
+                  f"Make 'flash' your default from now on.")
             return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
         if model == "gemini" and e.status == 429:
-            print("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
-                  "Spend is now NONZERO.", file=sys.stderr)
+            logger.warning("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
+                  "Spend is now NONZERO.")
             return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
         raise
 
@@ -966,7 +975,7 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
 
     print(f"→ delegating to {model} ({spec['api']}) via {spec['url']}"
           + (f"  [session: {session}, {len(history)} msgs]" if session else ""))
-    print(f"  key: {key[:6]}...{key[-4:]} (len={len(key)})")
+    logger.debug(f"key: {key[:6]}...{key[-4:]} (len={len(key)})")
 
     t0 = time.time()
     caller = call_gemini if spec["provider"] == "gemini" else call_openai
@@ -980,14 +989,7 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
     cin_cached = spec.get("cin_cached", cin)
     cost = (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * spec["cout"]
 
-    print("\n===== PROOF (from provider's server) =====")
-    print("model echoed :", echoed)
-    print("response id  :", rid)
-    hit_rate = f" ({cache/pin*100:.1f}%)" if pin > 0 else ""
-    print(f"usage        : in={pin} out={pout} cache={cache}{hit_rate}")
-    print("cost         : $%.6f%s" % (cost, "  (FREE tier)" if spec["cin"] == 0 else ""))
-    print("latency      : %.2fs" % dt_s)
-    print("==========================================\n")
+    print(format_proof(echoed, rid, pin, pout, cache, cost, dt_s, spec["cin"] == 0))
 
     if session:
         history.append({"role": "assistant", "content": answer})
@@ -1001,6 +1003,31 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
     return answer
 
 
+def format_proof(echoed: str, rid: str, pin: int, pout: int, cache: int, cost: float, dt_s: float, is_free: bool) -> str:
+    hit_rate = f" ({cache/pin*100:.1f}%)" if pin > 0 else ""
+    free_str = "  (FREE tier)" if is_free else ""
+    return (
+        "\n===== PROOF (from provider's server) =====\n"
+        f"model echoed : {echoed}\n"
+        f"response id  : {rid}\n"
+        f"usage        : in={pin} out={pout} cache={cache}{hit_rate}\n"
+        f"cost         : ${cost:.6f}{free_str}\n"
+        f"latency      : {dt_s:.2f}s\n"
+        "==========================================\n"
+    )
+
+
+def get_last_cost() -> float:
+    """Read the cost_usd of the audit line delegate() just wrote. Synchronous,
+    single-call-at-a-time server: the last line is always ours."""
+    if not AUDIT.exists():
+        return 0.0
+    lines = AUDIT.read_text().strip().splitlines()
+    if not lines:
+        return 0.0
+    return json.loads(lines[-1]).get("cost_usd", 0.0)
+
+
 def delegate(prompt: str, model: str, session: str = "", system: str = "",
              use_cache: bool = True, max_output_tokens: int = 8192,
              via: str | None = None, estimate: bool = False) -> str:
@@ -1008,13 +1035,13 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
         return _delegate_inner(prompt, model, session, system, use_cache, max_output_tokens, via, estimate)
     except ProviderError as e:
         if model == "minimax" and e.status in (401, 402, 429):
-            print(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
+            logger.warning(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
                   f"Per policy MiniMax is NOT recharged; falling back to DeepSeek flash. "
-                  f"Make 'flash' your default from now on.", file=sys.stderr)
+                  f"Make 'flash' your default from now on.")
             return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
         if model == "gemini" and e.status == 429:
-            print("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
-                  "Spend is now NONZERO.", file=sys.stderr)
+            logger.warning("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
+                  "Spend is now NONZERO.")
             return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
         raise
 
@@ -1220,6 +1247,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
 
 def main():
     ap = argparse.ArgumentParser(description="Delegate a task to a grunt/free model, with proof + memory.")
+    ap.add_argument("-q", "--quiet", action="store_true", help="suppress INFO logs")
     ap.add_argument("-p", "--prompt")
     ap.add_argument("--plan", help="read the prompt from this file")
     ap.add_argument("--out", help="write the answer to this file (else stdout)")
@@ -1251,6 +1279,11 @@ def main():
     ap.add_argument("--runner", default="agy", help="agent mode runner: agy (default) or codewhale")
     ap.add_argument("--timeout", type=int, default=600, help="agent mode: timeout in seconds (default 600, max 1800)")
     a = ap.parse_args()
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING if a.quiet else logging.DEBUG)
 
     if a.audit:
         show_audit()

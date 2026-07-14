@@ -22,7 +22,12 @@ need **cost-per-task as a SQL query** instead of a guess. Full design:
 `delegate.py` keeps no state in the repo: cache, audit log and session memory
 live in the vault (`~/.local/share/agent-projects/ai-router/data/`, override
 with `AI_ROUTER_DATA_DIR`); secrets load from `<vault>/secrets/.env` layered
-over `_shared/secrets/.env`.
+over `_shared/secrets/.env`. The data dir is created with mode `0700`
+(owner-only) so the audit ledger and cache stay private on multi-user machines.
+
+Diagnostics (budget notices, fallback warnings, key fingerprint) go to
+**stderr** via Python logging — never stdout; pass `--quiet` to suppress
+INFO-level lines.
 
 ## Usage
 

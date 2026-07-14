@@ -3,7 +3,7 @@
 ## Project
 Cost-accounting LLM gateway: one door to every model, every call tagged with
 `{job, project, session}`, budgeted, and written to a ledger — so
-cost-per-task is a SQL query, not a guess. Design: `docs/ARCHITECTURE.md`.
+cost-per-task is a SQL query, not a guess. Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Tech Stack
 Python (uv) · Postgres + pgvector (Docker/Colima) · Prometheus + Grafana

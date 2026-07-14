@@ -22,7 +22,11 @@
 `delegate.py` هیچ state ای داخل ریپو نگه نمی‌دارد: کش، audit log و حافظه‌ی
 session در والت هستند (`~/.local/share/agent-projects/ai-router/data/`،
 قابل override با `AI_ROUTER_DATA_DIR`)؛ secretها از `<vault>/secrets/.env`
-روی `_shared/secrets/.env` لایه می‌شوند.
+روی `_shared/secrets/.env` لایه می‌شوند. پوشه‌ی data با mode ِ `0700`
+(فقط-مالک) ساخته می‌شود تا روی ماشین چندکاربره ledger و کش خصوصی بمانند.
+
+پیام‌های تشخیصی (هشدار بودجه، fallback، اثر انگشت کلید) با logging ِ پایتون به
+**stderr** می‌روند — هرگز stdout؛ با `--quiet` خطوط سطح INFO خاموش می‌شوند.
 
 ## استفاده
 

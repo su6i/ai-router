@@ -7,6 +7,13 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Changed
+
+- **Observability Polish** — Replaced raw prints with Python `logging` in `delegate.py` (`--quiet` flag suppresses INFO). Diagnostic messages (budget notices, fallback warnings) now use proper log levels. The key fingerprint line is now stderr-only DEBUG to prevent leaks.
+- **MCP Server Diagnostics** — Added stderr logging for incoming requests (`[req <id>] <method> <tool> model=<m>`) to `mcp/server.py` without polluting the JSON-RPC stdout channel.
+- **Encapsulation & Entry Point** — Moved `_last_audit_cost` into `delegate.py` as `get_last_cost`. Replaced `main.py` stub with a real entry point.
+- **Docs Reconciliation** — Updated `ARCHITECTURE.md` with a "Current state vs plan" table. Marked Phase 3 RAG/prompt_cache as rejected per project rules. Added documentation for the sentinel-line protocol and `shell=True` verify commands in `delegate.py`. Cross-linked `CLAUDE.md` and `ARCHITECTURE.md`.
+
 ### Fixed
 
 - **CI hermeticity** — First CI run on `main` exposed two vault-machine

@@ -118,15 +118,7 @@ def _rpc_error(id_, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
 
 
-def _last_audit_cost() -> float:
-    """Read the cost_usd of the audit line delegate() just wrote. Synchronous,
-    single-call-at-a-time server: the last line is always ours."""
-    if not d.AUDIT.exists():
-        return 0.0
-    lines = d.AUDIT.read_text().strip().splitlines()
-    if not lines:
-        return 0.0
-    return json.loads(lines[-1]).get("cost_usd", 0.0)
+
 
 
 def handle_delegate_research(args: dict) -> dict:
@@ -141,7 +133,7 @@ def handle_delegate_research(args: dict) -> dict:
 
     with contextlib.redirect_stdout(io.StringIO()):
         answer = d.delegate(question, model, max_output_tokens=max_output_tokens, via="mcp")
-    cost = _last_audit_cost()
+    cost = d.get_last_cost()
     return _text_result(f"{answer}\n\ncost: ${cost:.6f}")
 
 
@@ -216,6 +208,22 @@ def handle_request(msg: dict):
     method = msg.get("method")
     is_notification = "id" not in msg
     id_ = msg.get("id")
+
+    if method == "tools/call":
+        params = msg.get("params") or {}
+        tool = params.get("name")
+        args = params.get("arguments") or {}
+        m = args.get("model")
+        if not m:
+            if tool == "delegate_research":
+                m = "grok"
+            elif tool == "delegate_worker":
+                m = "gemini"
+            elif tool == "delegate_agent":
+                m = "None"
+        print(f"[req {id_}] {method} {tool} model={m}", file=sys.stderr)
+    elif method and not is_notification:
+        print(f"[req {id_}] {method} - model=-", file=sys.stderr)
 
     if method == "initialize":
         return _rpc_result(id_, {

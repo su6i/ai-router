@@ -1,7 +1,19 @@
-# AI-Router — Architecture (draft for review)
+# AI-Router — Architecture
 
-> Status: **DRAFT — not yet executing.** This document is the thing we finalize
-> before running anything. Open decisions are collected at the bottom.
+> **Status: Executing & Evolving.** (See [CLAUDE.md](../CLAUDE.md) for overarching project rules and conventions).
+
+## Current state vs plan
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Gateway & Worker | **Done** | `delegate.py` single entry point |
+| MCP Server | **Done** | `mcp/server.py` exposing capped tools |
+| Exact-hash Cache | **Done** | Local SQLite exact-hash deduplication |
+| Schema & Ingest | **Done** | Postgres ledger per WO 0007 |
+| Cost Report | **Done** | SQL aggregations per WO 0002 |
+| Budget Caps | **Done** | Enforced per WO 0003 |
+| Prometheus Exporter | **Parked** | Phase 2 parked until stable |
+| Semantic Cache / RAG | **Rejected** | Phase 3 rejected by owner decision ("exact-hash only") |
 
 ## 1. Why this exists
 
@@ -80,7 +92,8 @@ usage(
   cost_usd numeric(12,6), latency_s numeric)
 
 -- semantic cache / RAG store
--- NOTE: prompt_cache implementation is currently parked per project policy
+-- NOTE: prompt_cache and RAG phase 3 are REJECTED by owner decision (per CLAUDE.md: "exact-hash only").
+-- Kept here for historical context only.
 prompt_cache(
   id, created, project,
   repo_commit,          -- code-state key: NEVER serve an answer from a different code state
@@ -120,8 +133,8 @@ Two mechanisms so grunt work leaves Opus *without* being asked each time:
    prompt starts with a route tag (e.g. `r:` / `r!flash:`), the hook calls
    delegate.py, prints the cheap model's answer, and `exit 2` — Opus is skipped
    entirely (zero premium cost). *Cannot* replace the prompt, so exit-2 is the clean path.
-2. **Semantic interception (RAG), auto.** On each prompt the hook computes a local
-   embedding and queries `prompt_cache`:
+2. **Semantic interception (RAG) [REJECTED].** (Rejected by owner: "exact-hash only").
+   Originally planned: On each prompt the hook computes a local embedding and queries `prompt_cache`:
    - **exact hash hit + same repo_commit** → print stored answer, `exit 2` (zero cost).
    - **≥0.95 cosine + same repo_commit** → (opt-in / gated) serve cached answer.
    - **0.75–0.90 cosine** → inject the related prior prompt/answer as `additionalContext`
@@ -146,8 +159,8 @@ because near-identical prompts can need different answers as code changes.
 
 - **Phase 1 — data plane:** Postgres+pgvector (Docker/Colima) + schema + ingest +
   `amir router cost` (SQL). Everything else depends on this.
-- **Phase 2 — observability:** exporter + Prometheus + Grafana (dashboards-as-code).
-- **Phase 3 — RAG / semantic cache:** local embedder + prompt_cache + pre-router hook.
+- **Phase 2 — observability:** exporter + Prometheus + Grafana (dashboards-as-code). **(Parked)**
+- **Phase 3 — RAG / semantic cache:** local embedder + prompt_cache + pre-router hook. **(Rejected)**
 
 ## 9. Open decisions (to finalize before executing)
 

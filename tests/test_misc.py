@@ -7,7 +7,8 @@ import httpx
 import subprocess
 import unicodedata
 from delegate import (
-    call_openai, ProviderError, main, show_audit, project_info, cache_make_key
+    call_openai, ProviderError, main, show_audit, project_info, cache_make_key,
+    format_proof, get_last_cost
 )
 
 @pytest.fixture(autouse=True)
@@ -198,3 +199,75 @@ def test_call_openai_deepseek_hit_miss(monkeypatch):
     ans, raw_model, id_, p_tok, c_tok, cache_tok, cache_miss = call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
     assert ans == "hi ds"
     assert (p_tok, c_tok, cache_tok, cache_miss) == (100, 20, 60, 40)
+
+def test_format_proof():
+    proof = format_proof("test-model", "123", 10, 20, 0, 0.05, 1.2, False)
+    assert "test-model" in proof
+    assert "$0.05" in proof
+    assert "in=10" in proof
+    assert "out=20" in proof
+    
+    # Check cache formatting
+    proof2 = format_proof("test-model", "123", 100, 50, 50, 0.0, 0.5, False)
+    assert "cache=50 (50.0%)" in proof2
+
+def test_get_last_cost(monkeypatch, tmp_path):
+    audit_file = tmp_path / "audit.log"
+    monkeypatch.setattr("delegate.AUDIT", audit_file)
+    
+    # File doesn't exist
+    assert get_last_cost() == 0.0
+    
+    # Valid file
+    import json
+    audit_file.write_text(json.dumps({"cost_usd": 1.23}) + "\n")
+    assert get_last_cost() == 1.23
+    
+    # Missing cost_usd
+    audit_file.write_text(json.dumps({"project": "test"}) + "\n")
+    assert get_last_cost() == 0.0
+
+def test_quiet_flag(monkeypatch, capsys, caplog, tmp_path):
+    import logging
+    caplog.set_level(logging.DEBUG, logger="ai_router")
+    monkeypatch.setattr("delegate.check_budget", lambda *args, **kwargs: None)
+    monkeypatch.setattr("delegate._write_audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr("delegate.CACHE", tmp_path / "cache.db")
+    
+    def mock_post(*args, **kwargs):
+        return httpx.Response(200, json={
+            "id": "123", "model": "flash",
+            "choices": [{"message": {"content": "the answer is 42"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        }, request=httpx.Request("POST", args[0]))
+
+    monkeypatch.setattr("httpx.post", mock_post)
+    
+    # Run with --quiet
+    test_args = ["delegate.py", "--model", "flash", "-p", "hello", "--no-cache", "--quiet"]
+    monkeypatch.setattr("sys.argv", test_args)
+    
+    main()
+    captured = capsys.readouterr()
+    
+    # stdout should contain the answer
+    assert "the answer is 42" in captured.out
+    
+    # caplog should NOT contain INFO or DEBUG because of --quiet
+    info_logs = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(info_logs) == 0
+    debug_logs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(debug_logs) == 0
+
+def test_main_py_smoke(tmp_path):
+    # Subprocess run main.py --audit with isolated vault
+    env = dict(sys.modules["os"].environ)
+    env["AI_ROUTER_DATA_DIR"] = str(tmp_path)
+    
+    main_py = Path(__file__).parent.parent / "main.py"
+    r = subprocess.run([sys.executable, str(main_py), "--audit"], 
+                       env=env, capture_output=True, text=True)
+    
+    assert r.returncode == 0
+    assert "no audit.log" in r.stdout.lower()
+

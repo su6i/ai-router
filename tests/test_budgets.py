@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 import pytest
@@ -21,14 +22,14 @@ def isolated_vault(tmp_path):
         yield tmp_path
 
 
-def test_budget_no_file(isolated_vault, capsys):
+def test_budget_no_file(isolated_vault, caplog):
+    caplog.set_level(logging.INFO)
     # Should print a warning and not crash
     delegate.check_budget("testproj", "session1", print_estimate=False)
-    err = capsys.readouterr().err
-    assert "no budgets.json — spend uncapped" in err
+    assert "no budgets.json — spend uncapped" in caplog.text
 
 
-def test_budget_under_cap(isolated_vault, capsys):
+def test_budget_under_cap(isolated_vault, caplog):
     delegate.BUDGETS.write_text(json.dumps({
         "monthly_usd": 5.0,
         "per_project_monthly_usd": {"testproj": 1.0}
@@ -41,11 +42,10 @@ def test_budget_under_cap(isolated_vault, capsys):
 
     # Should not raise
     delegate.check_budget("testproj", "session1")
-    err = capsys.readouterr().err
-    assert "BUDGET WARNING" not in err
+    assert "BUDGET WARNING" not in caplog.text
 
 
-def test_budget_warning(isolated_vault, capsys):
+def test_budget_warning(isolated_vault, caplog):
     delegate.BUDGETS.write_text(json.dumps({
         "monthly_usd": 5.0,
     }))
@@ -55,8 +55,7 @@ def test_budget_warning(isolated_vault, capsys):
     }) + "\n")
 
     delegate.check_budget("testproj", "session1")
-    err = capsys.readouterr().err
-    assert "BUDGET WARNING: monthly_usd spend at" in err
+    assert "BUDGET WARNING: monthly_usd spend at" in caplog.text
 
 
 def test_budget_abort(isolated_vault):
@@ -89,7 +88,7 @@ def test_budget_project_abort(isolated_vault):
     assert "BUDGET ABORT: per_project_monthly_usd[testproj] cap exceeded" in str(exc.value)
 
 
-def test_budget_free_model_proceeds(isolated_vault, capsys):
+def test_budget_free_model_proceeds(isolated_vault, caplog):
     delegate.BUDGETS.write_text(json.dumps({
         "monthly_usd": 5.0,
     }))
@@ -102,9 +101,8 @@ def test_budget_free_model_proceeds(isolated_vault, capsys):
     free_spec = {"cin": 0.0, "cout": 0.0}
     delegate.check_budget("testproj", "session1", model_spec=free_spec)
     
-    err = capsys.readouterr().err
-    assert "BUDGET WARNING: monthly_usd cap exceeded" in err
-    assert "proceeding because model is FREE" in err
+    assert "BUDGET WARNING: monthly_usd cap exceeded" in caplog.text
+    assert "proceeding because model is FREE" in caplog.text
 
 
 @patch("delegate.call_openai")
