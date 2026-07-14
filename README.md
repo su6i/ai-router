@@ -107,6 +107,18 @@ Prints `audit.log` (one JSON line per call: model asked/echoed, session,
 project, commit, cost, cached; worker-mode calls add files written/rejected,
 verify command/status, attempts).
 
+### Cost Report
+
+```bash
+python3 src/delegate.py --cost --by model
+```
+
+Aggregates `audit.log` into an aligned text table of spend and cache hit rates.
+
+- `--cost` — totals for all time
+- `--since YYYY-MM-DD` or `--today` — time filtering
+- `--by <field>` — group by `model` (default), `project`, `session`, `via`, or `day`
+
 ### Shell wrapper: `r()`
 
 Source `shell/r.sh` once from your shell rc (bash or zsh):
@@ -120,6 +132,7 @@ Then delegate from any directory without touching an agent's context:
 ```bash
 r flash "write a regex that matches ISO-8601 dates"   # chat (words → one -p)
 r gemini --files src/calc.py --allow-write "src/**" --verify "pytest -q" -p "fix the bug"
+r cost --today                                        # print today's cost report
 r audit                                               # print the ledger
 ```
 

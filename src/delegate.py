@@ -149,6 +149,123 @@ def show_audit():
     print(AUDIT.read_text().rstrip() if AUDIT.exists() else "(no audit.log yet)")
 
 
+def show_cost(since: str = None, by: str = "model"):
+    if not AUDIT.exists():
+        print("(no audit.log yet)")
+        return
+
+    import collections
+    groups = collections.defaultdict(lambda: {
+        "calls": 0, "cached_hits": 0, "in_tokens": 0, "out_tokens": 0,
+        "cache_tokens": 0, "cost_usd": 0.0, "has_tokens": False
+    })
+
+    malformed = 0
+    with AUDIT.open("r") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                malformed += 1
+                continue
+
+            ts = rec.get("ts", "")
+            if since and ts[:10] < since:
+                continue
+
+            if by == "day":
+                group_val = ts[:10]
+            elif by == "model":
+                group_val = rec.get("model_asked") or rec.get("model")
+            else:
+                group_val = rec.get(by)
+            
+            group_val = str(group_val) if group_val is not None else ""
+            if not group_val:
+                group_val = "(none)"
+
+            g = groups[group_val]
+            g["calls"] += 1
+            if rec.get("cached"):
+                g["cached_hits"] += 1
+
+            g["cost_usd"] += rec.get("cost_usd", 0.0)
+
+            if rec.get("mode") != "worker" and "in" in rec:
+                g["has_tokens"] = True
+                g["in_tokens"] += rec.get("in", 0)
+                g["out_tokens"] += rec.get("out", 0)
+                g["cache_tokens"] += rec.get("cache", 0)
+
+    def fmt_int(v, has_tokens):
+        return str(v) if has_tokens else ""
+
+    def fmt_hit_rate(cache, in_tok, has_tokens):
+        if not has_tokens or in_tok == 0:
+            return ""
+        return f"{cache / in_tok * 100:.1f}%"
+
+    rows = []
+    tot = {
+        "calls": 0, "cached_hits": 0, "in_tokens": 0, "out_tokens": 0,
+        "cache_tokens": 0, "cost_usd": 0.0, "has_tokens": False
+    }
+
+    for k, g in sorted(groups.items()):
+        if g["has_tokens"]:
+            tot["has_tokens"] = True
+            tot["in_tokens"] += g["in_tokens"]
+            tot["out_tokens"] += g["out_tokens"]
+            tot["cache_tokens"] += g["cache_tokens"]
+        tot["calls"] += g["calls"]
+        tot["cached_hits"] += g["cached_hits"]
+        tot["cost_usd"] += g["cost_usd"]
+
+        rows.append([
+            k,
+            str(g["calls"]),
+            str(g["cached_hits"]),
+            fmt_int(g["in_tokens"], g["has_tokens"]),
+            fmt_int(g["out_tokens"], g["has_tokens"]),
+            fmt_int(g["cache_tokens"], g["has_tokens"]),
+            fmt_hit_rate(g["cache_tokens"], g["in_tokens"], g["has_tokens"]),
+            f"{g['cost_usd']:.6f}"
+        ])
+
+    rows.append([
+        "TOTAL",
+        str(tot["calls"]),
+        str(tot["cached_hits"]),
+        fmt_int(tot["in_tokens"], tot["has_tokens"]),
+        fmt_int(tot["out_tokens"], tot["has_tokens"]),
+        fmt_int(tot["cache_tokens"], tot["has_tokens"]),
+        fmt_hit_rate(tot["cache_tokens"], tot["in_tokens"], tot["has_tokens"]),
+        f"{tot['cost_usd']:.6f}"
+    ])
+
+    headers = ["group", "calls", "cached_hits", "in_tokens", "out_tokens", "cache_tokens", "hit_rate", "cost_usd"]
+    widths = [max(len(str(item)) for item in col) for col in zip(headers, *rows)]
+
+    def fmt_row(r):
+        res = [r[0].ljust(widths[0])]
+        for item, w in zip(r[1:], widths[1:]):
+            res.append(item.rjust(w))
+        return "  ".join(res)
+
+    print(fmt_row(headers))
+    print("  ".join("-" * w for w in widths))
+    for r in rows[:-1]:
+        print(fmt_row(r))
+    print("  ".join("-" * w for w in widths))
+    print(fmt_row(rows[-1]))
+
+    if malformed > 0:
+        print(f"\nskipped {malformed} malformed lines")
+
+
 # ---- conversation memory -----------------------------------------------------
 def load_history(session: str) -> list:
     f = SESSIONS / f"{session}.json"
@@ -580,6 +697,10 @@ def main():
     ap.add_argument("--new", action="store_true", help="reset the named session before running")
     ap.add_argument("--system", default="", help="system instruction (persona / rules)")
     ap.add_argument("--audit", action="store_true", help="print the delegation ledger and exit")
+    ap.add_argument("--cost", action="store_true", help="print the cost report and exit")
+    ap.add_argument("--since", help="YYYY-MM-DD to filter cost report")
+    ap.add_argument("--today", action="store_true", help="shortcut for --since today")
+    ap.add_argument("--by", default="model", help="group cost report by (model|project|session|via|day)")
     ap.add_argument("--no-cache", action="store_true",
                     help="bypass the exact-hash cache (always call the provider)")
     ap.add_argument("--files", default="",
@@ -595,6 +716,10 @@ def main():
 
     if a.audit:
         show_audit()
+        return
+    if a.cost:
+        since = dt.datetime.now().astimezone().isoformat()[:10] if a.today else a.since
+        show_cost(since=since, by=a.by)
         return
     if a.new and a.session:
         f = SESSIONS / f"{a.session}.json"

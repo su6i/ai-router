@@ -104,6 +104,18 @@ python3 src/delegate.py --audit
 session، project، commit، هزینه، cached؛ فراخوانی‌های worker mode هم
 files written/rejected، دستور/وضعیتِ verify، تعداد attempt را اضافه می‌کنند).
 
+### گزارش هزینه
+
+```bash
+python3 src/delegate.py --cost --by model
+```
+
+فایل `audit.log` را در یک جدول متنی تراز شده از هزینه‌ها و نرخ موفقیتِ کش تجمیع می‌کند.
+
+- `--cost` — مجموع کل زمان‌ها
+- `--since YYYY-MM-DD` یا `--today` — فیلتر زمانی
+- `--by <field>` — گروه‌بندی بر اساس `model` (پیش‌فرض)، `project`، `session`، `via` یا `day`
+
 ### Wrapper شل: `r()`
 
 یک بار `shell/r.sh` را از rc شل خودت (bash یا zsh) بارگذاری کن:
@@ -117,6 +129,7 @@ echo 'source /Users/su6i/@-github/ai-router/shell/r.sh' >> ~/.zshrc
 ```bash
 r flash "write a regex that matches ISO-8601 dates"   # chat (words → one -p)
 r gemini --files src/calc.py --allow-write "src/**" --verify "pytest -q" -p "fix the bug"
+r cost --today                                        # print today's cost report
 r audit                                               # print the ledger
 ```
 

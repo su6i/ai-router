@@ -9,6 +9,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **`r cost` (Cost Report)** — A new CLI subcommand (`python3 src/delegate.py --cost` and `r cost`) to aggregate `audit.log` into an aligned text table of spend and cache hit rates. Supports time filtering (`--since YYYY-MM-DD`, `--today`) and custom groupings (`--by model|project|session|via|day`).
+
 - **Delegation triggers — imperative tool descriptions + PreToolUse nudge
   hook.** The MCP tools existed but the premium architect model never
   called them; two layers now push it toward the worker. (1) Both tool

@@ -28,6 +28,12 @@ r() {
     return "$?"
   fi
 
+  if [ "$1" = "cost" ]; then
+    shift
+    "$py" "$repo/src/delegate.py" --cost "$@"
+    return "$?"
+  fi
+
   local model="$1"
   shift
 
