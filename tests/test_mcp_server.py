@@ -231,6 +231,26 @@ def test_tools_call_budget_abort_returns_jsonrpc_error(tmp_path):
         proc.wait(timeout=5)
 
 
+def test_sequential_tools_call_behaves_correctly(tmp_path):
+    proc = _spawn_server(tmp_path, ["ans1", "ans2"])
+    try:
+        _init(proc)
+        _send(proc, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                     "params": {"name": "delegate_research",
+                                "arguments": {"question": "q1", "model": "gemini"}}})
+        resp1 = _recv(proc)
+        assert resp1["result"]["content"][0]["text"].startswith("ans1")
+
+        _send(proc, {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                     "params": {"name": "delegate_research",
+                                "arguments": {"question": "q2", "model": "gemini"}}})
+        resp2 = _recv(proc)
+        assert resp2["result"]["content"][0]["text"].startswith("ans2")
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+
 def test_tools_call_unknown_tool_returns_jsonrpc_error(server_proc):
     _init(server_proc)
     _send(server_proc, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
