@@ -55,6 +55,10 @@ def _fake_call_openai(spec, key, history, system, max_output_tokens=8192):
 d.call_gemini = _fake_call_gemini
 d.call_openai = _fake_call_openai
 
+def _fake_agent_delegate(*args, **kwargs):
+    return "agent summary"
+d.agent_delegate = _fake_agent_delegate
+
 import server
 server.main()
 """
@@ -128,7 +132,7 @@ def test_tools_list_exposes_exactly_two_tools(server_proc):
     resp = _recv(server_proc)
     tools = resp["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"delegate_research", "delegate_worker"}
+    assert names == {"delegate_research", "delegate_worker", "delegate_agent"}
 
     research = next(t for t in tools if t["name"] == "delegate_research")
     assert set(research["inputSchema"]["properties"]) == {
@@ -189,6 +193,24 @@ def test_tools_call_delegate_worker_writes_file_within_workdir(tmp_path):
         assert len(text.splitlines()) <= 25
         assert (workdir / "src" / "foo.py").read_text() == "def foo():\n    return 1\n"
         assert not (tmp_path / "src").exists()  # nothing written outside workdir
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+
+def test_tools_call_delegate_agent_returns_summary(tmp_path):
+    proc = _spawn_server(tmp_path, [])
+    try:
+        _init(proc)
+        _send(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                     "params": {"name": "delegate_agent",
+                                "arguments": {"prompt": "do agent task",
+                                              "workdir": str(tmp_path),
+                                              "runner": "agy"}}})
+        resp = _recv(proc)
+        assert "error" not in resp
+        text = resp["result"]["content"][0]["text"]
+        assert "agent summary" in text
     finally:
         proc.stdin.close()
         proc.wait(timeout=5)

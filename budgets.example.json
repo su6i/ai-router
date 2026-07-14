@@ -2,5 +2,6 @@
   "monthly_usd": 5.0,
   "weekly_usd": 2.0,
   "per_session_usd": 0.50,
-  "per_project_monthly_usd": {}
+  "per_project_monthly_usd": {},
+  "daily_calls": {"google-ai-pro": 50, "gemini-free": 400}
 }

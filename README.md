@@ -135,12 +135,19 @@ Schema (see `budgets.example.json` in the repo root):
   "monthly_usd": 5.0,
   "weekly_usd": 2.0,
   "per_session_usd": 0.50,
-  "per_project_monthly_usd": {}
+  "per_project_monthly_usd": {},
+  "daily_calls": {"google-ai-pro": 50, "gemini-free": 400}
 }
 ```
 
-Use `--estimate` to dry-run a call: prints estimated tokens, cost, and current
-budget usage without calling the provider or writing to the audit log.
+`daily_calls` caps delegated calls per `quota_channel` per calendar day —
+subscription/free channels always report `cost_usd=0`, so USD caps never brake
+them; their scarce unit is daily quota. Over the cap aborts loudly; at ≥80% a
+warning is printed. A missing key means uncapped. Cache hits don't count.
+
+Use `--estimate` to dry-run a call: prints estimated tokens, cost, current
+budget usage, and today's per-channel call counts without calling the provider
+or writing to the audit log. `--cost` appends the same per-channel counts.
 
 ### Cost Report
 
@@ -179,15 +186,22 @@ alias list). If the second argument starts with `-`, everything is passed to
 ### MCP server
 
 `mcp/server.py` exposes the same `delegate.py` (same ledger, cache, caps,
-secrets path) as two MCP tools, so any MCP host — Claude Code first — can
+secrets path) as three MCP tools, so any MCP host — Claude Code first — can
 discover and use cheap delegation mid-task without anyone remembering to ask.
+
+| Door | Best For | Default Model | Notes |
+| --- | --- | --- | --- |
+| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `grok` (web search) | Answer is capped by `max_output_tokens`. |
+| **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `gemini` (free) | Pass known file paths. Generated code never crosses the wire. |
+| **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
+
 Register it once, user scope, so it's available in every project:
 
 ```bash
 claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/mcp/server.py
 ```
 
-Two tools only, both capped — no uncapped chat tool, ever:
+Three tools only, all capped — no uncapped chat tool, ever:
 
 - **`delegate_research`** — fact lookup / live-data checks / doc
   verification (default model `grok` = live web/X search). Answer is capped
@@ -199,6 +213,10 @@ Two tools only, both capped — no uncapped chat tool, ever:
   absolute path) is required because the MCP server process does not
   inherit the caller's cwd. Returns only the existing ≤25-line summary —
   generated code never crosses the wire.
+- **`delegate_agent`** — multi-step grunt tasks needing exploration (find+fix
+  across unknown files, iterative debugging). Wraps `agy` (default) or `codewhale`
+  behind our budgets. Returns only a ≤25-line summary of files changed, verify
+  result, and cost. Prefer `delegate_worker` when the file list is known.
 
 Claude models stay banned inside delegate (unchanged). Audit rows from MCP
 calls get `via: "mcp"` (an extra field alongside the existing columns) so

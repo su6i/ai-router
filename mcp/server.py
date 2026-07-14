@@ -87,6 +87,22 @@ TOOLS = [
             "required": ["prompt", "workdir"],
         },
     },
+    {
+        "name": "delegate_agent",
+        "description": "USE for multi-step grunt tasks needing exploration (find+fix across unknown files, iterative debugging); prefer delegate_worker when the file list is already known.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "workdir": {"type": "string", "description": "absolute path"},
+                "model": {"type": "string"},
+                "runner": {"type": "string", "default": "agy"},
+                "verify": {"type": "string", "default": ""},
+                "timeout": {"type": "integer", "default": 600, "maximum": 1800},
+            },
+            "required": ["prompt", "workdir"],
+        },
+    },
 ]
 
 
@@ -148,9 +164,32 @@ def handle_delegate_worker(args: dict) -> dict:
     return _text_result(summary)
 
 
+def handle_delegate_agent(args: dict) -> dict:
+    prompt = args.get("prompt")
+    if not prompt or not isinstance(prompt, str):
+        raise ValueError("'prompt' is required and must be a non-empty string")
+    workdir = args.get("workdir")
+    if not workdir or not isinstance(workdir, str) or not Path(workdir).is_absolute():
+        raise ValueError("'workdir' is required and must be an absolute path")
+    timeout = args.get("timeout", 600)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not (0 < timeout <= 1800):
+        raise ValueError("'timeout' must be an integer in (0, 1800]")
+    
+    runner = args.get("runner", "agy")
+    model = args.get("model")
+    verify = args.get("verify", "")
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        summary = d.agent_delegate(
+            prompt, runner=runner, model=model, workdir=workdir, verify_cmd=verify,
+            via="mcp", timeout_s=timeout)
+    return _text_result(summary)
+
+
 TOOL_HANDLERS = {
     "delegate_research": handle_delegate_research,
     "delegate_worker": handle_delegate_worker,
+    "delegate_agent": handle_delegate_agent,
 }
 
 

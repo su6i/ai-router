@@ -122,22 +122,22 @@ CACHE = DATA_DIR / "cache.db"
 # official page lists no v4 models) — verify against real DeepSeek billing.
 MODELS = {
     "minimax": dict(api="MiniMax-M3",        provider="openai", url="https://api.minimax.io/v1",
-                    cin=0.30, cin_cached=0.06, cout=1.20, key="MINIMAX_API_KEY"),
+                    cin=0.30, cin_cached=0.06, cout=1.20, key="MINIMAX_API_KEY", quota_channel="minimax-api"),
     "flash":   dict(api="deepseek-v4-flash", provider="openai", url="https://api.deepseek.com/v1",
-                    cin=0.14, cin_cached=0.014, cout=0.28, key="DEEPSEEK_API_KEY"),
+                    cin=0.14, cin_cached=0.014, cout=0.28, key="DEEPSEEK_API_KEY", quota_channel="deepseek-api"),
     "pro":     dict(api="deepseek-v4-pro",   provider="openai", url="https://api.deepseek.com/v1",
-                    cin=0.435, cin_cached=0.0435, cout=0.87, key="DEEPSEEK_API_KEY"),
+                    cin=0.435, cin_cached=0.0435, cout=0.87, key="DEEPSEEK_API_KEY", quota_channel="deepseek-api"),
     "grok":    dict(api="grok-4.3",          provider="openai", url="https://api.x.ai/v1",
-                    cin=1.25, cout=2.50, key="GROK_API_KEY"),
+                    cin=1.25, cout=2.50, key="GROK_API_KEY", quota_channel="grok-api"),
     "gemini":  dict(api="gemini-2.5-flash",  provider="gemini",
                     url="https://generativelanguage.googleapis.com/v1beta",
-                    cin=0.0, cout=0.0, key="GEMINI_API_KEY"),
+                    cin=0.0, cout=0.0, key="GEMINI_API_KEY", quota_channel="gemini-free"),
     "gemini-lite": dict(api="gemini-2.5-flash-lite", provider="gemini",
                     url="https://generativelanguage.googleapis.com/v1beta",
-                    cin=0.0, cout=0.0, key="GEMINI_API_KEY"),
+                    cin=0.0, cout=0.0, key="GEMINI_API_KEY", quota_channel="gemini-free"),
     "gemma":   dict(api="gemma-4-31b-it", provider="gemini",
                     url="https://generativelanguage.googleapis.com/v1beta",
-                    cin=0.0, cout=0.0, key="GEMINI_API_KEY"),
+                    cin=0.0, cout=0.0, key="GEMINI_API_KEY", quota_channel="gemini-free"),
 }
 
 # Friendly aliases -> canonical key.
@@ -218,12 +218,14 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
 
     now = dt.datetime.now().astimezone()
     month_str = now.isoformat()[:7]
+    today_str = now.isoformat()[:10]
     week_ago = (now - dt.timedelta(days=7)).isoformat()
 
     spent_month = 0.0
     spent_week = 0.0
     spent_session = 0.0
     spent_project = 0.0
+    daily_calls_count = {}
 
     if AUDIT.exists():
         with AUDIT.open("r") as fh:
@@ -235,11 +237,18 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                     rec = json.loads(line)
                 except Exception:
                     continue
+                
+                ts = rec.get("ts", "")
+                channel = rec.get("quota_channel")
+                
+                # Cache HITs never reached the provider — they consume no quota.
+                if ts.startswith(today_str) and channel and not rec.get("cached"):
+                    daily_calls_count[channel] = daily_calls_count.get(channel, 0) + 1
+                    
                 cost = rec.get("cost_usd", 0.0)
                 if not cost:
                     continue
                 
-                ts = rec.get("ts", "")
                 if ts.startswith(month_str):
                     spent_month += cost
                     if project and rec.get("project") == project:
@@ -268,6 +277,17 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
             else:
                 print(f"    session_usd: ${spent_session:.6f} / (uncapped)")
                 
+        daily_calls_caps = budgets.get("daily_calls", {})
+        if daily_calls_count or daily_calls_caps:
+            print("  Daily calls vs caps:")
+            for ch in set(list(daily_calls_count.keys()) + list(daily_calls_caps.keys())):
+                count = daily_calls_count.get(ch, 0)
+                cap = daily_calls_caps.get(ch)
+                if cap is not None:
+                    print(f"    {ch}: {count} / {cap}")
+                else:
+                    print(f"    {ch}: {count} / (uncapped)")
+                
         sys.exit(0)
 
     # Apply estimate to actual spend
@@ -295,6 +315,18 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
     if session:
         _check("per_session_usd", spent_session, session_cap)
 
+    # Check quota channel daily call caps
+    daily_calls_caps = budgets.get("daily_calls", {})
+    current_channel = model_spec.get("quota_channel") if model_spec else None
+    if current_channel:
+        cap = daily_calls_caps.get(current_channel)
+        count = daily_calls_count.get(current_channel, 0) + 1
+        if cap is not None:
+            if count > cap:
+                sys.exit(f"❌ BUDGET ABORT: daily call cap exceeded for {current_channel} ({count} > {cap})")
+            elif count >= cap * 0.8:
+                print(f"⚠️  BUDGET WARNING: {current_channel} daily calls at {count} (cap: {cap})", file=sys.stderr)
+
 
 def show_cost(since: str = None, by: str = "model"):
     if not AUDIT.exists():
@@ -308,6 +340,8 @@ def show_cost(since: str = None, by: str = "model"):
     })
 
     malformed = 0
+    today_str = dt.datetime.now().astimezone().isoformat()[:10]
+    today_channel_calls = collections.defaultdict(int)
     with AUDIT.open("r") as fh:
         for line in fh:
             line = line.strip()
@@ -320,6 +354,9 @@ def show_cost(since: str = None, by: str = "model"):
                 continue
 
             ts = rec.get("ts", "")
+            channel = rec.get("quota_channel")
+            if ts.startswith(today_str) and channel and not rec.get("cached"):
+                today_channel_calls[channel] += 1
             if since and ts[:10] < since:
                 continue
 
@@ -408,6 +445,18 @@ def show_cost(since: str = None, by: str = "model"):
         print(fmt_row(r))
     print("  ".join("-" * w for w in widths))
     print(fmt_row(rows[-1]))
+
+    if today_channel_calls:
+        caps = {}
+        if BUDGETS.exists():
+            try:
+                caps = json.loads(BUDGETS.read_text()).get("daily_calls", {})
+            except Exception:
+                pass
+        print(f"\ntoday's calls per quota channel ({today_str}):")
+        for ch in sorted(today_channel_calls):
+            cap = caps.get(ch)
+            print(f"  {ch}: {today_channel_calls[ch]}" + (f" / {cap}" if cap is not None else " / (uncapped)"))
 
     if malformed > 0:
         print(f"\nskipped {malformed} malformed lines")
@@ -503,6 +552,11 @@ def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
         "cost_usd": round(cost, 6), "latency_s": round(dt_s, 2),
         "cached": cached,
     }
+    # For standalone delegate, use MODELS quota channel if not explicitly provided
+    q_channel = MODELS.get(model, {}).get("quota_channel") if model in MODELS else None
+    if q_channel:
+        rec["quota_channel"] = q_channel
+        
     if via is not None:
         rec["via"] = via
     if cache_miss is not None:
@@ -846,6 +900,11 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
         "verify_cmd": verify_cmd, "verify_status": verify_status,
         "attempts": attempts,
     }
+    # For standalone worker delegate, use MODELS quota channel if not explicitly provided
+    q_channel = MODELS.get(model, {}).get("quota_channel") if model in MODELS else None
+    if q_channel:
+        rec["quota_channel"] = q_channel
+        
     if via is not None:
         rec["via"] = via
     with AUDIT.open("a") as fh:
@@ -959,14 +1018,214 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
             return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
         raise
 
+def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None):
+    AUDIT.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "model_asked": model, "model_echoed": echoed,
+        "session": None, "project": project, "commit": commit,
+        "cost_usd": round(cost_usd, 6), "cached": False,
+        "mode": "agent",
+        "runner": runner,
+        "files_changed_count": files_changed_count,
+        "verify_status": verify_status,
+        "quota_channel": quota_channel,
+    }
+    if exit_code not in (0, None):
+        rec["runner_exit"] = exit_code
+    if run_id:
+        rec["run_id"] = run_id
+    if cost_unknown:
+        rec["cost_unknown"] = True
+    if via is not None:
+        rec["via"] = via
+    with AUDIT.open("a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
+def agent_delegate(task: str, runner: str = "agy", model: str | None = None, workdir: str | Path | None = None, verify_cmd: str = "", via: str | None = None, estimate: bool = False, timeout_s: int = 600) -> str:
+    import signal
+    import tempfile
+    
+    project_root = Path(workdir) if workdir else Path.cwd()
+    project, commit = project_info()
+
+    if model and "claude" in model.lower():
+        raise ValueError("Claude models are banned inside delegate (subscription-billed; routing them here double-bills)")
+
+    if runner == "agy":
+        model_name = model or "Gemini 3.1 Pro (High)"
+        quota_channel = "google-ai-pro"
+        spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
+    elif runner == "codewhale":
+        model_name = model or "flash"
+        if model_name not in ["flash", "minimax"]:
+            if model_name in ALIASES and ALIASES[model_name] in ["flash", "minimax"]:
+                model_name = ALIASES[model_name]
+            else:
+                raise ValueError("codewhale runner only supports 'flash' or 'minimax' models")
+        
+        provider_model = MODELS[model_name]
+        quota_channel = provider_model.get("quota_channel", f"{model_name}-api")
+        spec = provider_model
+    else:
+        raise ValueError("runner must be 'agy' or 'codewhale'")
+
+    if estimate:
+        print(f"ESTIMATE for {runner} ({model_name}):")
+        print(f"  Quota channel: {quota_channel}")
+        check_budget(project, None, print_estimate=True, model_spec=spec)
+        return "estimate only"
+
+    check_budget(project, None, model_spec=spec)
+
+    def _git_status():
+        try:
+            return subprocess.run(["git", "-C", str(project_root), "status", "--porcelain"], capture_output=True, text=True, timeout=GIT_TIMEOUT).stdout.strip()
+        except Exception:
+            return ""
+
+    status_before = _git_status()
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    stdout_fd, stdout_path = tempfile.mkstemp(dir=str(DATA_DIR), prefix="agent_", suffix=".log")
+    os.close(stdout_fd)
+
+    run_env = None
+    if runner == "agy":
+        # agy print mode kills any run whose next response exceeds
+        # --print-timeout (default 5m) — size it to our own timeout.
+        cmd = ["agy", "-p", task, "--model", model_name, "--mode", "accept-edits",
+               "--print-timeout", f"{timeout_s}s"]
+    else:
+        # Flags verified against `codewhale exec --auto --help` (2026-07-14):
+        # plain exec is a one-shot text reply; --auto enables tool-backed agent
+        # mode, --json emits a machine-readable summary, --model overrides the
+        # model per run, --max-turns caps model steps. Confinement = Popen cwd
+        # + global -C/--workspace; exec exposes no sandbox-mode/approval flags.
+        # Live-verified 2026-07-14: --model must sit BEFORE `exec` (the CLI
+        # errors otherwise, despite exec --help listing it as forwarded), and
+        # the provider is chosen via CODEWHALE_PROVIDER (per `auth status`) —
+        # otherwise the model name is sent to whatever provider is active.
+        cw_model = "deepseek-v4-flash" if model_name == "flash" else "minimax-m3"
+        run_env = {**os.environ, "CODEWHALE_PROVIDER": "deepseek" if model_name == "flash" else "minimax"}
+        cmd = ["codewhale", "-C", str(project_root), "--model", cw_model,
+               "exec", "--auto", "--json", "--max-turns", "50", task]
+        
+    t0 = time.time()
+    timed_out = False
+    exit_code = None
+
+    with open(stdout_path, "w") as f:
+        try:
+            proc = subprocess.Popen(cmd, cwd=project_root, stdout=f, stderr=subprocess.STDOUT, preexec_fn=os.setsid, env=run_env)
+            exit_code = proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait()
+            timed_out = True
+        except FileNotFoundError:
+            sys.exit(f"❌ {runner} binary not found in PATH")
+
+    elapsed = time.time() - t0
+    
+    status_after = _git_status()
+    files_changed = []
+    before_lines = set(status_before.splitlines())
+    after_lines = set(status_after.splitlines())
+    for line in (after_lines - before_lines):
+        files_changed.append(line)
+
+    cost_usd = 0.0
+    cost_unknown = False
+    run_id = None
+    if runner == "codewhale":
+        cost_unknown = True
+        # First choice: the exec --json summary we captured. Live-verified
+        # 2026-07-14: it's a pretty-printed JSON object preceded by terminal
+        # escape junk, carrying status/tools but (today) no cost or session
+        # id — parsed defensively anyway so future fields activate; on any
+        # surprise we fall through, never invent numbers.
+        try:
+            content = Path(stdout_path).read_text()
+            start = content.find("{")
+            if start != -1:
+                data = json.JSONDecoder().raw_decode(content[start:])[0]
+                run_id = data.get("session_id") or data.get("sessionId")
+                for key in ("cost_usd", "total_cost_usd", "cost"):
+                    if isinstance(data.get(key), (int, float)):
+                        cost_usd = float(data[key])
+                        cost_unknown = False
+                        break
+        except Exception:
+            pass
+        if cost_unknown:
+            # Fallback: audit-log rollup, window sized to this run (metrics
+            # --since takes durations like 30m; 1m would miss a long run).
+            since = f"{int(elapsed // 60) + 2}m"
+            try:
+                r = subprocess.run(["codewhale", "metrics", "--json", "--since", since], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    data = json.loads(r.stdout)
+                    if "cost_usd" in data:
+                        cost_usd = float(data["cost_usd"])
+                        cost_unknown = False
+            except Exception:
+                pass
+
+    verify_status = "SKIPPED"
+    verify_elapsed = 0.0
+    fail_output = ""
+    if verify_cmd and not timed_out:
+        ok, vout, verify_elapsed = run_verify(verify_cmd, project_root)
+        verify_status = "PASS" if ok else "FAIL"
+        if not ok:
+            fail_output = vout
+            
+    _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id)
+
+    if timed_out:
+        status = "TIMEOUT — process group killed"
+    elif exit_code != 0:
+        status = f"FAILED (exit {exit_code})"
+    else:
+        status = "COMPLETED"
+    lines = [
+        f"runner        : {runner} ({model_name})",
+        f"status        : {status} ({elapsed:.1f}s)",
+        f"files changed : {len(files_changed)} files",
+    ]
+    if run_id:
+        lines.append(f"resume        : codewhale exec --resume {run_id}")
+    if files_changed:
+        lines.append(f"changes       : {', '.join([c.split()[-1] for c in files_changed[:3]])}" + ("..." if len(files_changed) > 3 else ""))
+        
+    if verify_cmd:
+        lines.append(f"verify        : {verify_cmd} → {verify_status}" + (f" ({verify_elapsed:.1f}s)" if verify_status != "SKIPPED" else ""))
+    else:
+        lines.append("verify        : (skipped — no --verify given)")
+        
+    if runner == "codewhale":
+        lines.append(f"cost          : {'unknown — see codewhale audit' if cost_unknown else f'${cost_usd:.6f}'}")
+    
+    lines.append(f"output saved  : {stdout_path}")
+    
+    if verify_status == "FAIL" and fail_output:
+        lines.append("")
+        lines.append("verify output (last 10 lines):")
+        lines.append(_tail_lines(fail_output, 10))
+        
+    return "\n".join(lines[:25])
+
 
 def main():
     ap = argparse.ArgumentParser(description="Delegate a task to a grunt/free model, with proof + memory.")
     ap.add_argument("-p", "--prompt")
     ap.add_argument("--plan", help="read the prompt from this file")
     ap.add_argument("--out", help="write the answer to this file (else stdout)")
-    ap.add_argument("--model", default="minimax",
-                    help="model or alias (minimax|flash|pro|grok|gemini or full names)")
+    ap.add_argument("--model", default=None,
+                    help="model or alias (minimax|flash|pro|grok|gemini or full names); "
+                         "chat/worker default: minimax; agent mode: per-runner default")
     ap.add_argument("--session", default="", help="conversation name to remember across calls")
     ap.add_argument("--new", action="store_true", help="reset the named session before running")
     ap.add_argument("--system", default="", help="system instruction (persona / rules)")
@@ -988,6 +1247,9 @@ def main():
                     help="worker mode: shell command run after writing (never guessed)")
     ap.add_argument("--retries", type=int, default=1,
                     help="worker mode: verify-failure retries (default 1, max 2)")
+    ap.add_argument("--agent", action="store_true", help="agent mode: use agy or codewhale exec for multi-step exploration")
+    ap.add_argument("--runner", default="agy", help="agent mode runner: agy (default) or codewhale")
+    ap.add_argument("--timeout", type=int, default=600, help="agent mode: timeout in seconds (default 600, max 1800)")
     a = ap.parse_args()
 
     if a.audit:
@@ -1015,8 +1277,18 @@ def main():
     if not prompt:
         sys.exit("❌ need -p PROMPT or --plan FILE (or --audit / --new)")
 
+    if a.agent:
+        timeout = min(max(a.timeout, 1), 1800)
+        # Raw a.model (None when unset): each runner has its own default, and
+        # a resolved chat default like "minimax" is meaningless to agy.
+        try:
+            print(agent_delegate(prompt, runner=a.runner, model=a.model, workdir=Path.cwd(), verify_cmd=a.verify, estimate=a.estimate, timeout_s=timeout))
+        except ValueError as e:
+            sys.exit(f"❌ {e}")
+        return
+
     try:
-        model = resolve_model(a.model)
+        model = resolve_model(a.model or "minimax")
     except ValueError as e:
         sys.exit(f"❌ {e}")
 

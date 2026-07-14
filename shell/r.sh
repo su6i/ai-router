@@ -34,6 +34,19 @@ r() {
     return "$?"
   fi
 
+  if [ "$1" = "agent" ]; then
+    shift
+    if [ "$#" -eq 0 ]; then
+      echo 'usage: r agent <task...> | r agent --<delegate flags...>' >&2
+      return 2
+    fi
+    case "$1" in
+      -*) "$py" "$repo/src/delegate.py" --agent "$@" ;;
+      *)  "$py" "$repo/src/delegate.py" --agent -p "$*" ;;
+    esac
+    return "$?"
+  fi
+
   local model="$1"
   shift
 
