@@ -82,6 +82,8 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 | **semantic cache / RAG** | pgvector + local embeddings | Pre-router interception (see §6). |
 | **local embedder** | `intfloat/multilingual-e5-small` (384-d, ONNX/CPU, offline, free) | Multilingual (fa/en/fr) prompt embeddings for the cache. Chosen for CPU/offline/free; dim 384 is wired into the schema. |
 
+**Worker Context Discipline**: To prevent worker/agent models from wasting tokens on large files, a context discipline pack now ships. It includes a strict reading-rules template (`AGENTS-context-discipline.md`) injected as a cache-friendly constant preamble in all prompts, and an auto-generated compact repo map (`src/repo_map.py`) to guide initial symbol discovery.
+
 ## 4. Data model
 
 ```sql

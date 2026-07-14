@@ -27,6 +27,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ### Added
 
 - **`delegate_agent` (CodeWhale exec / agy headless)** — A third delegation door for multi-step grunt tasks that need exploration and iterative debugging (where the exact files aren't known upfront). Wraps either `agy` (Gemini 3.1 Pro, $0 subscription quota, default) or `codewhale exec` (DeepSeek/MiniMax, paid fallback) behind the same budget caps and audit ledger. Exposed via the CLI (`r agent "<task>"`) and as an MCP tool in `mcp/server.py`. Returns a ≤25-line summary of files changed, verify result, and cost.
+- **Worker context discipline pack and repo map** — A new `AGENTS-context-discipline.md` template defines strict file-reading rules (read whole once, use `grep -n`, batch reads). A condensed version of these rules is now injected as a cache-friendly constant preamble in all worker and agent prompts. A new `src/repo_map.py` script automatically generates a compact (`< 4000` chars) repository map of top-level symbols, which is also prepended to all prompts.
+
 - **Quota-channel daily call caps** — Added optional `"daily_calls": {"google-ai-pro": 50, "gemini-free": 400}` to `budgets.json`. These enforce strict limits on the number of local delegated calls per `quota_channel` per calendar day. Free/subscription channels (where `cost_usd=0`) are now gated by this quota. Every audit row now includes a `quota_channel` field.
 
 - **Data plane Phase 1** — `db/init/01_schema.sql` defines the `usage` table for Postgres (auto-applied via Docker Compose). `src/ingest.py` provides an idempotent ingest from `audit.log` into Postgres using `psycopg[binary]`.

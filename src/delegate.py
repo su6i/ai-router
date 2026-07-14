@@ -650,6 +650,16 @@ _FILE_END = "===END FILE==="
 _SUMMARY_START = "===SUMMARY==="
 _SUMMARY_END = "===END SUMMARY==="
 
+CONTEXT_DISCIPLINE_PREAMBLE = """=== CONTEXT DISCIPLINE ===
+- Read a file ONCE, whole; never re-read an unchanged file (scroll, don't re-fetch).
+- Prefer `grep -n` to locate, then read ONLY the needed section.
+- Batch related reads into one command, not N small ones.
+- One WO phase per session; end session between phases.
+- Never paste large file bodies into your own replies/summaries.
+- At task end, report tokens/cost if the harness exposes them.
+==========================
+"""
+
 
 def parse_worker_response(text: str):
     """Parse sentinel-line blocks. Returns (files: list[(path, content)], summary: str|None).
@@ -744,8 +754,11 @@ def run_verify(cmd: str, cwd: Path):
 
 
 def build_worker_prompt(task: str, file_specs: list) -> str:
-    parts = []
-    # Files come first to maximize cache hits on constant prefixes
+    import repo_map
+    parts = [CONTEXT_DISCIPLINE_PREAMBLE]
+    parts.append(repo_map.generate_repo_map(cwd="."))
+    # Prefix-cache invariant: constant text (preamble, repo map) precedes the
+    # files block; the variable task text stays last.
     for path, content in file_specs:
         parts.append(f"===CURRENT FILE: {path}===\n{content}\n===END CURRENT FILE===\n")
     parts.append(f"Task:\n{task}\n")
@@ -1073,9 +1086,12 @@ def _write_agent_audit(model, echoed, project, commit, files_changed_count, veri
 def agent_delegate(task: str, runner: str = "agy", model: str | None = None, workdir: str | Path | None = None, verify_cmd: str = "", via: str | None = None, estimate: bool = False, timeout_s: int = 600) -> str:
     import signal
     import tempfile
+    import repo_map
     
     project_root = Path(workdir) if workdir else Path.cwd()
     project, commit = project_info()
+
+    task = f"{CONTEXT_DISCIPLINE_PREAMBLE}\n{repo_map.generate_repo_map(str(project_root))}\nTask:\n{task}"
 
     if model and "claude" in model.lower():
         raise ValueError("Claude models are banned inside delegate (subscription-billed; routing them here double-bills)")
