@@ -228,6 +228,12 @@ fallback, why Claude is never in this router, provider vs. subscription-CLI
 distinction): `STRATEGY.md` and `ROLES.md` in
 `~/.local/share/agent-projects/_router/` (vault, not in this repo).
 
+### Resilience & Fallbacks
+
+- **Retries**: All provider calls automatically retry on transient errors (HTTP 429, 5xx, or timeouts) with an exponential backoff (1s, then 3s). Hard errors (like HTTP 400 or malformed JSON responses) fail immediately with a specific `ProviderError`.
+- **MiniMax Fallback**: If the prepaid `minimax` model fails with a credit exhaustion or 401/402/429 error after retries, the router will automatically fall back to `flash` (`deepseek-v4-flash`).
+- **Gemini Fallback**: If `gemini` exhausts the free tier rate limits (HTTP 429) after retries, the router will automatically fall back to `flash`. A loud warning is printed because the fallback incurs non-zero costs.
+
 ## Status
 
 Infrastructure scaffold — schema and services are being built incrementally.
