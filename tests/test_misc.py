@@ -117,16 +117,64 @@ def test_project_info(monkeypatch):
 
 def test_cache_key():
     # Same prompt, different model
-    key1 = cache_make_key("flash", "sys", "prompt")
-    key2 = cache_make_key("pro", "sys", "prompt")
+    key1 = cache_make_key("flash", "sys", "prompt", 8192)
+    key2 = cache_make_key("pro", "sys", "prompt", 8192)
     assert key1 != key2
     
-    # NFC vs NFD
+    # Different max_output_tokens -> different key
+    key3 = cache_make_key("flash", "sys", "prompt", 4000)
+    assert key1 != key3
+    
+    # NFC vs NFD -> same key now
     nfc = "é"
     nfd = "e\u0301"
     assert nfc != nfd
     assert unicodedata.normalize("NFC", nfc) == unicodedata.normalize("NFC", nfd)
     
-    key_nfc = cache_make_key("flash", "", nfc)
-    key_nfd = cache_make_key("flash", "", nfd)
-    assert key_nfc != key_nfd  # Documents current behavior (different keys)
+    key_nfc = cache_make_key("flash", "", nfc, 8192)
+    key_nfd = cache_make_key("flash", "", nfd, 8192)
+    assert key_nfc == key_nfd
+
+def test_cache_prune(monkeypatch, tmp_path):
+    import datetime as dt
+    db_file = tmp_path / "cache.db"
+    monkeypatch.setattr("delegate.CACHE", db_file)
+    monkeypatch.setattr("delegate.CACHE_MAX_ROWS", 5)
+    monkeypatch.setattr("delegate.CACHE_MAX_AGE_DAYS", 90)
+    
+    from delegate import cache_put, cache_prune, _cache_conn
+    
+    # Insert 10 rows (cap is 5)
+    # Give them staggered dates: some older than 90 days, some recent
+    con = _cache_conn()
+    now = dt.datetime.now().astimezone()
+    for i in range(10):
+        if i < 2:
+            # older than 90 days
+            created = (now - dt.timedelta(days=100)).isoformat()
+        else:
+            # recent, staggered
+            created = (now - dt.timedelta(days=10 - i)).isoformat()
+            
+        con.execute("INSERT INTO cache VALUES(?,?,?,?,?,0)",
+                    (f"key{i}", "flash", f"prompt{i}", "resp", created))
+    con.commit()
+    con.close()
+    
+    before, after = cache_prune()
+    assert before == 10
+    assert after == 5
+    
+    # Oldest by date should be gone (keys 0, 1 are > 90 days; keys 2, 3, 4 are the oldest of the remaining)
+    con = _cache_conn()
+    remaining = [r[0] for r in con.execute("SELECT key FROM cache ORDER BY created ASC").fetchall()]
+    con.close()
+    assert remaining == ["key5", "key6", "key7", "key8", "key9"]
+    
+    # Prune failure (corrupt DB) is silent
+    db_file.write_bytes(b"not a database")
+    # Shouldn't raise
+    cache_put("new_key", "flash", "prompt", "resp")
+    
+    # Explicit cache_prune should return -1, -1 on failure
+    assert cache_prune() == (-1, -1)

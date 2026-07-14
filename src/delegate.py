@@ -42,6 +42,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 import datetime as dt
 from pathlib import Path
 import httpx
@@ -50,6 +51,8 @@ HTTP_TIMEOUT = 180
 VERIFY_TIMEOUT = 600
 GIT_TIMEOUT = 3
 SQLITE_TIMEOUT = 5
+CACHE_MAX_ROWS = 5000
+CACHE_MAX_AGE_DAYS = 90
 
 class ProviderError(Exception):
     def __init__(self, model, status, short_reason):
@@ -420,11 +423,13 @@ def save_history(session: str, history: list):
 
 # ---- exact-hash cache (playbook #13 — deterministic only, no semantic cache) --
 def _norm(s):
-    return " ".join((s or "").split())
+    if not s:
+        return ""
+    return " ".join(unicodedata.normalize("NFC", s).split())
 
 
-def cache_make_key(model, system, prompt):
-    raw = f"{model}\x00{_norm(system)}\x00{_norm(prompt)}"
+def cache_make_key(model, system, prompt, max_output_tokens):
+    raw = f"{model}\x00{_norm(system)}\x00{_norm(prompt)}\x00{max_output_tokens}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -458,8 +463,30 @@ def cache_put(key, model, prompt, response):
                      dt.datetime.now().astimezone().isoformat(timespec="seconds")))
         con.commit()
         con.close()
+        cache_prune()
     except Exception:
         pass
+
+
+def cache_prune():
+    try:
+        con = _cache_conn()
+        rows_before = con.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+        
+        now = dt.datetime.now().astimezone()
+        cutoff = (now - dt.timedelta(days=CACHE_MAX_AGE_DAYS)).isoformat(timespec="seconds")
+        con.execute("DELETE FROM cache WHERE created < ?", (cutoff,))
+        
+        con.execute("DELETE FROM cache WHERE key IN ("
+                    "SELECT key FROM cache ORDER BY created DESC LIMIT -1 OFFSET ?"
+                    ")", (CACHE_MAX_ROWS,))
+        
+        con.commit()
+        rows_after = con.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+        con.close()
+        return rows_before, rows_after
+    except Exception:
+        return -1, -1
 
 
 def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
@@ -838,7 +865,7 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
 
     # Exact-hash cache: only for stateless one-shots (a --session call is a
     # multi-turn conversation, never safe to serve from a single cached turn).
-    cache_key = cache_make_key(model, system, prompt) if (use_cache and not session) else None
+    cache_key = cache_make_key(model, system, prompt, max_output_tokens) if (use_cache and not session) else None
     if cache_key:
         hit = cache_get(cache_key)
         if hit is not None:
@@ -912,6 +939,7 @@ def main():
     ap.add_argument("--system", default="", help="system instruction (persona / rules)")
     ap.add_argument("--audit", action="store_true", help="print the delegation ledger and exit")
     ap.add_argument("--cost", action="store_true", help="print the cost report and exit")
+    ap.add_argument("--cache-prune", action="store_true", help="prune old/excess cache rows and exit")
     ap.add_argument("--estimate", action="store_true", help="print estimated cost and caps, without calling the provider")
     ap.add_argument("--since", help="YYYY-MM-DD to filter cost report")
     ap.add_argument("--today", action="store_true", help="shortcut for --since today")
@@ -935,6 +963,12 @@ def main():
     if a.cost:
         since = dt.datetime.now().astimezone().isoformat()[:10] if a.today else a.since
         show_cost(since=since, by=a.by)
+        return
+    if a.cache_prune:
+        before, after = cache_prune()
+        if before == -1:
+            sys.exit("❌ Cache prune failed (DB error/missing)")
+        print(f"🧹 Cache prune: {before} -> {after} rows (-{before - after})")
         return
     if a.new and a.session:
         f = SESSIONS / f"{a.session}.json"

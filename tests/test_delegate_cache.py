@@ -28,33 +28,34 @@ def test_norm_collapses_whitespace():
 
 
 def test_cache_make_key_deterministic_and_sensitive():
-    k1 = d.cache_make_key("gemini", "", "say hi")
-    k2 = d.cache_make_key("gemini", "", "say   hi")   # whitespace-normalized -> same
-    k3 = d.cache_make_key("gemini", "", "say hi ")     # trailing space -> same
-    k4 = d.cache_make_key("flash", "", "say hi")       # different model -> different key
-    k5 = d.cache_make_key("gemini", "sys", "say hi")   # different system -> different key
-    assert k1 == k2 == k3
-    assert k1 != k4
-    assert k1 != k5
-    assert len(k1) == 64  # sha256 hex digest
+    k1 = d.cache_make_key("gemini", "", "say hi", 8192)
+    k2 = d.cache_make_key("gemini", "sys", "say hi", 8192)
+    k3 = d.cache_make_key("flash", "", "say hi", 8192)
+    # same ignoring whitespace
+    k4 = d.cache_make_key("gemini", "", " say  hi\n", 8192)
+    assert k1 != k2
+    assert k1 != k3
+    assert k1 == k4
 
 
 def test_cache_put_get_roundtrip():
-    key = d.cache_make_key("gemini", "", "hello")
+    key = d.cache_make_key("gemini", "", "hello", 8192)
     assert d.cache_get(key) is None
-    d.cache_put(key, "gemini", "hello", "world")
-    assert d.cache_get(key) == "world"
+    d.cache_put(key, "gemini", "hello", "hi there")
+    assert d.cache_get(key) == "hi there"
 
 
 def test_cache_get_increments_hits():
-    key = d.cache_make_key("gemini", "", "hello")
-    d.cache_put(key, "gemini", "hello", "world")
-    d.cache_get(key)
-    d.cache_get(key)
+    key = d.cache_make_key("gemini", "", "hello", 8192)
+    d.cache_put(key, "gemini", "hello", "hi there")
+    
     con = d._cache_conn()
-    hits = con.execute("SELECT hits FROM cache WHERE key=?", (key,)).fetchone()[0]
-    con.close()
-    assert hits == 2
+    hits1 = con.execute("SELECT hits FROM cache WHERE key=?", (key,)).fetchone()[0]
+    
+    d.cache_get(key)
+    hits2 = con.execute("SELECT hits FROM cache WHERE key=?", (key,)).fetchone()[0]
+    
+    assert hits2 == hits1 + 1
 
 
 def test_cache_get_fails_open_on_bad_db(monkeypatch):
