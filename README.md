@@ -52,8 +52,15 @@ the vault (never in the repo). `--new` resets a named session before running.
 
 ### Cache
 
-Identical one-shot calls (same model + system + prompt) hit the exact-hash
+Identical one-shot calls (same model + system + prompt + max_output_tokens) hit the exact-hash
 cache automatically — the repeat costs $0 and never touches the provider.
+Text is NFC-normalized before hashing.
+
+The cache enforces a max of 5000 rows and 90 days retention, pruning silently on inserts. You can also manually trigger pruning:
+```bash
+python3 src/delegate.py --cache-prune
+```
+
 `--session` calls are never cached (a multi-turn conversation isn't safe to
 serve from a single cached turn). Force a live call with `--no-cache`:
 
