@@ -252,9 +252,9 @@ Requires Docker (tested with Colima on macOS).
 
 ```bash
 cd /Users/su6i/@-github/ai-router
-uv run --with pytest --with httpx pytest
+uv sync --group dev
+uv run pytest -q
 ```
 
-Expected: `48 passed` (`tests/test_delegate_cache.py` +
-`tests/test_delegate_worker.py` + `tests/test_r_wrapper.py` +
-`tests/test_mcp_server.py`).
+Expected: `73 passed` (all suites under `tests/` — offline, no API keys
+or vault needed).
