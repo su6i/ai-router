@@ -69,6 +69,14 @@ python3 src/delegate.py --model flash -p "same prompt as before"            # ca
 python3 src/delegate.py --model flash -p "same prompt as before" --no-cache  # forces a real call
 ```
 
+### Provider prompt caches
+
+Many API providers (like DeepSeek, Gemini, and MiniMax) automatically cache prompts based on exact prefix matching. `delegate.py` accounts for this discount automatically:
+
+- Cash savings are explicitly reflected in the printed cost.
+- Cache hit rates (e.g., `cache hit rate: 85.0%`) are displayed in the worker summary and `r cost` reports.
+- Worker mode uses prefix discipline (files first, task last) to maximize prefix cache efficiency.
+
 ### Worker mode
 
 `delegate.py --files` hands a cheap model direct read/write access to files on

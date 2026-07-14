@@ -30,11 +30,11 @@ def test_call_openai_success(monkeypatch):
     
     monkeypatch.setattr("httpx.post", mock_post)
     spec = {"api": "deepseek-chat", "url": "http://test"}
-    ans, raw_model, id_, p_tok, c_tok, cache_tok = call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
+    ans, raw_model, id_, p_tok, c_tok, cache_tok, cache_miss = call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
     assert ans == "hello world"
     assert raw_model == "deepseek-chat"
     assert id_ == "chatcmpl-123"
-    assert (p_tok, c_tok, cache_tok) == (10, 20, 5)
+    assert (p_tok, c_tok, cache_tok, cache_miss) == (10, 20, 5, None)
 
 def test_call_openai_error_path(monkeypatch):
     def mock_post(*args, **kwargs):
@@ -178,3 +178,23 @@ def test_cache_prune(monkeypatch, tmp_path):
     
     # Explicit cache_prune should return -1, -1 on failure
     assert cache_prune() == (-1, -1)
+
+def test_call_openai_deepseek_hit_miss(monkeypatch):
+    def mock_post(*args, **kwargs):
+        return httpx.Response(200, json={
+            "id": "chatcmpl-456",
+            "model": "deepseek-chat",
+            "choices": [{"message": {"content": "hi ds"}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 60,
+                "prompt_cache_miss_tokens": 40
+            }
+        }, request=httpx.Request("POST", "http://test"))
+    
+    monkeypatch.setattr("httpx.post", mock_post)
+    spec = {"api": "deepseek-chat", "url": "http://test"}
+    ans, raw_model, id_, p_tok, c_tok, cache_tok, cache_miss = call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
+    assert ans == "hi ds"
+    assert (p_tok, c_tok, cache_tok, cache_miss) == (100, 20, 60, 40)

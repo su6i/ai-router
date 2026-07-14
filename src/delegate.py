@@ -117,13 +117,16 @@ CACHE = DATA_DIR / "cache.db"
 # key -> provider spec. provider: "openai" (OpenAI-compatible) or "gemini".
 # Priority (per STRATEGY.md): MiniMax first (prepaid, never recharged) → DeepSeek → Grok.
 # Gemini is FREE ($0) but rate-limited (~a few req) — good for light chat/code one-shots.
+# cin_cached provenance: minimax 0.06 = owner's real billing (2026-07-13);
+# deepseek 0.014/0.0435 = assumed 10x cache-hit discount (research 2026-07-11,
+# official page lists no v4 models) — verify against real DeepSeek billing.
 MODELS = {
     "minimax": dict(api="MiniMax-M3",        provider="openai", url="https://api.minimax.io/v1",
-                    cin=0.30, cout=1.20, key="MINIMAX_API_KEY"),
+                    cin=0.30, cin_cached=0.06, cout=1.20, key="MINIMAX_API_KEY"),
     "flash":   dict(api="deepseek-v4-flash", provider="openai", url="https://api.deepseek.com/v1",
-                    cin=0.14, cout=0.28, key="DEEPSEEK_API_KEY"),
+                    cin=0.14, cin_cached=0.014, cout=0.28, key="DEEPSEEK_API_KEY"),
     "pro":     dict(api="deepseek-v4-pro",   provider="openai", url="https://api.deepseek.com/v1",
-                    cin=0.435, cout=0.87, key="DEEPSEEK_API_KEY"),
+                    cin=0.435, cin_cached=0.0435, cout=0.87, key="DEEPSEEK_API_KEY"),
     "grok":    dict(api="grok-4.3",          provider="openai", url="https://api.x.ai/v1",
                     cin=1.25, cout=2.50, key="GROK_API_KEY"),
     "gemini":  dict(api="gemini-2.5-flash",  provider="gemini",
@@ -490,7 +493,7 @@ def cache_prune():
 
 
 def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
-                  cache, cost, dt_s, cached=False, via=None):
+                  cache, cost, dt_s, cached=False, via=None, cache_miss=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -502,6 +505,8 @@ def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
     }
     if via is not None:
         rec["via"] = via
+    if cache_miss is not None:
+        rec["cache_miss"] = cache_miss
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
 
@@ -518,9 +523,19 @@ def call_openai(spec, key, history, system, max_output_tokens: int = 8192):
     except (KeyError, IndexError):
         raise ProviderError(spec["api"], 200, "malformed response: missing choices[0].message.content")
     u = d.get("usage", {})
+    
+    # Priority: DeepSeek explicit prompt_cache_hit_tokens, fallback to OpenAI compat field
+    cache_hit = u.get("prompt_cache_hit_tokens")
+    if cache_hit is not None:
+        cache = cache_hit
+        cache_miss = u.get("prompt_cache_miss_tokens")
+    else:
+        cache = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        cache_miss = None
+
     return (content, d.get("model"), d.get("id"),
             u.get("prompt_tokens", 0), u.get("completion_tokens", 0),
-            (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
+            cache, cache_miss)
 
 
 def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
@@ -544,7 +559,7 @@ def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
     um = d.get("usageMetadata", {})
     return (text, d.get("modelVersion", spec["api"]), d.get("responseId"),
             um.get("promptTokenCount", 0), um.get("candidatesTokenCount", 0),
-            um.get("cachedContentTokenCount", 0))
+            um.get("cachedContentTokenCount", 0), None)
 
 
 # ---- worker mode (--files) — SPEC v1, DELEGATE-TOOL-DESIGN.md ---------------
@@ -666,15 +681,17 @@ def run_verify(cmd: str, cwd: Path):
 
 
 def build_worker_prompt(task: str, file_specs: list) -> str:
-    parts = [f"Task:\n{task}\n"]
+    parts = []
+    # Files come first to maximize cache hits on constant prefixes
     for path, content in file_specs:
         parts.append(f"===CURRENT FILE: {path}===\n{content}\n===END CURRENT FILE===\n")
+    parts.append(f"Task:\n{task}\n")
     return "\n".join(parts)
 
 
 def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                             max_attempts, elapsed, summary, total_files, cost,
-                            echoed_model, fail_tail):
+                            echoed_model, fail_tail, hit_rates):
     def fmt_written(items):
         return ", ".join(f"{p} ({_human_size(sz)})" for p, sz in items) if items else "(none)"
 
@@ -693,7 +710,8 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
     else:
         lines.append("verify        : (skipped — no --verify given)")
     lines.append(f"worker summary: {summary or f'worker returned {total_files} files, no summary'}")
-    lines.append(f"cost          : ${cost:.6f} · model echoed: {echoed_model}")
+    hr_str = ", ".join(hit_rates) if hit_rates else "0.0%"
+    lines.append(f"cost          : ${cost:.6f} · model echoed: {echoed_model} · cache hit rate: {hr_str}")
     if verify_status == "FAIL" and fail_tail:
         lines.append("")
         lines.append("verify output (last 15 lines):")
@@ -743,15 +761,25 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
         file_specs.append((rel, content))
 
     caller = call_gemini if spec["provider"] == "gemini" else call_openai
+    # Prefix discipline: system prompt (WORKER_PROTOCOL_SYSTEM) is the constant head;
+    # history is append-only for retries; files come before the task string.
     history = [{"role": "user", "content": build_worker_prompt(task, file_specs)}]
     total_cost = 0.0
     echoed_model = spec["api"]
+    hit_rates = []
 
     def call_once():
         nonlocal total_cost, echoed_model
-        answer, echoed, rid, pin, pout, _ = caller(spec, key, history, WORKER_PROTOCOL_SYSTEM)
-        total_cost += pin / 1e6 * spec["cin"] + pout / 1e6 * spec["cout"]
+        answer, echoed, rid, pin, pout, cache, cache_miss = caller(spec, key, history, WORKER_PROTOCOL_SYSTEM)
+        
+        cached = min(cache, pin)
+        cin = spec["cin"]
+        cin_cached = spec.get("cin_cached", cin)
+        total_cost += (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * spec["cout"]
+        
         echoed_model = echoed or echoed_model
+        if pin > 0:
+            hit_rates.append(f"{cache/pin*100:.1f}%")
         return answer
 
     answer = call_once()
@@ -801,7 +829,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
 
     return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                                   max_attempts, elapsed, summary, total_files, total_cost,
-                                  echoed_model, fail_output)
+                                  echoed_model, fail_output, hit_rates)
 
 
 def _write_worker_audit(model, echoed, project, commit, written, rejected,
@@ -883,16 +911,21 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
 
     t0 = time.time()
     caller = call_gemini if spec["provider"] == "gemini" else call_openai
-    answer, echoed, rid, pin, pout, cache = caller(
+    answer, echoed, rid, pin, pout, cache, cache_miss = caller(
         spec, key, history, system, max_output_tokens=max_output_tokens)
     
     dt_s = time.time() - t0
-    cost = pin / 1e6 * spec["cin"] + pout / 1e6 * spec["cout"]
+    
+    cached = min(cache, pin)
+    cin = spec["cin"]
+    cin_cached = spec.get("cin_cached", cin)
+    cost = (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * spec["cout"]
 
     print("\n===== PROOF (from provider's server) =====")
     print("model echoed :", echoed)
     print("response id  :", rid)
-    print("usage        : in=%d out=%d cache=%d" % (pin, pout, cache))
+    hit_rate = f" ({cache/pin*100:.1f}%)" if pin > 0 else ""
+    print(f"usage        : in={pin} out={pout} cache={cache}{hit_rate}")
     print("cost         : $%.6f%s" % (cost, "  (FREE tier)" if spec["cin"] == 0 else ""))
     print("latency      : %.2fs" % dt_s)
     print("==========================================\n")
@@ -905,7 +938,7 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
         cache_put(cache_key, model, prompt, answer)
 
     _write_audit(model, echoed, rid, session, project, commit, pin, pout,
-                 cache, cost, dt_s, cached=False, via=via)
+                 cache, cost, dt_s, cached=False, via=via, cache_miss=cache_miss)
     return answer
 
 

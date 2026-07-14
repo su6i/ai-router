@@ -43,7 +43,7 @@ def _fake_call_gemini(spec, key, history, system, max_output_tokens=8192):
     if text == "__RAISE__":
         raise RuntimeError("stubbed provider failure")
     return (text.format(max_output_tokens=max_output_tokens), spec["api"],
-            "resp-%d" % _calls["n"], 10, 5, 0)
+            "resp-%d" % _calls["n"], 10, 5, 0, None)
 
 def _fake_call_openai(spec, key, history, system, max_output_tokens=8192):
     # Hard safety net: this test suite must make zero real provider calls.

@@ -68,6 +68,14 @@ python3 src/delegate.py --model flash -p "same prompt as before"            # ca
 python3 src/delegate.py --model flash -p "same prompt as before" --no-cache  # فراخوانیِ واقعی را اجبار می‌کند
 ```
 
+### کش پرامپتِ Providerها (Provider prompt caches)
+
+بسیاری از ارائه‌دهندگان API (مانند DeepSeek، Gemini، و MiniMax) پرامپت‌ها را بر اساس تطابق دقیق پیشوند (prefix) به‌طور خودکار کش می‌کنند. `delegate.py` این تخفیف‌ها را به‌طور خودکار محاسبه می‌کند:
+
+- صرفه‌جویی مالی به‌طور واضح در هزینه‌ی چاپ‌شده منعکس می‌شود.
+- نرخ موفقیتِ کشِ provider (مثلاً `cache hit rate: 85.0%`) در خلاصه‌ی worker و گزارش‌های `cost` نمایش داده می‌شود.
+- حالت Worker از انضباط پیشوند (فایل‌ها اول، کار در آخر) برای به حداکثر رساندن بهره‌وری از کش پیشوند استفاده می‌کند.
+
 ### Worker mode
 
 `delegate.py --files` به یک مدل ارزان دسترسی مستقیم خواندن/نوشتن روی فایل‌های

@@ -31,7 +31,7 @@ def fake_caller(responses):
     def _call(spec, key, history, system):
         text = responses[min(calls["n"], len(responses) - 1)]
         calls["n"] += 1
-        return (text, spec["api"], f"resp-{calls['n']}", 10, 5, 0)
+        return (text, spec["api"], f"resp-{calls['n']}", 10, 5, 0, None)
 
     _call.calls = calls
     return _call
@@ -271,3 +271,21 @@ def test_worker_delegate_writes_audit_line(tmp_path, monkeypatch):
     assert rec["files_written"] == ["src/foo.py"]
     assert rec["verify_status"] == "PASS"
     assert rec["attempts"] == 1
+
+def test_build_worker_prompt_ordering():
+    task = "do the thing"
+    file_specs = [("foo.py", "print('foo')"), ("bar.py", "print('bar')")]
+    prompt = d.build_worker_prompt(task, file_specs)
+    
+    # Files must come before the task string
+    idx_foo = prompt.find("===CURRENT FILE: foo.py===")
+    idx_bar = prompt.find("===CURRENT FILE: bar.py===")
+    idx_task = prompt.find("Task:")
+    
+    assert idx_foo != -1
+    assert idx_bar != -1
+    assert idx_task != -1
+    
+    assert idx_foo < idx_task
+    assert idx_bar < idx_task
+    assert idx_foo < idx_bar
