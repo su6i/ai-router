@@ -67,6 +67,11 @@ def _spawn_server(tmp_path, responses, extra_env=None):
     env = dict(os.environ)
     env["AI_ROUTER_DATA_DIR"] = str(tmp_path / "vault")
     env["GEMINI_API_KEY"] = "fake-key-for-tests"
+    # On machines without the vault (CI), load_env() finds no .env, so these
+    # fakes are what keeps the server from failing the key check before it
+    # reaches the code path under test. On dev machines the vault overrides.
+    env["DEEPSEEK_API_KEY"] = "fake-key-for-tests"
+    env["MINIMAX_API_KEY"] = "fake-key-for-tests"
     env.pop("GROK_API_KEY", None)
     if extra_env:
         env.update(extra_env)

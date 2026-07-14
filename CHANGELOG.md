@@ -7,6 +7,16 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Fixed
+
+- **CI hermeticity** — First CI run on `main` exposed two vault-machine
+  assumptions: the MCP budget-abort test reached the provider key check before
+  the budget check on runners without the vault `.env` (fixed by injecting fake
+  `DEEPSEEK_API_KEY`/`MINIMAX_API_KEY` into the test server env), and the 6
+  zsh-parametrized `test_r_wrapper` cases silently dropped off ubuntu-latest
+  (fixed by installing zsh in the workflow). CI now runs the same 73 tests as
+  local.
+
 ### Added
 
 - **Formalized dependencies and CI/CD** — Declared runtime dependencies (`httpx`) and dev dependencies (`pytest`) in `pyproject.toml`. Added GitHub Actions workflow (`.github/workflows/test.yml`) for automated testing and code quality checks using `uv` and `ruff`. Added comprehensive offline tests covering `call_openai`, audit reporting, `project_info`, and MCP server edge cases.
