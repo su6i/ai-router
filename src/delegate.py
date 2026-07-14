@@ -46,6 +46,44 @@ import datetime as dt
 from pathlib import Path
 import httpx
 
+HTTP_TIMEOUT = 180
+VERIFY_TIMEOUT = 600
+GIT_TIMEOUT = 3
+SQLITE_TIMEOUT = 5
+
+class ProviderError(Exception):
+    def __init__(self, model, status, short_reason):
+        super().__init__(f"{model} failed: HTTP {status} ({short_reason})")
+        self.model = model
+        self.status = status
+        self.short_reason = short_reason
+
+def _post_with_retry(model, *args, **kwargs):
+    kwargs["timeout"] = HTTP_TIMEOUT
+    max_attempts = 3
+    sleeps = [1, 3]
+    for attempt in range(max_attempts):
+        try:
+            r = httpx.post(*args, **kwargs)
+            if r.status_code == 200:
+                return r
+            if r.status_code in (429, 500, 502, 503, 504):
+                status = r.status_code
+                reason = r.reason_phrase
+            else:
+                raise ProviderError(model, r.status_code, r.reason_phrase)
+        except httpx.TimeoutException:
+            status = "TIMEOUT"
+            reason = "timeout"
+        except httpx.RequestError as e:
+            status = "NETWORK_ERROR"
+            reason = type(e).__name__
+
+        if attempt < max_attempts - 1:
+            time.sleep(sleeps[attempt])
+        else:
+            raise ProviderError(model, status, reason)
+
 
 def _agent_projects_root() -> Path:
     xdg = os.environ.get("XDG_DATA_HOME")
@@ -112,7 +150,7 @@ ALIASES = {
 def resolve_model(name: str) -> str:
     key = ALIASES.get(name.strip().lower())
     if key is None:
-        sys.exit(f"❌ unknown model '{name}'. Known: {', '.join(sorted(ALIASES))}")
+        raise ValueError(f"unknown model '{name}'. Known: {', '.join(sorted(ALIASES))}")
     return key
 
 
@@ -134,7 +172,7 @@ def project_info():
     def git(*a):
         try:
             r = subprocess.run(["git", *a], cwd=cwd, capture_output=True,
-                               text=True, timeout=3)
+                               text=True, timeout=GIT_TIMEOUT)
             return r.stdout.strip() if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -392,7 +430,7 @@ def cache_make_key(model, system, prompt):
 
 def _cache_conn():
     CACHE.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(CACHE, timeout=5)
+    con = sqlite3.connect(CACHE, timeout=SQLITE_TIMEOUT)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, model TEXT,"
                 " prompt TEXT, response TEXT, created TEXT, hits INTEGER DEFAULT 0)")
@@ -444,13 +482,16 @@ def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
 # ---- provider calls ----------------------------------------------------------
 def call_openai(spec, key, history, system, max_output_tokens: int = 8192):
     msgs = ([{"role": "system", "content": system}] if system else []) + history
-    r = httpx.post(f"{spec['url']}/chat/completions", timeout=180,
-                   headers={"Authorization": f"Bearer {key}"},
-                   json={"model": spec["api"], "messages": msgs, "max_tokens": max_output_tokens})
-    r.raise_for_status()
+    r = _post_with_retry(spec["api"], f"{spec['url']}/chat/completions",
+                         headers={"Authorization": f"Bearer {key}"},
+                         json={"model": spec["api"], "messages": msgs, "max_tokens": max_output_tokens})
     d = r.json()
+    try:
+        content = d["choices"][0]["message"]["content"]
+    except (KeyError, IndexError):
+        raise ProviderError(spec["api"], 200, "malformed response: missing choices[0].message.content")
     u = d.get("usage", {})
-    return (d["choices"][0]["message"]["content"], d.get("model"), d.get("id"),
+    return (content, d.get("model"), d.get("id"),
             u.get("prompt_tokens", 0), u.get("completion_tokens", 0),
             (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
 
@@ -466,12 +507,14 @@ def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
             contents[0]["parts"][0]["text"] = system + "\n\n" + contents[0]["parts"][0]["text"]
         else:
             body["systemInstruction"] = {"parts": [{"text": system}]}
-    r = httpx.post(f"{spec['url']}/models/{spec['api']}:generateContent?key={key}",
-                   timeout=180, headers={"Content-Type": "application/json"}, json=body)
-    r.raise_for_status()
+    r = _post_with_retry(spec["api"], f"{spec['url']}/models/{spec['api']}:generateContent?key={key}",
+                         headers={"Content-Type": "application/json"}, json=body)
     d = r.json()
+    try:
+        text = d["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        raise ProviderError(spec["api"], 200, "malformed response: missing candidates[0].content.parts[0].text")
     um = d.get("usageMetadata", {})
-    text = d["candidates"][0]["content"]["parts"][0]["text"]
     return (text, d.get("modelVersion", spec["api"]), d.get("responseId"),
             um.get("promptTokenCount", 0), um.get("candidatesTokenCount", 0),
             um.get("cachedContentTokenCount", 0))
@@ -587,11 +630,11 @@ def run_verify(cmd: str, cwd: Path):
     t0 = time.time()
     try:
         r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
-                           text=True, timeout=600)
+                           text=True, timeout=VERIFY_TIMEOUT)
         ok = r.returncode == 0
         output = (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired:
-        ok, output = False, "TIMEOUT after 600s"
+        ok, output = False, f"TIMEOUT after {VERIFY_TIMEOUT}s"
     return ok, output, time.time() - t0
 
 
@@ -631,7 +674,7 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
     return "\n".join(lines)
 
 
-def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
+def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path = None,
                      via: str | None = None, estimate: bool = False) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
@@ -754,7 +797,24 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
         fh.write(json.dumps(rec) + "\n")
 
 
-def delegate(prompt: str, model: str, session: str = "", system: str = "",
+def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
+                     verify_cmd: str, retries: int, project_root: Path = None,
+                     via: str | None = None, estimate: bool = False) -> str:
+    try:
+        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
+    except ProviderError as e:
+        if model == "minimax" and e.status in (401, 402, 429):
+            print(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
+                  f"Per policy MiniMax is NOT recharged; falling back to DeepSeek flash. "
+                  f"Make 'flash' your default from now on.", file=sys.stderr)
+            return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
+        if model == "gemini" and e.status == 429:
+            print("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
+                  "Spend is now NONZERO.", file=sys.stderr)
+            return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
+        raise
+
+def _delegate_inner(prompt: str, model: str, session: str = "", system: str = "",
              use_cache: bool = True, max_output_tokens: int = 8192,
              via: str | None = None, estimate: bool = False) -> str:
     spec = MODELS[model]
@@ -798,6 +858,7 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
     caller = call_gemini if spec["provider"] == "gemini" else call_openai
     answer, echoed, rid, pin, pout, cache = caller(
         spec, key, history, system, max_output_tokens=max_output_tokens)
+    
     dt_s = time.time() - t0
     cost = pin / 1e6 * spec["cin"] + pout / 1e6 * spec["cout"]
 
@@ -819,6 +880,24 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
     _write_audit(model, echoed, rid, session, project, commit, pin, pout,
                  cache, cost, dt_s, cached=False, via=via)
     return answer
+
+
+def delegate(prompt: str, model: str, session: str = "", system: str = "",
+             use_cache: bool = True, max_output_tokens: int = 8192,
+             via: str | None = None, estimate: bool = False) -> str:
+    try:
+        return _delegate_inner(prompt, model, session, system, use_cache, max_output_tokens, via, estimate)
+    except ProviderError as e:
+        if model == "minimax" and e.status in (401, 402, 429):
+            print(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
+                  f"Per policy MiniMax is NOT recharged; falling back to DeepSeek flash. "
+                  f"Make 'flash' your default from now on.", file=sys.stderr)
+            return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
+        if model == "gemini" and e.status == 429:
+            print("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
+                  "Spend is now NONZERO.", file=sys.stderr)
+            return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
+        raise
 
 
 def main():
@@ -869,24 +948,17 @@ def main():
     if not prompt:
         sys.exit("❌ need -p PROMPT or --plan FILE (or --audit / --new)")
 
-    model = resolve_model(a.model)
+    try:
+        model = resolve_model(a.model)
+    except ValueError as e:
+        sys.exit(f"❌ {e}")
 
     if a.files:
         print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries, estimate=a.estimate))
         return
 
     use_cache = not a.no_cache
-    try:
-        answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache, estimate=a.estimate)
-    except httpx.HTTPStatusError as e:
-        # MiniMax is prepaid and NEVER recharged; on 401/402/429 fall back to DeepSeek.
-        if model == "minimax" and e.response.status_code in (401, 402, 429):
-            print(f"⚠️  MiniMax failed (HTTP {e.response.status_code}) — credit likely "
-                  f"exhausted. Per policy MiniMax is NOT recharged; falling back to "
-                  f"DeepSeek flash. Make 'flash' your default from now on.", file=sys.stderr)
-            answer = delegate(prompt, "flash", a.session, a.system, use_cache=use_cache)
-        else:
-            raise
+    answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache, estimate=a.estimate)
 
     if a.out:
         Path(a.out).write_text(answer)

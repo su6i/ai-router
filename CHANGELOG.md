@@ -11,6 +11,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 - **`r cost` (Cost Report)** — A new CLI subcommand (`python3 src/delegate.py --cost` and `r cost`) to aggregate `audit.log` into an aligned text table of spend and cache hit rates. Supports time filtering (`--since YYYY-MM-DD`, `--today`) and custom groupings (`--by model|project|session|via|day`).
 
+- **Provider resilience & automatic fallbacks** — Added automatic retries with exponential backoff for transient errors (HTTP 429, 5xx, or timeouts) and clear `ProviderError` exceptions for hard failures (missing response fields or HTTP 4xx). Added an automatic fallback to `flash` for `gemini` if the free tier rate limit is exhausted, mirroring the existing fallback behavior for `minimax` credit exhaustion. Replaced `sys.exit` in `resolve_model` with a `ValueError` so invalid models correctly map to JSON-RPC `INVALID_PARAMS` errors in the MCP server.
+
 - **Budget caps & cost estimates (`--estimate`)** — Implemented fail-loud budget caps for the router. Budgets are defined in `<vault>/data/budgets.json` (monthly, weekly, per-session, per-project). If any cap is exceeded, the router aborts the call and exits with an error (which surfaces as a JSON-RPC error in the MCP path). If usage reaches 80% of a cap, a warning is printed to stderr. Added `--estimate` flag to dry-run calls, returning estimated token usage and cost alongside current budget spend without hitting the provider or writing to the audit log.
 
 - **Delegation triggers — imperative tool descriptions + PreToolUse nudge
