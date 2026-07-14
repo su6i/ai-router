@@ -11,6 +11,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 - **`r cost` (Cost Report)** — A new CLI subcommand (`python3 src/delegate.py --cost` and `r cost`) to aggregate `audit.log` into an aligned text table of spend and cache hit rates. Supports time filtering (`--since YYYY-MM-DD`, `--today`) and custom groupings (`--by model|project|session|via|day`).
 
+- **Budget caps & cost estimates (`--estimate`)** — Implemented fail-loud budget caps for the router. Budgets are defined in `<vault>/data/budgets.json` (monthly, weekly, per-session, per-project). If any cap is exceeded, the router aborts the call and exits with an error (which surfaces as a JSON-RPC error in the MCP path). If usage reaches 80% of a cap, a warning is printed to stderr. Added `--estimate` flag to dry-run calls, returning estimated token usage and cost alongside current budget spend without hitting the provider or writing to the audit log.
+
 - **Delegation triggers — imperative tool descriptions + PreToolUse nudge
   hook.** The MCP tools existed but the premium architect model never
   called them; two layers now push it toward the worker. (1) Both tool
@@ -87,3 +89,4 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   (`~/.local/share/agent-projects/ai-router/data/`, override with
   `AI_ROUTER_DATA_DIR`) and is never committed. The old `_router/delegate.py`
   path is now a thin deprecation shim.
+ 

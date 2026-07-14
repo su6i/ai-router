@@ -107,6 +107,26 @@ Prints `audit.log` (one JSON line per call: model asked/echoed, session,
 project, commit, cost, cached; worker-mode calls add files written/rejected,
 verify command/status, attempts).
 
+### Budgets
+
+Budget caps fail loudly — a job over its cap aborts; silent overspend is
+forbidden. Limits are configured in `<vault>/data/budgets.json`. If no file
+exists, spend is uncapped but a warning is printed to stderr.
+
+Schema (see `budgets.example.json` in the repo root):
+
+```json
+{
+  "monthly_usd": 5.0,
+  "weekly_usd": 2.0,
+  "per_session_usd": 0.50,
+  "per_project_monthly_usd": {}
+}
+```
+
+Use `--estimate` to dry-run a call: prints estimated tokens, cost, and current
+budget usage without calling the provider or writing to the audit log.
+
 ### Cost Report
 
 ```bash

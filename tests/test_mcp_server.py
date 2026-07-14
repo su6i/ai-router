@@ -206,6 +206,31 @@ def test_tools_call_delegate_failure_returns_jsonrpc_error(tmp_path):
         proc.wait(timeout=5)
 
 
+def test_tools_call_budget_abort_returns_jsonrpc_error(tmp_path):
+    # Create budget file and audit log that exceeds it
+    vault = tmp_path / "vault" / "data"
+    vault.mkdir(parents=True, exist_ok=True)
+    (vault / "budgets.json").write_text('{"monthly_usd": 1.0}')
+    (vault / "audit.log").write_text(json.dumps({
+        "ts": "2026-07-14T00:00:00+00:00",
+        "cost_usd": 1.5,
+    }) + "\n")
+
+    proc = _spawn_server(tmp_path, ["won't be called"])
+    try:
+        _init(proc)
+        _send(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                     "params": {"name": "delegate_research",
+                                "arguments": {"question": "anything", "model": "flash"}}})
+        resp = _recv(proc)
+        assert "result" not in resp
+        assert resp["error"]["code"] == -32000
+        assert "BUDGET ABORT: monthly_usd cap exceeded" in resp["error"]["message"]
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+
 def test_tools_call_unknown_tool_returns_jsonrpc_error(server_proc):
     _init(server_proc)
     _send(server_proc, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",

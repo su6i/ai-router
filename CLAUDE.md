@@ -24,8 +24,7 @@ python-core-standards, python-containerization
   rejected; do not reintroduce it.
 - **Claude models are never called from the delegate/gateway** (they are
   billed via subscription; routing them through the gateway double-bills).
-- **Budget caps fail loudly** — a job over its cap aborts; silent overspend
-  is forbidden.
+- **Budget caps fail loudly** — a job over its cap aborts; silent overspend is forbidden. Limits are configured in `~/.local/share/agent-projects/ai-router/data/budgets.json`.
 - Docs live under `docs/`; work orders and private design docs live in the
   vault workspace and are never committed (rules 035/040/045).
 

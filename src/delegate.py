@@ -69,6 +69,7 @@ VAULT = _vault_root()
 DATA_DIR = VAULT / "data"
 SECRETS_DIR = VAULT / "secrets"
 AUDIT = DATA_DIR / "audit.log"
+BUDGETS = DATA_DIR / "budgets.json"
 SESSIONS = DATA_DIR / "sessions"
 CACHE = DATA_DIR / "cache.db"
 
@@ -147,6 +148,108 @@ def project_info():
 
 def show_audit():
     print(AUDIT.read_text().rstrip() if AUDIT.exists() else "(no audit.log yet)")
+
+
+def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_estimate: bool = False, model_spec: dict = None):
+    has_budgets = BUDGETS.exists()
+    if not has_budgets:
+        if not print_estimate:
+            print("⚠️  no budgets.json — spend uncapped", file=sys.stderr)
+        budgets = {}
+    else:
+        try:
+            budgets = json.loads(BUDGETS.read_text())
+            if not budgets and not print_estimate:
+                print("⚠️  no budgets.json — spend uncapped", file=sys.stderr)
+        except Exception:
+            if not print_estimate:
+                print("⚠️  budgets.json is invalid JSON — spend uncapped", file=sys.stderr)
+            budgets = {}
+
+    monthly_cap = budgets.get("monthly_usd")
+    weekly_cap = budgets.get("weekly_usd")
+    session_cap = budgets.get("per_session_usd")
+    project_caps = budgets.get("per_project_monthly_usd", {})
+    project_cap = project_caps.get(project) if project else None
+
+    now = dt.datetime.now().astimezone()
+    month_str = now.isoformat()[:7]
+    week_ago = (now - dt.timedelta(days=7)).isoformat()
+
+    spent_month = 0.0
+    spent_week = 0.0
+    spent_session = 0.0
+    spent_project = 0.0
+
+    if AUDIT.exists():
+        with AUDIT.open("r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                cost = rec.get("cost_usd", 0.0)
+                if not cost:
+                    continue
+                
+                ts = rec.get("ts", "")
+                if ts.startswith(month_str):
+                    spent_month += cost
+                    if project and rec.get("project") == project:
+                        spent_project += cost
+                if ts >= week_ago:
+                    spent_week += cost
+                if session and rec.get("session") == session:
+                    spent_session += cost
+
+    if print_estimate:
+        print("  Current month spend vs caps:")
+        if monthly_cap is not None:
+            print(f"    monthly_usd: ${spent_month:.6f} / ${monthly_cap:.2f}")
+        else:
+            print(f"    monthly_usd: ${spent_month:.6f} / (uncapped)")
+        
+        print("  Other caps:")
+        if weekly_cap is not None:
+            print(f"    weekly_usd : ${spent_week:.6f} / ${weekly_cap:.2f}")
+        else:
+            print(f"    weekly_usd : ${spent_week:.6f} / (uncapped)")
+            
+        if session:
+            if session_cap is not None:
+                print(f"    session_usd: ${spent_session:.6f} / ${session_cap:.2f}")
+            else:
+                print(f"    session_usd: ${spent_session:.6f} / (uncapped)")
+                
+        sys.exit(0)
+
+    # Apply estimate to actual spend
+    spent_month += estimate_cost
+    spent_week += estimate_cost
+    if session:
+        spent_session += estimate_cost
+    if project:
+        spent_project += estimate_cost
+
+    def _check(name, spent, cap):
+        if cap is not None:
+            if spent > cap:
+                if model_spec and model_spec.get("cin") == 0 and model_spec.get("cout") == 0:
+                    print(f"⚠️  BUDGET WARNING: {name} cap exceeded (${spent:.6f} > ${cap:.2f}) but proceeding because model is FREE.", file=sys.stderr)
+                else:
+                    sys.exit(f"❌ BUDGET ABORT: {name} cap exceeded (${spent:.6f} > ${cap:.2f})")
+            elif spent >= cap * 0.8:
+                print(f"⚠️  BUDGET WARNING: {name} spend at ${spent:.6f} (cap: ${cap:.2f})", file=sys.stderr)
+
+    _check("monthly_usd", spent_month, monthly_cap)
+    _check("weekly_usd", spent_week, weekly_cap)
+    if project:
+        _check(f"per_project_monthly_usd[{project}]", spent_project, project_cap)
+    if session:
+        _check("per_session_usd", spent_session, session_cap)
 
 
 def show_cost(since: str = None, by: str = "model"):
@@ -530,7 +633,7 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
 
 def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path = None,
-                     via: str | None = None) -> str:
+                     via: str | None = None, estimate: bool = False) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
     spec = MODELS[model]
@@ -539,6 +642,26 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
         sys.exit(f"❌ {spec['key']} not set in vault .env")
 
     project_root = project_root or Path.cwd()
+    project, commit = project_info()
+
+    if estimate:
+        # Heuristic length of prompt including files
+        est_len = len(task)
+        for rel in (f.strip() for f in (files_arg or "").split(",") if f.strip()):
+            p = project_root / rel
+            if p.exists():
+                est_len += len(p.read_text())
+        prompt_len = est_len // 4
+        est_cost = prompt_len / 1e6 * spec["cin"] + 8192 / 1e6 * spec["cout"]
+        print(f"ESTIMATE for {model} ({spec['api']}):")
+        print(f"  Input tokens : ~{prompt_len} (heuristic)")
+        print("  Output tokens: 8192 (assumed max)")
+        print(f"  Price/1M     : in=${spec['cin']:.3f} / out=${spec['cout']:.3f}")
+        print(f"  Cost USD     : ~${est_cost:.6f}")
+        check_budget(project, None, print_estimate=True, model_spec=spec)
+
+    check_budget(project, None, model_spec=spec)
+
     rel_files = [f.strip() for f in files_arg.split(",") if f.strip()] if files_arg else []
     allow_patterns = [p.strip() for p in allow_write_arg.split(",") if p.strip()] if allow_write_arg else []
     max_attempts = min(max(retries, 0), 2) + 1
@@ -633,13 +756,25 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
 
 def delegate(prompt: str, model: str, session: str = "", system: str = "",
              use_cache: bool = True, max_output_tokens: int = 8192,
-             via: str | None = None) -> str:
+             via: str | None = None, estimate: bool = False) -> str:
     spec = MODELS[model]
     key = os.environ.get(spec["key"], "")
     if not key:
         sys.exit(f"❌ {spec['key']} not set in vault .env")
 
     project, commit = project_info()
+
+    if estimate:
+        prompt_len = len(prompt + system) // 4
+        est_cost = prompt_len / 1e6 * spec["cin"] + max_output_tokens / 1e6 * spec["cout"]
+        print(f"ESTIMATE for {model} ({spec['api']}):")
+        print(f"  Input tokens : ~{prompt_len} (heuristic)")
+        print(f"  Output tokens: {max_output_tokens} (assumed max)")
+        print(f"  Price/1M     : in=${spec['cin']:.3f} / out=${spec['cout']:.3f}")
+        print(f"  Cost USD     : ~${est_cost:.6f}")
+        check_budget(project, session, print_estimate=True, model_spec=spec)
+
+    check_budget(project, session, model_spec=spec)
 
     # Exact-hash cache: only for stateless one-shots (a --session call is a
     # multi-turn conversation, never safe to serve from a single cached turn).
@@ -698,6 +833,7 @@ def main():
     ap.add_argument("--system", default="", help="system instruction (persona / rules)")
     ap.add_argument("--audit", action="store_true", help="print the delegation ledger and exit")
     ap.add_argument("--cost", action="store_true", help="print the cost report and exit")
+    ap.add_argument("--estimate", action="store_true", help="print estimated cost and caps, without calling the provider")
     ap.add_argument("--since", help="YYYY-MM-DD to filter cost report")
     ap.add_argument("--today", action="store_true", help="shortcut for --since today")
     ap.add_argument("--by", default="model", help="group cost report by (model|project|session|via|day)")
@@ -736,12 +872,12 @@ def main():
     model = resolve_model(a.model)
 
     if a.files:
-        print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries))
+        print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries, estimate=a.estimate))
         return
 
     use_cache = not a.no_cache
     try:
-        answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache)
+        answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache, estimate=a.estimate)
     except httpx.HTTPStatusError as e:
         # MiniMax is prepaid and NEVER recharged; on 401/402/429 fall back to DeepSeek.
         if model == "minimax" and e.response.status_code in (401, 402, 429):
