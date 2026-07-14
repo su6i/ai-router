@@ -236,14 +236,24 @@ HTTP/SSE، بدون auth (خارج از scope نسخه‌ی ۱).
 اسکلت زیرساخت — اسکیما و سرویس‌ها مرحله‌به‌مرحله ساخته می‌شوند.
 برنامه‌ی فازبندی‌شده در `docs/ARCHITECTURE.md`.
 
-## راه‌اندازی
+## راه‌اندازی (Data Plane)
 
-```bash
-cp .env.example .env
-docker compose up -d
-```
+1. شروع Postgres:
+   ```bash
+   cp .env.example .env
+   docker compose up -d
+   ```
+   نیازمند Docker (روی macOS با Colima تست شده). اسکیمای `usage` در اولین اجرا به‌طور خودکار اعمال می‌شود.
 
-نیازمند Docker (روی macOS با Colima تست شده).
+2. اتصال به دیتابیس را در فایل secrets والت خود (`~/.local/share/agent-projects/ai-router/secrets/.env`) تنظیم کنید:
+   ```ini
+   POSTGRES_DSN=postgresql://airouter:change-me@localhost:5432/airouter
+   ```
+
+3. لاگ‌های audit موجود را وارد Postgres کنید:
+   ```bash
+   uv run src/ingest.py
+   ```
 
 ## تست
 

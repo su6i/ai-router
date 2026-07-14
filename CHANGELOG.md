@@ -19,6 +19,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **Data plane Phase 1** — `db/init/01_schema.sql` defines the `usage` table for Postgres (auto-applied via Docker Compose). `src/ingest.py` provides an idempotent ingest from `audit.log` into Postgres using `psycopg[binary]`.
+
 - **Cache hygiene and pruning** — Improved the exact-hash cache with NFC unicode normalization to ignore character composition differences. Added `max_output_tokens` to the cache key to correctly distinguish calls that request different output lengths (NOTE: this invalidates all existing cache entries). Implemented a silent automatic cache pruning policy enforcing a maximum of 5,000 rows and 90 days retention to prevent unbounded growth. Added a `--cache-prune` CLI flag to trigger this cleanup manually and inspect the row count.
 
 - **Formalized dependencies and CI/CD** — Declared runtime dependencies (`httpx`) and dev dependencies (`pytest`) in `pyproject.toml`. Added GitHub Actions workflow (`.github/workflows/test.yml`) for automated testing and code quality checks using `uv` and `ruff`. Added comprehensive offline tests covering `call_openai`, audit reporting, `project_info`, and MCP server edge cases.

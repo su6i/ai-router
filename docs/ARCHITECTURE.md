@@ -80,6 +80,7 @@ usage(
   cost_usd numeric(12,6), latency_s numeric)
 
 -- semantic cache / RAG store
+-- NOTE: prompt_cache implementation is currently parked per project policy
 prompt_cache(
   id, created, project,
   repo_commit,          -- code-state key: NEVER serve an answer from a different code state

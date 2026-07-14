@@ -246,14 +246,24 @@ distinction): `STRATEGY.md` and `ROLES.md` in
 Infrastructure scaffold — schema and services are being built incrementally.
 See `docs/ARCHITECTURE.md` for the phased plan.
 
-## Setup
+## Setup (Data Plane)
 
-```bash
-cp .env.example .env
-docker compose up -d
-```
+1. Start Postgres:
+   ```bash
+   cp .env.example .env
+   docker compose up -d
+   ```
+   Requires Docker (tested with Colima on macOS). The `usage` schema will be applied automatically on first run.
 
-Requires Docker (tested with Colima on macOS).
+2. Set the database connection in your vault secrets (`~/.local/share/agent-projects/ai-router/secrets/.env`):
+   ```ini
+   POSTGRES_DSN=postgresql://airouter:change-me@localhost:5432/airouter
+   ```
+
+3. Ingest your existing audit log into Postgres:
+   ```bash
+   uv run src/ingest.py
+   ```
 
 ## Testing
 
