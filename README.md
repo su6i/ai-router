@@ -279,6 +279,12 @@ distinction): `STRATEGY.md` and `ROLES.md` in
 - **Retries**: All provider calls automatically retry on transient errors (HTTP 429, 5xx, or timeouts) with an exponential backoff (1s, then 3s). Hard errors (like HTTP 400 or malformed JSON responses) fail immediately with a specific `ProviderError`.
 - **MiniMax Fallback**: If the prepaid `minimax` model fails with a credit exhaustion or 401/402/429 error after retries, the router will automatically fall back to `flash` (`deepseek-v4-flash`).
 - **Gemini Fallback**: If `gemini` exhausts the free tier rate limits (HTTP 429) after retries, the router will automatically fall back to `flash`. A loud warning is printed because the fallback incurs non-zero costs.
+- **HTTP 503**: A 503 means the provider itself is down (e.g. Google's free gemini endpoint under load). The built-in 3-attempt retry already ran; there is NO automatic paid fallback for 503 — per the $0-first policy a transient upstream outage does not authorize paid spend. Wait and retry later, or ask the owner before switching channels.
+
+### Secret hygiene
+
+- API keys never travel in URLs (gemini uses the `x-goog-api-key` header), and every error message the MCP server sends over the wire is scrubbed (`key=` query params and any loaded key values are redacted).
+- **Stale server caveat**: MCP server processes are long-lived — a session started before a router update keeps running the OLD code until that session restarts. After a router merge, restart open agent sessions (or `/mcp` reconnect) to pick up fixes.
 
 ## Status
 

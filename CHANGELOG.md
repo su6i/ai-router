@@ -7,6 +7,18 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Security
+
+- **API key removed from gemini URL** — `call_gemini` now sends the key via
+  the `x-goog-api-key` header instead of a `?key=` query parameter. A stale
+  MCP server process (running pre-retry code) leaked the full keyed URL to a
+  calling agent on 2026-07-15 via an `HTTPStatusError` message.
+- **MCP error redaction** — every JSON-RPC error message leaving
+  `mcp/server.py` is scrubbed: `key=` query params and the values of all
+  loaded provider keys are replaced with placeholders (defense in depth).
+- **Key fingerprint log dropped** — the DEBUG log no longer prints partial
+  key characters, only the key length.
+
 ### Changed
 
 - **Observability Polish** — Replaced raw prints with Python `logging` in `delegate.py` (`--quiet` flag suppresses INFO). Diagnostic messages (budget notices, fallback warnings) now use proper log levels. The key fingerprint line is now stderr-only DEBUG to prevent leaks.

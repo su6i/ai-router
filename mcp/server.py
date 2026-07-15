@@ -20,6 +20,8 @@ ever — see "Non-goals" in the design doc.
 import contextlib
 import io
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -115,7 +117,22 @@ def _rpc_result(id_, result: dict) -> dict:
 
 
 def _rpc_error(id_, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
+    return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": _redact(message)}}
+
+
+# key=... query params (defense in depth: keys should never be in URLs, but a
+# stale server process leaked one via an httpx exception message on 2026-07-15)
+_KEY_PARAM_RE = re.compile(r"([?&]key=)[^&\s'\"]+")
+
+
+def _redact(text: str) -> str:
+    """Scrub secrets from any text that leaves the server over the wire."""
+    text = _KEY_PARAM_RE.sub(r"\1<redacted>", text)
+    for env_name in {spec["key"] for spec in d.MODELS.values()}:
+        value = os.environ.get(env_name)
+        if value:
+            text = text.replace(value, f"<{env_name}>")
+    return text
 
 
 

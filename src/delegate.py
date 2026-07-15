@@ -607,8 +607,10 @@ def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
             contents[0]["parts"][0]["text"] = system + "\n\n" + contents[0]["parts"][0]["text"]
         else:
             body["systemInstruction"] = {"parts": [{"text": system}]}
-    r = _post_with_retry(spec["api"], f"{spec['url']}/models/{spec['api']}:generateContent?key={key}",
-                         headers={"Content-Type": "application/json"}, json=body)
+    # Key travels in the x-goog-api-key header, never in the URL: URLs end up
+    # in exception messages, logs and tracebacks (real leak 2026-07-15).
+    r = _post_with_retry(spec["api"], f"{spec['url']}/models/{spec['api']}:generateContent",
+                         headers={"Content-Type": "application/json", "x-goog-api-key": key}, json=body)
     d = r.json()
     try:
         text = d["candidates"][0]["content"]["parts"][0]["text"]
@@ -988,7 +990,7 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
 
     print(f"→ delegating to {model} ({spec['api']}) via {spec['url']}"
           + (f"  [session: {session}, {len(history)} msgs]" if session else ""))
-    logger.debug(f"key: {key[:6]}...{key[-4:]} (len={len(key)})")
+    logger.debug(f"key: set (len={len(key)})")
 
     t0 = time.time()
     caller = call_gemini if spec["provider"] == "gemini" else call_openai
