@@ -103,6 +103,21 @@ TOOLS = [
             "required": ["prompt", "workdir"],
         },
     },
+    {
+        "name": "rules_lookup",
+        "description": ("Retrieve only the most relevant rule/doc chunks "
+                         "(constitution rules, project docs) for a query — "
+                         "USE THIS instead of reading whole rule files; "
+                         "output is capped at ~2k tokens."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -177,11 +192,35 @@ def handle_delegate_agent(args: dict) -> dict:
             via="mcp", timeout_s=timeout)
     return _text_result(summary)
 
+def handle_rules_lookup(args: dict) -> dict:
+    query = args.get("query")
+    if not query or not isinstance(query, str):
+        raise ValueError("'query' is required and must be a non-empty string")
+    k = args.get("k", 5)
+    if not isinstance(k, int) or isinstance(k, bool) or not (0 < k <= 20):
+        raise ValueError("'k' must be an integer in (0, 20]")
+
+    # src/ is already on sys.path (top of this file) — importing as
+    # "rules_index" keeps delegate a single module identity in this process.
+    import rules_index as ri
+
+    class Args:
+        pass
+    a = Args()
+    a.query = query
+    a.k = k
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        ri.cmd_search(a)
+    return _text_result(out.getvalue())
+
 
 TOOL_HANDLERS = {
     "delegate_research": handle_delegate_research,
     "delegate_worker": handle_delegate_worker,
     "delegate_agent": handle_delegate_agent,
+    "rules_lookup": handle_rules_lookup,
 }
 
 

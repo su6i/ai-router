@@ -126,13 +126,13 @@ def test_initialize_advertises_tools_capability(server_proc):
     assert result["serverInfo"]["name"]
 
 
-def test_tools_list_exposes_exactly_two_tools(server_proc):
+def test_tools_list_exposes_exactly_tools(server_proc):
     _init(server_proc)
     _send(server_proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     resp = _recv(server_proc)
     tools = resp["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"delegate_research", "delegate_worker", "delegate_agent"}
+    assert names == {"delegate_research", "delegate_worker", "delegate_agent", "rules_lookup"}
 
     research = next(t for t in tools if t["name"] == "delegate_research")
     assert set(research["inputSchema"]["properties"]) == {

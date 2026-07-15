@@ -55,6 +55,23 @@ python3 src/delegate.py --model flash --session refactor-foo \
 the vault (never in the repo). `--new` resets a named session before running.
 `--system <text>` sets a persona/system instruction.
 
+### Rules retrieval: r rules
+
+`ai-router` provides semantic retrieval over rule files (the `.agent/constitution/rules/*.md` directory, `docs/**/*.md`, and `CLAUDE.md`).
+Translations (`docs/fa/`, `*.fa.md`) are excluded from the index: they duplicate the canonical English content and drown cross-lingual queries — the multilingual embedder still matches Persian queries against the English chunks.
+This uses a local ONNX model (`intfloat/multilingual-e5-small`) and pgvector to find relevant rule chunks instead of loading whole files into context:
+
+```bash
+# Query the index (returns top 5 chunks by default)
+r rules "قانون کامیت"
+
+# Re-index all markdown files (only embeds changed chunks)
+r rules --reindex
+```
+
+The output is hard-capped at ~8000 characters to protect context limits.
+If the index was built on a different commit than the current one, `r rules` will print a single warning line before the results.
+
 ### Cache
 
 Identical one-shot calls (same model + system + prompt + max_output_tokens) hit the exact-hash

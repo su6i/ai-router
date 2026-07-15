@@ -20,8 +20,7 @@ python-core-standards, python-containerization
 - **Storage:** persistent data/artifacts live in the rule-035 vault
   (`<vault>/data/`), never in the repo. A local `.storage/` is scratch only
   and is git-ignored.
-- **Prompt cache is exact-hash only** — semantic/RAG caching was reviewed and
-  rejected; do not reintroduce it.
+- Prompt/response cache is exact-hash only — semantic response caching stays rejected. Retrieval of rule/doc chunks for context loading (r rules) is allowed and preferred over loading whole files.
 - **Claude models are never called from the delegate/gateway** (they are
   billed via subscription; routing them through the gateway double-bills).
 - **Budget caps fail loudly** — a job over its cap aborts; silent overspend is forbidden. Limits are configured in `~/.local/share/agent-projects/ai-router/data/budgets.json`.

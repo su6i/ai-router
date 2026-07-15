@@ -7,6 +7,9 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+- Phase 3a: Rules retrieval index (`r rules`) using local `intfloat/multilingual-e5-small` ONNX model and `pgvector` for semantic context loading instead of passing whole files. Exposed via `r rules` CLI and `rules_lookup` MCP tool.
+
 ### Changed
 
 - **Observability Polish** — Replaced raw prints with Python `logging` in `delegate.py` (`--quiet` flag suppresses INFO). Diagnostic messages (budget notices, fallback warnings) now use proper log levels. The key fingerprint line is now stderr-only DEBUG to prevent leaks.
