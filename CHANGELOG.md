@@ -19,6 +19,10 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 - **Key fingerprint log dropped** — the DEBUG log no longer prints partial
   key characters, only the key length.
 
+### Added
+
+- Phase 3a: Rules retrieval index (`r rules`) using local `intfloat/multilingual-e5-small` ONNX model and `pgvector` for semantic context loading instead of passing whole files. Exposed via `r rules` CLI and `rules_lookup` MCP tool. Translations (`docs/fa/`, `*.fa.md`) are excluded from the corpus so cross-lingual queries reach the canonical English rules.
+
 ### Changed
 
 - **Observability Polish** — Replaced raw prints with Python `logging` in `delegate.py` (`--quiet` flag suppresses INFO). Diagnostic messages (budget notices, fallback warnings) now use proper log levels. The key fingerprint line is now stderr-only DEBUG to prevent leaks.

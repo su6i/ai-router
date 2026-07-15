@@ -13,7 +13,7 @@
 | Cost Report | **Done** | SQL aggregations per WO 0002 |
 | Budget Caps | **Done** | Enforced per WO 0003 |
 | Prometheus Exporter | **Parked** | Phase 2 parked until stable |
-| Semantic Cache / RAG | **Rejected** | Phase 3 rejected by owner decision ("exact-hash only") |
+| Semantic Cache / RAG | **Rejected/Shipped** | Phase 3a (retrieval context loading) shipped; Phase 3b (semantic response caching) stays rejected |
 
 ## 1. Why this exists
 
@@ -162,7 +162,8 @@ because near-identical prompts can need different answers as code changes.
 - **Phase 1 — data plane:** Postgres+pgvector (Docker/Colima) + schema + ingest +
   `amir router cost` (SQL). Everything else depends on this.
 - **Phase 2 — observability:** exporter + Prometheus + Grafana (dashboards-as-code). **(Parked)**
-- **Phase 3 — RAG / semantic cache:** local embedder + prompt_cache + pre-router hook. **(Rejected)**
+- **Phase 3a — Retrieval context loading:** local embedder (intfloat/multilingual-e5-small) + pgvector rules index. **(Shipped)**
+- **Phase 3b — Semantic response cache:** semantic matching for exact-hash fallback. **(Rejected)**
 
 ## 9. Open decisions (to finalize before executing)
 

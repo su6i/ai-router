@@ -5,7 +5,10 @@ description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "httpx",
+    "huggingface-hub>=1.23.0",
+    "onnxruntime>=1.27.0",
     "psycopg[binary]>=3.3.4",
+    "tokenizers>=0.23.1",
 ]
 
 [dependency-groups]
