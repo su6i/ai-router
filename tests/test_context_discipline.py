@@ -52,16 +52,20 @@ def test_context_discipline_agent_delegate_prompt(monkeypatch, tmp_path):
     idx = passed_args.index("-p")
     task_arg = passed_args[idx + 1]
     
-    assert task_arg.startswith("=== CONTEXT DISCIPLINE ===")
+    assert "=== CONTEXT DISCIPLINE ===" in task_arg
     assert "=== REPO MAP ===" in task_arg
     
     preamble_idx = task_arg.find("=== CONTEXT DISCIPLINE ===")
     map_idx = task_arg.find("=== REPO MAP ===")
     task_idx = task_arg.find("Task:\nagent task")
-    
-    assert preamble_idx == 0
-    assert map_idx > preamble_idx
-    assert task_idx > map_idx
+
+    assert preamble_idx < map_idx < task_idx
+
+    # Channel system prompt (wo-0014) must sit at the very head of the
+    # prompt, BEFORE the context-discipline preamble.
+    channel_idx = task_arg.find("You are a Gemini worker.")
+    assert channel_idx == 0
+    assert channel_idx < preamble_idx
 
 def test_repo_map_constraints():
     rmap = repo_map.generate_repo_map(cwd=str(Path(__file__).parent.parent))

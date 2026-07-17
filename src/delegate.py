@@ -755,9 +755,33 @@ def run_verify(cmd: str, cwd: Path):
     return ok, output, time.time() - t0
 
 
-def build_worker_prompt(task: str, file_specs: list) -> str:
+def _get_channel_system_prompt(model: str) -> str:
+    if model in ("flash", "pro", "deepseek"):
+        channel = "deepseek"
+    elif model in ("minimax", "m3"):
+        channel = "minimax"
+    elif model in ("gemini", "gemini-lite", "gemma", "Gemini 3.1 Pro (High)"):
+        channel = "gemini"
+    else:
+        channel = model
+        
+    try:
+        p = Path(__file__).parent.parent / "templates" / "system-prompts" / f"{channel}.md"
+        if p.exists():
+            return p.read_text().strip() + "\n\n"
+    except Exception:
+        pass
+    return ""
+
+
+def build_worker_prompt(task: str, file_specs: list, model: str | None = None) -> str:
     import repo_map
-    parts = [CONTEXT_DISCIPLINE_PREAMBLE]
+    parts = []
+    if model:
+        channel_prompt = _get_channel_system_prompt(model)
+        if channel_prompt:
+            parts.append(channel_prompt)
+    parts.append(CONTEXT_DISCIPLINE_PREAMBLE)
     parts.append(repo_map.generate_repo_map(cwd="."))
     # Prefix-cache invariant: constant text (preamble, repo map) precedes the
     # files block; the variable task text stays last.
@@ -841,7 +865,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
     caller = call_gemini if spec["provider"] == "gemini" else call_openai
     # Prefix discipline: system prompt (WORKER_PROTOCOL_SYSTEM) is the constant head;
     # history is append-only for retries; files come before the task string.
-    history = [{"role": "user", "content": build_worker_prompt(task, file_specs)}]
+    history = [{"role": "user", "content": build_worker_prompt(task, file_specs, model)}]
     total_cost = 0.0
     echoed_model = spec["api"]
     hit_rates = []
@@ -1093,8 +1117,6 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     project_root = Path(workdir) if workdir else Path.cwd()
     project, commit = project_info()
 
-    task = f"{CONTEXT_DISCIPLINE_PREAMBLE}\n{repo_map.generate_repo_map(str(project_root))}\nTask:\n{task}"
-
     if model and "claude" in model.lower():
         raise ValueError("Claude models are banned inside delegate (subscription-billed; routing them here double-bills)")
 
@@ -1115,6 +1137,9 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         spec = provider_model
     else:
         raise ValueError("runner must be 'agy' or 'codewhale'")
+
+    channel_prompt = _get_channel_system_prompt(model_name)
+    task = f"{channel_prompt}{CONTEXT_DISCIPLINE_PREAMBLE}\n{repo_map.generate_repo_map(str(project_root))}\nTask:\n{task}"
 
     if estimate:
         print(f"ESTIMATE for {runner} ({model_name}):")

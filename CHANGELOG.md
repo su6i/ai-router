@@ -21,6 +21,9 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **Delivery Gate (`scripts/verify_delivery.sh`)** — A mechanical pipeline gate implementing the strict runlog constraints of EXECUTOR-RUNLOG.md, guarding the `feat/router-only-workers` branch against premature or incomplete deliveries.
+- **Worker channel nudge hook (`hooks/worker_channel_nudge.py`)** — A PreToolUse hook preventing headless workers (`agy print`, `codewhale`) from being launched directly in the terminal, nudging the caller to use the router (`delegate_agent`). Allows a deliberate second attempt.
+- **Per-channel system prompts (`templates/system-prompts/*.md`)** — Dynamically injects channel-specific instructions at the very top of worker prompts to establish worker persona. Includes templates for `gemini`, `deepseek`, and `minimax`.
 - Phase 3a: Rules retrieval index (`r rules`) using local `intfloat/multilingual-e5-small` ONNX model and `pgvector` for semantic context loading instead of passing whole files. Exposed via `r rules` CLI and `rules_lookup` MCP tool. Translations (`docs/fa/`, `*.fa.md`) are excluded from the corpus so cross-lingual queries reach the canonical English rules.
 
 ### Changed

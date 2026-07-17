@@ -105,7 +105,8 @@ def test_project_info(monkeypatch):
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="fatal")
     monkeypatch.setattr("subprocess.run", mock_run_fail)
     proj, rev = project_info()
-    assert proj == "ai-router"
+    from pathlib import Path
+    assert proj == Path.cwd().name
     assert rev is None
     
     # Binary missing
@@ -113,7 +114,7 @@ def test_project_info(monkeypatch):
         raise FileNotFoundError("git not found")
     monkeypatch.setattr("subprocess.run", mock_run_missing)
     proj, rev = project_info()
-    assert proj == "ai-router"
+    assert proj == Path.cwd().name
     assert rev is None
 
 def test_cache_key():
