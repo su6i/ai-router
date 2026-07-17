@@ -7,6 +7,18 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Fixed
+
+- **agy headless permission auto-denial** — since agy 1.1.3 (2026-07-16),
+  `--mode accept-edits` no longer auto-approves `write_file`/`command` in
+  print mode; every headless `delegate_agent` run died in 18–41 s with
+  `permission check failed … auto-denied` and work fell back to metered
+  DeepSeek. Router-managed headless launches now pass the documented
+  `--dangerously-skip-permissions` flag (managed launches only, never
+  interactive sessions; agy has no settings file for scoped allow-rules).
+  Live acceptance: branch + file edit + commit in a scratch repo via
+  `delegate_agent`, COMPLETED in 25.5 s, $0.
+
 ### Security
 
 - **API key removed from gemini URL** — `call_gemini` now sends the key via

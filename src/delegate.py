@@ -1140,7 +1140,15 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     if runner == "agy":
         # agy print mode kills any run whose next response exceeds
         # --print-timeout (default 5m) — size it to our own timeout.
+        # --dangerously-skip-permissions: since agy 1.1.3 (2026-07-16),
+        # accept-edits no longer auto-approves write_file/command in print
+        # mode — every headless run died in 18-41s with "permission check
+        # failed ... auto-denied". agy has no settings file for scoped
+        # allow-rules (verified: no ~/.agy or ~/.config/agy), so the
+        # documented skip flag is the only headless path; router-managed
+        # launches only, never interactive sessions.
         cmd = ["agy", "-p", task, "--model", model_name, "--mode", "accept-edits",
+               "--dangerously-skip-permissions",
                "--print-timeout", f"{timeout_s}s"]
     else:
         # Flags verified against `codewhale exec --auto --help` (2026-07-14):

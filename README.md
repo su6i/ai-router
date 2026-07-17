@@ -247,6 +247,12 @@ Three tools only, all capped — no uncapped chat tool, ever:
   across unknown files, iterative debugging). Wraps `agy` (default) or `codewhale`
   behind our budgets. Returns only a ≤25-line summary of files changed, verify
   result, and cost. Prefer `delegate_worker` when the file list is known.
+  Router-managed headless `agy` launches pass `--dangerously-skip-permissions`:
+  since agy 1.1.3, `--mode accept-edits` no longer auto-approves
+  `write_file`/`command` in print mode, so every headless run died with
+  "permission check failed … auto-denied". The flag applies only to these
+  managed launches (workdir-confined task, output to a log), never to
+  interactive sessions.
 
 Claude models stay banned inside delegate (unchanged). Audit rows from MCP
 calls get `via: "mcp"` (an extra field alongside the existing columns) so

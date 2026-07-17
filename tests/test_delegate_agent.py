@@ -110,6 +110,22 @@ open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
     assert argv[argv.index("--model") + 1] == "Gemini 3.1 Pro (High)"
 
 
+def test_agent_agy_skips_permission_prompts(isolated_paths, tmp_path):
+    # Since agy 1.1.3 accept-edits no longer auto-approves write_file/command
+    # in print mode: headless runs died with "permission check failed ...
+    # auto-denied" (EXECUTOR-RUNLOG pattern 14). Every router-managed headless
+    # launch must pass the documented skip flag.
+    argv_log = tmp_path / "argv.json"
+    create_fake_bin(isolated_paths, "agy", f"""#!/usr/bin/env python3
+import json, sys
+open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
+""")
+    out = d.agent_delegate("task", runner="agy", workdir=tmp_path, timeout_s=120)
+    assert "COMPLETED" in out
+    argv = json.loads(argv_log.read_text())
+    assert "--dangerously-skip-permissions" in argv
+
+
 def test_agent_runner_failure_reported_loudly(isolated_paths, tmp_path):
     create_fake_bin(isolated_paths, "agy", """#!/usr/bin/env python3
 import sys
