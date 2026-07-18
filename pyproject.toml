@@ -9,6 +9,9 @@ dependencies = [
     "onnxruntime>=1.27.0",
     "psycopg[binary]>=3.3.4",
     "tokenizers>=0.23.1",
+    "tree-sitter>=0.25,<0.26",
+    "tree-sitter-bash>=0.25.1",
+    "tree-sitter-python>=0.25.0",
 ]
 
 [dependency-groups]

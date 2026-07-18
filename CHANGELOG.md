@@ -7,6 +7,27 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+
+- **Phase 3b: Code-Aware RAG (`r code` / `code_lookup`)** — semantic
+  retrieval over code: git-tracked `*.py`/`*.sh` files are chunked at
+  function/class/method boundaries with tree-sitter (oversized defs split at
+  block boundaries, re-prefixed with their signature), embedded with the
+  local e5-small ONNX model, and stored in pgvector (`code_chunks`, HNSW)
+  next to a static Python call graph (`code_edges`, stdlib `ast`).
+  `r code "<query>" [-k N] [--graph] [--repo PATH]` returns chunks with
+  `path:start-end` refs capped at ~2k tokens; `--graph` adds 1-hop
+  callers/callees; `--reindex` is incremental by `git diff` + `chunk_hash`
+  upsert (idempotent), `--rebuild` full. Exposed to MCP hosts as
+  `code_lookup`. tree-sitter is pinned `>=0.25,<0.26` and chunking runs in
+  an isolated child process — py-tree-sitter 0.26.0 deterministically
+  segfaulted on macOS arm64 when live tokenizers/onnxruntime objects
+  coexisted with AST walks (three independent repros; documented in
+  `docs/CODE-RAG.md` with the honest "when it pays off" economics and a
+  measured −90.8% briefing-token delta vs whole-file context).
+  New deps (pre-approved in wo-0013): `tree-sitter`, `tree-sitter-python`,
+  `tree-sitter-bash`.
+
 ### Fixed
 
 - **agy headless permission auto-denial** — since agy 1.1.3 (2026-07-16),

@@ -38,6 +38,18 @@ r() {
     return "$?"
   fi
 
+  if [ "$1" = "code" ]; then
+    shift
+    (cd "$repo" && if [ "$1" = "--reindex" ]; then
+      "$py" -m src.code_index reindex
+    elif [ "$1" = "--rebuild" ]; then
+      "$py" -m src.code_index reindex --rebuild
+    else
+      "$py" -m src.code_index search "$@"
+    fi)
+    return "$?"
+  fi
+
   if [ "$1" = "cost" ]; then
     shift
     "$py" "$repo/src/delegate.py" --cost "$@"

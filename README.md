@@ -72,6 +72,32 @@ r rules --reindex
 The output is hard-capped at ~8000 characters to protect context limits.
 If the index was built on a different commit than the current one, `r rules` will print a single warning line before the results.
 
+### Code retrieval: r code
+
+Phase 3b indexes **code** the way `r rules` indexes text: git-tracked
+`*.py`/`*.sh` files are chunked at function/class/method boundaries
+(tree-sitter AST), embedded with the same local e5-small model, and stored in
+pgvector next to a static call graph. Full design and honest economics:
+[`docs/CODE-RAG.md`](docs/CODE-RAG.md).
+
+```bash
+# Query: chunks with path:start-end refs, output capped ~2k tokens
+r code "where is the budget cap checked" -k 5
+
+# --graph adds 1-hop callers/callees of each hit
+r code "budget cap abort" --graph
+
+# Incremental reindex (only files changed since the indexed commit)
+r code --reindex
+
+# Full rebuild
+r code --rebuild
+```
+
+A one-line stale-index warning is printed when the index commit differs from
+`HEAD`. The same retrieval is exposed to MCP hosts as the `code_lookup` tool
+("use this instead of exploratory file reads").
+
 ### Cache
 
 Identical one-shot calls (same model + system + prompt + max_output_tokens) hit the exact-hash

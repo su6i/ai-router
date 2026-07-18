@@ -120,7 +120,24 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "code_lookup",
+        "description": ("Retrieve only the most relevant code chunks (functions/classes) "
+                         "for a query — USE THIS instead of exploratory file reads; "
+                         "output is capped at ~2k tokens."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "default": 5},
+                "graph": {"type": "boolean", "default": False},
+                "repo": {"type": "string", "default": ""}
+            },
+            "required": ["query"],
+        },
+    },
 ]
+
 
 
 def _text_result(text: str, is_error: bool = False) -> dict:
@@ -233,11 +250,36 @@ def handle_rules_lookup(args: dict) -> dict:
     return _text_result(out.getvalue())
 
 
+def handle_code_lookup(args: dict) -> dict:
+    query = args.get("query")
+    if not query or not isinstance(query, str):
+        raise ValueError("'query' is required and must be a non-empty string")
+    k = args.get("k", 5)
+    if not isinstance(k, int) or isinstance(k, bool) or not (0 < k <= 20):
+        raise ValueError("'k' must be an integer in (0, 20]")
+
+    import code_index as ci
+
+    class Args:
+        pass
+    a = Args()
+    a.query = query
+    a.k = k
+    a.graph = bool(args.get("graph"))
+    a.repo = args.get("repo", "")
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        ci.cmd_search(a)
+    return _text_result(out.getvalue())
+
+
 TOOL_HANDLERS = {
     "delegate_research": handle_delegate_research,
     "delegate_worker": handle_delegate_worker,
     "delegate_agent": handle_delegate_agent,
     "rules_lookup": handle_rules_lookup,
+    "code_lookup": handle_code_lookup,
 }
 
 
