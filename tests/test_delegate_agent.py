@@ -191,9 +191,65 @@ def test_agent_copilot_argv_and_premium(isolated_paths, tmp_path):
     assert argv[1] == "-p"
     assert argv[2].endswith("mytask")
     assert "--allow-all-tools" in argv
-    
+    # default model is gpt-5-mini (0x multiplier) — no premium request burned
+    assert argv[argv.index("--model") + 1] == "gpt-5-mini"
+
+    rec = json.loads(d.AUDIT.read_text().strip().splitlines()[0])
+    assert rec["premium_requests"] == 0
+
+
+def test_agent_copilot_escalated_model_counts_premium(isolated_paths, tmp_path):
+    argv_log = tmp_path / "argv.json"
+    create_fake_bin(isolated_paths, "copilot", f"#!/usr/bin/env python3\nimport sys, json\nopen({str(argv_log)!r}, 'w').write(json.dumps(sys.argv))\n")
+    out = d.agent_delegate("mytask", runner="copilot", model="claude-sonnet-4.5", workdir=tmp_path)
+    assert "COMPLETED" in out
+    argv = json.loads(argv_log.read_text())
+    assert argv[argv.index("--model") + 1] == "claude-sonnet-4.5"
+
     rec = json.loads(d.AUDIT.read_text().strip().splitlines()[0])
     assert rec["premium_requests"] == 1
+
+
+def test_agent_copilot_seeds_multiplier_config(isolated_paths, tmp_path):
+    create_fake_bin(isolated_paths, "copilot", "#!/usr/bin/env python3\nprint('ok')\n")
+    d.agent_delegate("mytask", runner="copilot", workdir=tmp_path)
+    cfg = json.loads((d.DATA_DIR / "copilot_multipliers.json").read_text())
+    assert cfg["default"] == 1
+    assert cfg["models"]["gpt-5-mini"] == 0
+
+
+def test_agent_copilot_multiplier_from_config_not_hardcoded(isolated_paths, tmp_path):
+    create_fake_bin(isolated_paths, "copilot", "#!/usr/bin/env python3\nprint('ok')\n")
+    d.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (d.DATA_DIR / "copilot_multipliers.json").write_text(
+        json.dumps({"default": 2, "models": {"gpt-5-mini": 0.25}}))
+    d.agent_delegate("mytask", runner="copilot", workdir=tmp_path)
+    d.agent_delegate("other task", runner="copilot", model="brand-new-model", workdir=tmp_path)
+    recs = [json.loads(line) for line in d.AUDIT.read_text().strip().splitlines()]
+    # config overrides beat any built-in seed value
+    assert recs[0]["premium_requests"] == 0.25
+    # unknown models bill at the config default, never silently 0
+    assert recs[1]["premium_requests"] == 2
+
+
+def test_github_copilot_billed_sums_net_amount(isolated_paths):
+    create_fake_bin(isolated_paths, "gh", """#!/usr/bin/env python3
+import sys, json
+if "user" in sys.argv[1:] and "--jq" in sys.argv:
+    print("su6i")
+else:
+    print(json.dumps({"usageItems": [
+        {"product": "copilot", "sku": "Copilot AI Credits", "quantity": 5, "netAmount": 1.25},
+        {"product": "actions", "sku": "linux_runner", "quantity": 99, "netAmount": 40},
+    ]}))
+""")
+    # only copilot netAmount is summed; unrelated products excluded
+    assert d._github_copilot_billed_this_month() == 1.25
+
+
+def test_github_copilot_billed_unavailable_returns_none(isolated_paths):
+    create_fake_bin(isolated_paths, "gh", "#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n")
+    assert d._github_copilot_billed_this_month() is None
 
 
 def test_cmd_channels_autodetect_table(capsys, isolated_paths, monkeypatch):

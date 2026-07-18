@@ -465,12 +465,15 @@ def main():
     p_chunk.add_argument("paths", nargs="*")
 
     args = parser.parse_args()
-    if args.cmd == "reindex":
-        cmd_reindex(args)
-    elif args.cmd == "search":
-        cmd_search(args)
-    elif args.cmd == "chunk-files":
-        cmd_chunk_files(args.paths)
+    try:
+        if args.cmd == "reindex":
+            cmd_reindex(args)
+        elif args.cmd == "search":
+            cmd_search(args)
+        elif args.cmd == "chunk-files":
+            cmd_chunk_files(args.paths)
+    except psycopg.OperationalError:
+        sys.exit("❌ Postgres not reachable — start it first: colima start")
 
 if __name__ == "__main__":
     main()

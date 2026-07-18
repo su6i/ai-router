@@ -187,6 +187,10 @@ Channels can be enabled/disabled by the `channels.json` file in the data dir (`~
 - `r channels` (or `--channels`) prints an autodetected table showing the status, CLI binary presence, and auth state of all known channels.
 - `--enable <channel>` / `--disable <channel>` modifies the `channels.json` registry file.
 
+Model ladder: the default worker channel stays `agy` (Gemini 3.1 Pro, Google AI Pro subscription). The `copilot` runner defaults to `gpt-5-mini`, which has a **0× premium-request multiplier** on Copilot Pro — it never consumes the 300 premium requests/month. Escalate harder tasks explicitly with `--model gpt-5` or `--model claude-sonnet-4.5`; those calls are counted against `copilot_premium_requests_month`.
+
+Premium-request multipliers are **not hardcoded**: they live in `copilot_multipliers.json` in the data dir (seeded on first copilot call), because GitHub changes rates without notice and exposes **no API** for them (personal-plan `seat_info`/usage endpoints are org-only and 404; the internal token exchange rejects CLI tokens — live-checked 2026-07-19). Unknown models bill at the file's `default` (1×) — a model rename can never silently look free. Each call's multiplier is logged as `premium_requests`. As an independent check, `r cost` also queries GitHub's billing API for the **Copilot overage actually billed this month** (requires `gh auth refresh -h github.com -s user` once): within the monthly quota this is `$0`, and a non-zero value means the premium quota was exceeded and real money is being spent — the cue to reconcile `copilot_multipliers.json`.
+
 ### Budgets
 
 Budget caps fail loudly — a job over its cap aborts; silent overspend is
