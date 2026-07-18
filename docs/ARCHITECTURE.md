@@ -135,7 +135,11 @@ Two mechanisms so grunt work leaves Opus *without* being asked each time:
    prompt starts with a route tag (e.g. `r:` / `r!flash:`), the hook calls
    delegate.py, prints the cheap model's answer, and `exit 2` — Opus is skipped
    entirely (zero premium cost). *Cannot* replace the prompt, so exit-2 is the clean path.
-2. **Semantic interception (RAG) [REJECTED].** (Rejected by owner: "exact-hash only").
+2. **Worker Nudge Hook (`worker_channel_nudge.py`).** A PreToolUse hook preventing the 
+   architect from directly spawning headless workers via bash (`agy print`, `codewhale`), 
+   nudging them toward `delegate_agent` for full accounting and budget control. A 
+   deliberate second attempt acts as an escape hatch.
+3. **Semantic interception (RAG) [REJECTED].** (Rejected by owner: "exact-hash only").
    Originally planned: On each prompt the hook computes a local embedding and queries `prompt_cache`:
    - **exact hash hit + same repo_commit** → print stored answer, `exit 2` (zero cost).
    - **≥0.95 cosine + same repo_commit** → (opt-in / gated) serve cached answer.

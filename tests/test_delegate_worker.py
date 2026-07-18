@@ -289,3 +289,12 @@ def test_build_worker_prompt_ordering():
     assert idx_foo < idx_task
     assert idx_bar < idx_task
     assert idx_foo < idx_bar
+
+def test_build_worker_prompt_channel_injection(tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "__file__", str(tmp_path / "src" / "delegate.py"))
+    templates = tmp_path / "templates" / "system-prompts"
+    templates.mkdir(parents=True, exist_ok=True)
+    (templates / "deepseek.md").write_text("I am deepseek.")
+    
+    prompt = d.build_worker_prompt("task", [], "flash")
+    assert prompt.startswith("I am deepseek.")
