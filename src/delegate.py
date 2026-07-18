@@ -157,6 +157,33 @@ ALIASES = {
 }
 
 
+
+def is_channel_enabled(channel: str) -> bool:
+    env_disabled = os.environ.get("AI_ROUTER_DISABLE_CHANNELS", "")
+    if channel in [c.strip() for c in env_disabled.split(",") if c.strip()]:
+        return False
+    channels_json = DATA_DIR / "channels.json"
+    if not channels_json.exists():
+        return True
+    try:
+        import json
+        data = json.loads(channels_json.read_text())
+        if channel in data:
+            return bool(data[channel].get("enabled", True))
+    except Exception:
+        pass
+    return True
+
+def get_model_channel(model: str) -> str:
+    spec = MODELS.get(resolve_model(model))
+    if not spec:
+        return model
+    qc = spec.get("quota_channel", "")
+    if qc.endswith("-api"):
+        return qc[:-4]
+    return qc
+
+
 def resolve_model(name: str) -> str:
     key = ALIASES.get(name.strip().lower())
     if key is None:
@@ -229,6 +256,8 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
     spent_week = 0.0
     spent_session = 0.0
     spent_project = 0.0
+    spent_premium = 0
+    copilot_monthly = budgets.get("copilot_premium_requests_month")
     daily_calls_count = {}
 
     if AUDIT.exists():
@@ -255,6 +284,7 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                 
                 if ts.startswith(month_str):
                     spent_month += cost
+                    spent_premium += rec.get("premium_requests", 0)
                     if project and rec.get("project") == project:
                         spent_project += cost
                 if ts >= week_ago:
@@ -274,6 +304,9 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
             print(f"    weekly_usd : ${spent_week:.6f} / ${weekly_cap:.2f}")
         else:
             print(f"    weekly_usd : ${spent_week:.6f} / (uncapped)")
+            
+        if copilot_monthly is not None:
+            print(f"    copilot_premium: {spent_premium} / {copilot_monthly}")
             
         if session:
             if session_cap is not None:
@@ -331,6 +364,12 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
             elif count >= cap * 0.8:
                 logger.warning(f"⚠️  BUDGET WARNING: {current_channel} daily calls at {count} (cap: {cap})")
 
+    if copilot_monthly is not None:
+        if spent_premium > copilot_monthly:
+            sys.exit(f"❌ BUDGET ABORT: copilot premium requests cap exceeded ({spent_premium} > {copilot_monthly})")
+        elif spent_premium >= copilot_monthly * 0.8:
+            logger.warning(f"⚠️  BUDGET WARNING: copilot premium requests at {spent_premium} (cap: {copilot_monthly})")
+
 
 def show_cost(since: str = None, by: str = "model"):
     if not AUDIT.exists():
@@ -344,7 +383,9 @@ def show_cost(since: str = None, by: str = "model"):
     })
 
     malformed = 0
+    copilot_premium_month = 0
     today_str = dt.datetime.now().astimezone().isoformat()[:10]
+    month_str = today_str[:7]
     today_channel_calls = collections.defaultdict(int)
     with AUDIT.open("r") as fh:
         for line in fh:
@@ -359,6 +400,9 @@ def show_cost(since: str = None, by: str = "model"):
 
             ts = rec.get("ts", "")
             channel = rec.get("quota_channel")
+            if ts.startswith(month_str):
+                copilot_premium_month += rec.get("premium_requests", 0)
+                
             if ts.startswith(today_str) and channel and not rec.get("cached"):
                 today_channel_calls[channel] += 1
             if since and ts[:10] < since:
@@ -464,6 +508,9 @@ def show_cost(since: str = None, by: str = "model"):
 
     if malformed > 0:
         print(f"\nskipped {malformed} malformed lines")
+        
+    if copilot_premium_month > 0:
+        print(f"\nCopilot premium requests (this month): {copilot_premium_month}")
 
 
 # ---- conversation memory -----------------------------------------------------
@@ -962,6 +1009,15 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
 def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path = None,
                      via: str | None = None, estimate: bool = False) -> str:
+    ch = get_model_channel(model)
+    if not is_channel_enabled(ch):
+        msg = f"channel {ch} disabled in channels.json"
+        print(msg)
+        logger.warning(msg)
+        if model in ("minimax", "gemini"):
+            return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
+        raise ValueError(f"All candidates disabled (last tried: {ch})")
+
     try:
         return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
     except ProviderError as e:
@@ -1070,6 +1126,15 @@ def get_last_cost() -> float:
 def delegate(prompt: str, model: str, session: str = "", system: str = "",
              use_cache: bool = True, max_output_tokens: int = 8192,
              via: str | None = None, estimate: bool = False) -> str:
+    ch = get_model_channel(model)
+    if not is_channel_enabled(ch):
+        msg = f"channel {ch} disabled in channels.json"
+        print(msg)
+        logger.warning(msg)
+        if model in ("minimax", "gemini"):
+            return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
+        raise ValueError(f"All candidates disabled (last tried: {ch})")
+
     try:
         return _delegate_inner(prompt, model, session, system, use_cache, max_output_tokens, via, estimate)
     except ProviderError as e:
@@ -1084,7 +1149,7 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
             return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
         raise
 
-def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None):
+def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None, premium_requests=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1097,6 +1162,8 @@ def _write_agent_audit(model, echoed, project, commit, files_changed_count, veri
         "verify_status": verify_status,
         "quota_channel": quota_channel,
     }
+    if premium_requests is not None:
+        rec["premium_requests"] = premium_requests
     if exit_code not in (0, None):
         rec["runner_exit"] = exit_code
     if run_id:
@@ -1117,7 +1184,15 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     project_root = Path(workdir) if workdir else Path.cwd()
     project, commit = project_info()
 
-    if model and "claude" in model.lower():
+    if not is_channel_enabled(runner):
+        msg = f"channel {runner} disabled in channels.json"
+        print(msg)
+        logger.warning(msg)
+        raise ValueError(f"All candidates disabled (last tried: {runner})")
+
+    if model and "claude" in model.lower() and runner != "copilot":
+        # The ban exists because Claude via the Anthropic sub double-bills; the
+        # copilot runner bills Claude as Copilot premium requests instead.
         raise ValueError("Claude models are banned inside delegate (subscription-billed; routing them here double-bills)")
 
     if runner == "agy":
@@ -1135,8 +1210,16 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         provider_model = MODELS[model_name]
         quota_channel = provider_model.get("quota_channel", f"{model_name}-api")
         spec = provider_model
+    elif runner == "codex":
+        model_name = model or "gpt-5.1-codex"
+        quota_channel = "chatgpt-sub"
+        spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
+    elif runner == "copilot":
+        model_name = model or "claude-sonnet-4.5"
+        quota_channel = "copilot-sub"
+        spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
     else:
-        raise ValueError("runner must be 'agy' or 'codewhale'")
+        raise ValueError("runner must be 'agy', 'codewhale', 'codex', or 'copilot'")
 
     channel_prompt = _get_channel_system_prompt(model_name)
     task = f"{channel_prompt}{CONTEXT_DISCIPLINE_PREAMBLE}\n{repo_map.generate_repo_map(str(project_root))}\nTask:\n{task}"
@@ -1175,7 +1258,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         cmd = ["agy", "-p", task, "--model", model_name, "--mode", "accept-edits",
                "--dangerously-skip-permissions",
                "--print-timeout", f"{timeout_s}s"]
-    else:
+    elif runner == "codewhale":
         # Flags verified against `codewhale exec --auto --help` (2026-07-14):
         # plain exec is a one-shot text reply; --auto enables tool-backed agent
         # mode, --json emits a machine-readable summary, --model overrides the
@@ -1189,6 +1272,13 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         run_env = {**os.environ, "CODEWHALE_PROVIDER": "deepseek" if model_name == "flash" else "minimax"}
         cmd = ["codewhale", "-C", str(project_root), "--model", cw_model,
                "exec", "--auto", "--json", "--max-turns", "50", task]
+    elif runner == "codex":
+        # Workdir flag is -C/--cd per openai/codex docs (grok-verified
+        # 2026-07-18); binary not installed here, so this runner is
+        # DELIVERED-UNSMOKED until a live `codex exec --help` confirms it.
+        cmd = ["codex", "exec", "--cd", str(project_root), task]
+    elif runner == "copilot":
+        cmd = ["copilot", "-p", task, "--allow-all-tools", "--model", model_name]
         
     t0 = time.time()
     timed_out = False
@@ -1260,7 +1350,9 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         if not ok:
             fail_output = vout
             
-    _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id)
+    premium_req = 1 if runner == "copilot" else None
+            
+    _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id, premium_requests=premium_req)
 
     if timed_out:
         status = "TIMEOUT — process group killed"
@@ -1296,6 +1388,75 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     return "\n".join(lines[:25])
 
 
+def cmd_channels(enable_channel=None, disable_channel=None):
+    import shutil
+    channels_json = DATA_DIR / "channels.json"
+    
+    if enable_channel or disable_channel:
+        data = {}
+        if channels_json.exists():
+            try:
+                import json
+                data = json.loads(channels_json.read_text())
+            except Exception:
+                pass
+        if enable_channel:
+            if enable_channel not in data:
+                data[enable_channel] = {}
+            data[enable_channel]["enabled"] = True
+            print(f"Enabled channel: {enable_channel}")
+        if disable_channel:
+            if disable_channel not in data:
+                data[disable_channel] = {}
+            data[disable_channel]["enabled"] = False
+            print(f"Disabled channel: {disable_channel}")
+        channels_json.write_text(json.dumps(data, indent=2))
+        return
+
+    print(f"{'CHANNEL':<15} | {'ENABLED':<8} | {'BIN/PATH':<25} | {'AUTH/NOTES'}")
+    print("-" * 75)
+    
+    data = {}
+    if channels_json.exists():
+        try:
+            import json
+            data = json.loads(channels_json.read_text())
+        except Exception:
+            pass
+            
+    env_disabled = [c.strip() for c in os.environ.get("AI_ROUTER_DISABLE_CHANNELS", "").split(",") if c.strip()]
+    
+    for ch in ["agy", "codex", "copilot", "codewhale", "gemini-free", "deepseek", "minimax", "grok"]:
+        enabled = data.get(ch, {}).get("enabled", True)
+        if ch in env_disabled:
+            enabled = False
+        
+        enabled_str = "yes" if enabled else "NO"
+        
+        bin_str = "-"
+        auth_str = data.get(ch, {}).get("notes", "")
+        
+        if ch in ("agy", "codewhale", "codex", "copilot"):
+            bin_path = shutil.which(ch)
+            if bin_path:
+                bin_str = bin_path
+                
+                if ch == "codex":
+                    try:
+                        r = subprocess.run(["codex", "login", "status"], capture_output=True, text=True, timeout=2)
+                        if r.returncode == 0:
+                            auth_str = r.stdout.strip().split("\n")[0]
+                    except Exception:
+                        pass
+                elif ch == "copilot":
+                    # Copilot CLI relies on GH CLI or env vars, no native auth status command
+                    auth_str = "assumed via env or GH CLI"
+            else:
+                bin_str = "missing"
+                
+        print(f"{ch:<15} | {enabled_str:<8} | {bin_str:<25} | {auth_str}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Delegate a task to a grunt/free model, with proof + memory.")
     ap.add_argument("-q", "--quiet", action="store_true", help="suppress INFO logs")
@@ -1310,6 +1471,9 @@ def main():
     ap.add_argument("--system", default="", help="system instruction (persona / rules)")
     ap.add_argument("--audit", action="store_true", help="print the delegation ledger and exit")
     ap.add_argument("--cost", action="store_true", help="print the cost report and exit")
+    ap.add_argument("--channels", action="store_true", help="list channel registry status")
+    ap.add_argument("--enable", help="enable a channel in channels.json")
+    ap.add_argument("--disable", help="disable a channel in channels.json")
     ap.add_argument("--cache-prune", action="store_true", help="prune old/excess cache rows and exit")
     ap.add_argument("--estimate", action="store_true", help="print estimated cost and caps, without calling the provider")
     ap.add_argument("--since", help="YYYY-MM-DD to filter cost report")
@@ -1356,10 +1520,14 @@ def main():
         if not (a.prompt or a.plan):
             return
 
+    if a.channels or a.enable or a.disable:
+        cmd_channels(enable_channel=a.enable, disable_channel=a.disable)
+        return
+
     load_env()
     prompt = Path(a.plan).read_text() if a.plan else a.prompt
     if not prompt:
-        sys.exit("❌ need -p PROMPT or --plan FILE (or --audit / --new)")
+        sys.exit("❌ need -p PROMPT or --plan FILE (or --audit / --new / --channels)")
 
     if a.agent:
         timeout = min(max(a.timeout, 1), 1800)

@@ -154,3 +154,52 @@ print("ok")
     with pytest.raises(SystemExit) as e:
         d.agent_delegate("second", runner="agy", workdir=tmp_path)
     assert "google-ai-pro" in str(e.value)
+
+def test_channel_registry_disabled_aborts(isolated_paths, tmp_path):
+    d.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (d.DATA_DIR / "channels.json").write_text(json.dumps({"agy": {"enabled": False}}))
+    with pytest.raises(ValueError, match="All candidates disabled"):
+        d.agent_delegate("task", runner="agy", workdir=tmp_path)
+
+
+def test_channel_registry_env_override(isolated_paths, tmp_path, monkeypatch):
+    create_fake_bin(isolated_paths, "agy", "#!/usr/bin/env python3\nprint('ok')\n")
+    d.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (d.DATA_DIR / "channels.json").write_text(json.dumps({"agy": {"enabled": True}}))
+    monkeypatch.setenv("AI_ROUTER_DISABLE_CHANNELS", "agy,copilot")
+    with pytest.raises(ValueError, match="All candidates disabled"):
+        d.agent_delegate("task", runner="agy", workdir=tmp_path)
+
+
+def test_agent_codex_argv(isolated_paths, tmp_path):
+    argv_log = tmp_path / "argv.json"
+    create_fake_bin(isolated_paths, "codex", f"#!/usr/bin/env python3\nimport sys, json\nopen({str(argv_log)!r}, 'w').write(json.dumps(sys.argv))\n")
+    out = d.agent_delegate("mytask", runner="codex", workdir=tmp_path)
+    assert "COMPLETED" in out
+    argv = json.loads(argv_log.read_text())
+    assert argv[1:3] == ["exec", "--cd"]
+    assert argv[3] == str(tmp_path)
+    assert argv[4].endswith("mytask")
+
+
+def test_agent_copilot_argv_and_premium(isolated_paths, tmp_path):
+    argv_log = tmp_path / "argv.json"
+    create_fake_bin(isolated_paths, "copilot", f"#!/usr/bin/env python3\nimport sys, json\nopen({str(argv_log)!r}, 'w').write(json.dumps(sys.argv))\n")
+    out = d.agent_delegate("mytask", runner="copilot", workdir=tmp_path)
+    assert "COMPLETED" in out
+    argv = json.loads(argv_log.read_text())
+    assert argv[1] == "-p"
+    assert argv[2].endswith("mytask")
+    assert "--allow-all-tools" in argv
+    
+    rec = json.loads(d.AUDIT.read_text().strip().splitlines()[0])
+    assert rec["premium_requests"] == 1
+
+
+def test_cmd_channels_autodetect_table(capsys, isolated_paths, monkeypatch):
+    # Just ensure it doesn't crash and outputs the table headers
+    d.cmd_channels()
+    captured = capsys.readouterr()
+    assert "CHANNEL" in captured.out
+    assert "ENABLED" in captured.out
+    assert "BIN/PATH" in captured.out

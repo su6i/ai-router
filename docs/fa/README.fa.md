@@ -148,6 +148,14 @@ python3 src/delegate.py --audit
 session، project، commit، هزینه، cached؛ فراخوانی‌های worker mode هم
 files written/rejected، دستور/وضعیتِ verify، تعداد attempt را اضافه می‌کنند).
 
+### رجیستری کانال‌ها (Channel Registry)
+
+فایل `delegate.py` وظایف را به کانال‌های اجرایی (مثل `agy`، `codewhale`، `codex`، `copilot`) مسیردهی می‌کند. در دسترس بودنِ کانال‌ها توسط یک رجیستری محلی مدیریت می‌شود.
+کانال‌ها را می‌توان از طریق فایل `channels.json` در پوشه‌ی data (`~/.local/share/agent-projects/ai-router/data/channels.json`) فعال/غیرفعال کرد، یا با متغیر محیطی `AI_ROUTER_DISABLE_CHANNELS` (مثلاً `AI_ROUTER_DISABLE_CHANNELS=agy,copilot`) نادیده گرفت.
+
+- دستور `r channels` (یا `--channels`) جدولی خودکار چاپ می‌کند که وضعیت، حضور باینری CLI و وضعیت احراز هویت تمام کانال‌های شناخته‌شده را نشان می‌دهد.
+- فلگ‌های `--enable <channel>` / `--disable <channel>` فایل رجیستری `channels.json` را تغییر می‌دهند.
+
 ### بودجه‌ها (Budgets)
 
 سقف‌های بودجه با صدای بلند شکست می‌خورند — اگر یک پردازش از سقف خود عبور کند متوقف می‌شود؛ هزینه‌ی بیش از حدِ بی‌سروصدا ممنوع است. محدودیت‌ها در `<vault>/data/budgets.json` پیکربندی می‌شوند. اگر فایلی وجود نداشته باشد، هزینه بدون سقف است اما هشداری در stderr چاپ می‌شود.

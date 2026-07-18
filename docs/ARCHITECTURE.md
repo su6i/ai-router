@@ -72,6 +72,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 | Component | Tech | Responsibility |
 |---|---|---|
 | **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, worker mode (`--files`: cheap model reads/writes files on disk directly, verified via a caller-supplied command, only a short summary returns to the caller — see private `DELEGATE-TOOL-DESIGN.md`), audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). |
+| **Channel Registry** | JSON file | Controls access to the available channels (`agy`, `codewhale`, `codex`, `copilot`). Checked at runtime before delegating via `delegate_agent`. Enforced by `channels.json` and the `AI_ROUTER_DISABLE_CHANNELS` env var. |
 | **mcp/server.py** | Python, stdlib-only | Hand-rolled stdio JSON-RPC MCP server (protocol revision 2025-11-25) exposing the same `delegate.py` as two capped MCP tools (`delegate_research`, `delegate_worker`) — see private `MCP-SERVER-DESIGN.md`. Registered once at user scope so every MCP host (Claude Code first) can discover cheap delegation without a CLI call. No uncapped chat tool; ledger rows tag `via: "mcp"`. |
 | **Postgres + pgvector** | `pgvector/pgvector:pg17` | System of record. `usage` (ledger) + `prompt_cache` (RAG). |
 | **ingest** | Python + psycopg | Idempotent load of `audit.log` → `usage` (INSERT … ON CONFLICT DO NOTHING on `response_id`). |
@@ -116,6 +117,7 @@ always overrides the classifier.
 | Tier | Models | Assigned work |
 |---|---|---|
 | **FREE** | gemini-2.5-flash, gemma | Trivial: classification, quick factual lookup, format/JSON conversion, first-draft prose, commit-message drafts. Rate-limited → light one-shots. |
+| **SUBSCRIPTION** | codex, copilot | Paid via existing subscriptions, effectively $0 marginal cost. Used via local CLIs (`codex exec`, `copilot`). Tracked in audit.log with premium request counters to prevent quota abuse. |
 | **CHEAP code** | deepseek-flash (default), deepseek-pro | flash: boilerplate, refactors, unit tests, docstrings, SQL, regex. pro: multi-file logic, debugging flash fails at. |
 | **CHEAP reason (prepaid)** | minimax-m3 | Long-form reasoning/analysis, planning drafts, non-code writeups. **Not** clean codegen (verbose `<think>`). Spend prepaid credit first. |
 | **QUALITY** | sonnet-5, grok-4.3 | sonnet-5: production code needing care, reviews of delegated output. grok: needs current knowledge or an independent second opinion. |

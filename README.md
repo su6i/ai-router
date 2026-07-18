@@ -153,6 +153,14 @@ Prints `audit.log` (one JSON line per call: model asked/echoed, session,
 project, commit, cost, cached; worker-mode calls add files written/rejected,
 verify command/status, attempts).
 
+### Channel Registry
+
+`delegate.py` routes tasks to execution channels (e.g. `agy`, `codewhale`, `codex`, `copilot`). Channel availability is managed by a local registry.
+Channels can be enabled/disabled by the `channels.json` file in the data dir (`~/.local/share/agent-projects/ai-router/data/channels.json`) or overridden by the `AI_ROUTER_DISABLE_CHANNELS` environment variable (e.g., `AI_ROUTER_DISABLE_CHANNELS=agy,copilot`).
+
+- `r channels` (or `--channels`) prints an autodetected table showing the status, CLI binary presence, and auth state of all known channels.
+- `--enable <channel>` / `--disable <channel>` modifies the `channels.json` registry file.
+
 ### Budgets
 
 Budget caps fail loudly — a job over its cap aborts; silent overspend is
