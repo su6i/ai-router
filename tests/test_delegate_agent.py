@@ -191,7 +191,21 @@ def test_agent_copilot_argv_and_premium(isolated_paths, tmp_path):
     assert argv[1] == "-p"
     assert argv[2].endswith("mytask")
     assert "--allow-all-tools" in argv
-    
+    # default model is gpt-5-mini (0x multiplier) — no premium request burned
+    assert argv[argv.index("--model") + 1] == "gpt-5-mini"
+
+    rec = json.loads(d.AUDIT.read_text().strip().splitlines()[0])
+    assert rec["premium_requests"] == 0
+
+
+def test_agent_copilot_escalated_model_counts_premium(isolated_paths, tmp_path):
+    argv_log = tmp_path / "argv.json"
+    create_fake_bin(isolated_paths, "copilot", f"#!/usr/bin/env python3\nimport sys, json\nopen({str(argv_log)!r}, 'w').write(json.dumps(sys.argv))\n")
+    out = d.agent_delegate("mytask", runner="copilot", model="claude-sonnet-4.5", workdir=tmp_path)
+    assert "COMPLETED" in out
+    argv = json.loads(argv_log.read_text())
+    assert argv[argv.index("--model") + 1] == "claude-sonnet-4.5"
+
     rec = json.loads(d.AUDIT.read_text().strip().splitlines()[0])
     assert rec["premium_requests"] == 1
 

@@ -117,7 +117,7 @@ always overrides the classifier.
 | Tier | Models | Assigned work |
 |---|---|---|
 | **FREE** | gemini-2.5-flash, gemma | Trivial: classification, quick factual lookup, format/JSON conversion, first-draft prose, commit-message drafts. Rate-limited → light one-shots. |
-| **SUBSCRIPTION** | codex, copilot | Paid via existing subscriptions, effectively $0 marginal cost. Used via local CLIs (`codex exec`, `copilot`). Tracked in audit.log with premium request counters to prevent quota abuse. |
+| **SUBSCRIPTION** | codex, copilot | Paid via existing subscriptions, effectively $0 marginal cost. Used via local CLIs (`codex exec`, `copilot`). Tracked in audit.log with premium request counters to prevent quota abuse. Copilot default model is `gpt-5-mini` (0× premium-request multiplier — counted as `premium_requests: 0`); harder tasks escalate explicitly to `gpt-5` / `claude-sonnet-4.5` (1×). |
 | **CHEAP code** | deepseek-flash (default), deepseek-pro | flash: boilerplate, refactors, unit tests, docstrings, SQL, regex. pro: multi-file logic, debugging flash fails at. |
 | **CHEAP reason (prepaid)** | minimax-m3 | Long-form reasoning/analysis, planning drafts, non-code writeups. **Not** clean codegen (verbose `<think>`). Spend prepaid credit first. |
 | **QUALITY** | sonnet-5, grok-4.3 | sonnet-5: production code needing care, reviews of delegated output. grok: needs current knowledge or an independent second opinion. |

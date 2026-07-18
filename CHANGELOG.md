@@ -7,6 +7,17 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Changed
+
+- **Copilot default model → `gpt-5-mini`** — `gpt-5-mini` has a 0×
+  premium-request multiplier on Copilot Pro (per GitHub docs "Requests in
+  GitHub Copilot", verified 2026-07-18), so default worker calls no longer
+  consume the 300 premium requests/month. Harder tasks escalate explicitly
+  via `--model gpt-5` or `--model claude-sonnet-4.5` (both 1×). Premium
+  request accounting now records `0` for 0×-multiplier models instead of
+  over-counting every copilot call as `1`. The default worker channel
+  remains `agy` (Gemini 3.1 Pro).
+
 ### Fixed
 
 - **agy headless permission auto-denial** — since agy 1.1.3 (2026-07-16),

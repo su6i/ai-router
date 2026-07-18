@@ -161,6 +161,8 @@ Channels can be enabled/disabled by the `channels.json` file in the data dir (`~
 - `r channels` (or `--channels`) prints an autodetected table showing the status, CLI binary presence, and auth state of all known channels.
 - `--enable <channel>` / `--disable <channel>` modifies the `channels.json` registry file.
 
+Model ladder: the default worker channel stays `agy` (Gemini 3.1 Pro, Google AI Pro subscription). The `copilot` runner defaults to `gpt-5-mini`, which has a **0× premium-request multiplier** on Copilot Pro — it never consumes the 300 premium requests/month. Escalate harder tasks explicitly with `--model gpt-5` or `--model claude-sonnet-4.5` (both 1×); those calls are counted against `copilot_premium_requests_month`. 0×-multiplier calls are logged with `premium_requests: 0`.
+
 ### Budgets
 
 Budget caps fail loudly — a job over its cap aborts; silent overspend is

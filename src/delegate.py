@@ -156,6 +156,10 @@ ALIASES = {
     "gemma": "gemma", "gemma-4": "gemma", "gemma-4-31b-it": "gemma", "gemma3": "gemma",
 }
 
+# Copilot models with a 0x premium-request multiplier on the Pro plan
+# (docs.github.com "Requests in GitHub Copilot", verified 2026-07-18).
+COPILOT_ZERO_MULTIPLIER_MODELS = {"gpt-5-mini"}
+
 
 
 def is_channel_enabled(channel: str) -> bool:
@@ -1215,7 +1219,10 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         quota_channel = "chatgpt-sub"
         spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
     elif runner == "copilot":
-        model_name = model or "claude-sonnet-4.5"
+        # gpt-5-mini has a 0x premium-request multiplier on Copilot Pro
+        # (docs.github.com "Requests in GitHub Copilot", verified 2026-07-18);
+        # escalate per-task via --model gpt-5 / claude-sonnet-4.5 (both 1x).
+        model_name = model or "gpt-5-mini"
         quota_channel = "copilot-sub"
         spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
     else:
@@ -1350,7 +1357,12 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         if not ok:
             fail_output = vout
             
-    premium_req = 1 if runner == "copilot" else None
+    if runner == "copilot":
+        # 0x-multiplier models (gpt-5-mini) don't consume the monthly
+        # premium-request allowance; everything else counts as 1.
+        premium_req = 0 if model_name in COPILOT_ZERO_MULTIPLIER_MODELS else 1
+    else:
+        premium_req = None
             
     _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id, premium_requests=premium_req)
 
