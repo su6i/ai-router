@@ -57,8 +57,44 @@ CACHE_MAX_AGE_DAYS = 90
 
 logger = logging.getLogger("ai_router")
 
+_KEY_PARAM_RE = re.compile(r"([?&]key=)[^&\s'\"]+")
+
+def _redact(text: str) -> str:
+    """Scrub secrets from any text, masking the key (showing last 4 chars)."""
+    if not isinstance(text, str):
+        return text
+    
+    def mask_param(match):
+        prefix = match.group(1)
+        val = match.group(0)[len(prefix):]
+        if len(val) > 4:
+            return f"{prefix}<redacted...{val[-4:]}>"
+        return f"{prefix}<redacted>"
+        
+    text = _KEY_PARAM_RE.sub(mask_param, text)
+    
+    for spec in MODELS.values():
+        env_name = spec.get("key")
+        if env_name:
+            value = os.environ.get(env_name)
+            if value:
+                if len(value) > 4:
+                    text = text.replace(value, f"<{env_name}...{value[-4:]}>")
+                else:
+                    text = text.replace(value, f"<{env_name}>")
+    return text
+
+class RedactingFilter(logging.Filter):
+    def filter(self, record):
+        if isinstance(record.msg, str):
+            record.msg = _redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact(str(arg)) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
 class ProviderError(Exception):
     def __init__(self, model, status, short_reason):
+        short_reason = _redact(short_reason)
         super().__init__(f"{model} failed: HTTP {status} ({short_reason})")
         self.model = model
         self.status = status
@@ -83,7 +119,7 @@ def _post_with_retry(model, *args, **kwargs):
             reason = "timeout"
         except httpx.RequestError as e:
             status = "NETWORK_ERROR"
-            reason = type(e).__name__
+            reason = f"{type(e).__name__}: {str(e)}"
 
         if attempt < max_attempts - 1:
             time.sleep(sleeps[attempt])
@@ -1580,6 +1616,7 @@ def main():
 
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(RedactingFilter())
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING if a.quiet else logging.DEBUG)
 

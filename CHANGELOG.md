@@ -208,3 +208,5 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   `AI_ROUTER_DATA_DIR`) and is never committed. The old `_router/delegate.py`
   path is now a thin deprecation shim.
  
+
+- Fix: Redact API keys from router logs and error messages

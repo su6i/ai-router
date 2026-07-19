@@ -44,7 +44,7 @@ def test_redact_scrubs_key_query_param():
            "gemini-2.5-flash:generateContent?key=AIzaSyFAKELEAKEDKEY123'")
     out = server._redact(msg)
     assert "AIzaSyFAKELEAKEDKEY123" not in out
-    assert "?key=<redacted>" in out
+    assert "?key=<redacted...Y123>" in out
     assert "503 Service Unavailable" in out  # diagnostic value preserved
 
 
@@ -52,11 +52,11 @@ def test_redact_scrubs_env_key_values(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyENVLEAK456")
     out = server._redact("boom AIzaSyENVLEAK456 in message")
     assert "AIzaSyENVLEAK456" not in out
-    assert "<GEMINI_API_KEY>" in out
+    assert "<GEMINI_API_KEY...K456>" in out
 
 
 def test_rpc_error_applies_redaction(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     resp = server._rpc_error(1, -32000, "failed for url '...?key=AIzaSyXYZ&alt=json'")
     assert "AIzaSyXYZ" not in resp["error"]["message"]
-    assert "?key=<redacted>" in resp["error"]["message"]
+    assert "?key=<redacted...yXYZ>" in resp["error"]["message"]
