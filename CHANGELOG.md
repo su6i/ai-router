@@ -7,6 +7,60 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+
+- **Phase 3b: Code-Aware RAG (`r code` / `code_lookup`)** — semantic
+  retrieval over code: git-tracked `*.py`/`*.sh` files are chunked at
+  function/class/method boundaries with tree-sitter (oversized defs split at
+  block boundaries, re-prefixed with their signature), embedded with the
+  local e5-small ONNX model, and stored in pgvector (`code_chunks`, HNSW)
+  next to a static Python call graph (`code_edges`, stdlib `ast`).
+  `r code "<query>" [-k N] [--graph] [--repo PATH]` returns chunks with
+  `path:start-end` refs capped at ~2k tokens; `--graph` adds 1-hop
+  callers/callees; `--reindex` is incremental by `git diff` + `chunk_hash`
+  upsert (idempotent), `--rebuild` full. Exposed to MCP hosts as
+  `code_lookup`. tree-sitter is pinned `>=0.25,<0.26` and chunking runs in
+  an isolated child process — py-tree-sitter 0.26.0 deterministically
+  segfaulted on macOS arm64 when live tokenizers/onnxruntime objects
+  coexisted with AST walks (three independent repros; documented in
+  `docs/CODE-RAG.md` with the honest "when it pays off" economics and a
+  measured −90.8% briefing-token delta vs whole-file context).
+  New deps (pre-approved in wo-0013): `tree-sitter`, `tree-sitter-python`,
+  `tree-sitter-bash`.
+
+### Changed
+
+- **Copilot default model → `gpt-5-mini`** — `gpt-5-mini` has a 0×
+  premium-request multiplier on Copilot Pro (per GitHub docs "Requests in
+  GitHub Copilot", verified 2026-07-18), so default worker calls no longer
+  consume the 300 premium requests/month. Harder tasks escalate explicitly
+  via `--model gpt-5` or `--model claude-sonnet-4.5`. Premium
+  request accounting now records the model's multiplier instead of
+  counting every copilot call as `1`. The default worker channel
+  remains `agy` (Gemini 3.1 Pro).
+- **Copilot multipliers are config, not code** — per-model premium-request
+  multipliers moved out of the source into `<data>/copilot_multipliers.json`
+  (seeded on first copilot call), because GitHub changes rates without notice
+  and exposes no API for them (live-checked 2026-07-19: `seat_info`/copilot
+  usage endpoints are org-only and 404 on a personal plan; the
+  `copilot_internal/v2/token` exchange rejects CLI tokens). Unknown models
+  bill at the file's `default` (1×) — never silently free. `r cost` now also
+  queries the GitHub billing API for the month's **Copilot overage actually
+  billed** (needs the gh `user` scope); `$0` = inside quota, non-zero = quota
+  exceeded and paying — the cue to reconcile the multiplier file.
+
+### Fixed
+
+- **`r code` / `r rules` from any directory** — these run under the project
+  venv via `uv run` now, instead of the stdlib-only `python3` used for
+  chat/audit; previously they crashed with `ModuleNotFoundError: psycopg`
+  when invoked outside the repo. When Postgres is unreachable they print a
+  one-line hint (`start it first: colima start`) instead of a raw traceback.
+- **Ingest integration test skips when Postgres is down** —
+  `test_integration_ingest_idempotent` now probes a real connection (and loads
+  the vault env) instead of only checking `POSTGRES_DSN`, so a stopped Colima
+  yields a skip, not a failure.
+
 ### Fixed
 
 - **agy headless permission auto-denial** — since agy 1.1.3 (2026-07-16),
@@ -154,3 +208,5 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   `AI_ROUTER_DATA_DIR`) and is never committed. The old `_router/delegate.py`
   path is now a thin deprecation shim.
  
+
+- Fix: Redact API keys from router logs and error messages

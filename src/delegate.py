@@ -57,8 +57,44 @@ CACHE_MAX_AGE_DAYS = 90
 
 logger = logging.getLogger("ai_router")
 
+_KEY_PARAM_RE = re.compile(r"([?&]key=)[^&\s'\"]+")
+
+def _redact(text: str) -> str:
+    """Scrub secrets from any text, masking the key (showing last 4 chars)."""
+    if not isinstance(text, str):
+        return text
+    
+    def mask_param(match):
+        prefix = match.group(1)
+        val = match.group(0)[len(prefix):]
+        if len(val) > 4:
+            return f"{prefix}<redacted...{val[-4:]}>"
+        return f"{prefix}<redacted>"
+        
+    text = _KEY_PARAM_RE.sub(mask_param, text)
+    
+    for spec in MODELS.values():
+        env_name = spec.get("key")
+        if env_name:
+            value = os.environ.get(env_name)
+            if value:
+                if len(value) > 4:
+                    text = text.replace(value, f"<{env_name}...{value[-4:]}>")
+                else:
+                    text = text.replace(value, f"<{env_name}>")
+    return text
+
+class RedactingFilter(logging.Filter):
+    def filter(self, record):
+        if isinstance(record.msg, str):
+            record.msg = _redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact(str(arg)) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
 class ProviderError(Exception):
     def __init__(self, model, status, short_reason):
+        short_reason = _redact(short_reason)
         super().__init__(f"{model} failed: HTTP {status} ({short_reason})")
         self.model = model
         self.status = status
@@ -83,7 +119,7 @@ def _post_with_retry(model, *args, **kwargs):
             reason = "timeout"
         except httpx.RequestError as e:
             status = "NETWORK_ERROR"
-            reason = type(e).__name__
+            reason = f"{type(e).__name__}: {str(e)}"
 
         if attempt < max_attempts - 1:
             time.sleep(sleeps[attempt])
@@ -155,6 +191,41 @@ ALIASES = {
     "gemini-lite": "gemini-lite", "gemini-2.5-flash-lite": "gemini-lite", "lite": "gemini-lite",
     "gemma": "gemma", "gemma-4": "gemma", "gemma-4-31b-it": "gemma", "gemma3": "gemma",
 }
+
+# Copilot premium-request multipliers are NOT hardcoded: GitHub changes them
+# without notice and exposes no API for them (live-checked 2026-07-19: the
+# copilot_internal/v2/token exchange 404s for CLI tokens, and the docs table
+# moves between pages). The table lives in <data>/copilot_multipliers.json,
+# seeded below on first use; unknown models bill at "default" (1x) so a model
+# rename can never silently look free. Ground truth per month comes from the
+# GitHub billing API in `r cost` (needs gh 'user' scope).
+COPILOT_MULTIPLIERS_SEED = {
+    "_doc": (
+        "Per-model Copilot premium-request multipliers (Pro plan). Edit freely; "
+        "unknown models bill at 'default'. Source: docs.github.com Copilot "
+        "billing pages (values verified 2026-07-18)."
+    ),
+    "default": 1,
+    "models": {"gpt-5-mini": 0, "gpt-5": 1, "claude-sonnet-4.5": 1},
+}
+
+
+def copilot_premium_multiplier(model_name: str) -> float:
+    path = DATA_DIR / "copilot_multipliers.json"
+    try:
+        if not path.exists():
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(COPILOT_MULTIPLIERS_SEED, indent=2) + "\n")
+        data = json.loads(path.read_text())
+        models = data.get("models", {})
+        if model_name in models:
+            return float(models[model_name])
+        default = float(data.get("default", 1))
+        logger.warning(f"⚠️  copilot model '{model_name}' not in {path.name} — billing {default:g}x premium")
+        return default
+    except Exception:
+        logger.warning(f"⚠️  could not read {path} — billing 1x premium")
+        return 1.0
 
 
 
@@ -510,7 +581,46 @@ def show_cost(since: str = None, by: str = "model"):
         print(f"\nskipped {malformed} malformed lines")
         
     if copilot_premium_month > 0:
-        print(f"\nCopilot premium requests (this month): {copilot_premium_month}")
+        print(f"\nCopilot premium requests (this month): {copilot_premium_month:g} (ledger estimate; multipliers from copilot_multipliers.json)")
+        billed = _github_copilot_billed_this_month()
+        if billed is None:
+            print("  GitHub-billed Copilot overage: unavailable (run: gh auth refresh -h github.com -s user)")
+        elif billed <= 0:
+            print("  GitHub-billed Copilot overage: $0.00 (still inside the monthly quota — the API itemizes overage only)")
+        else:
+            print(f"  GitHub-billed Copilot overage this month: ${billed:.2f} ⚠️  premium quota exceeded — update copilot_multipliers.json if this surprises you")
+
+
+def _github_copilot_billed_this_month():
+    """Net USD GitHub actually billed for Copilot this month, or None.
+
+    There is no public API for premium-request *counts* or multipliers on a
+    personal plan (live-checked 2026-07-19: seat_info / copilot usage are
+    org-only and 404 without an org; the internal token exchange rejects CLI
+    tokens). The billing-usage endpoint only itemizes *overage* — within the
+    monthly premium quota it nets to $0. So a non-zero value here means the
+    quota was exceeded and real money is being spent: the independent signal
+    worth surfacing next to the ledger estimate. Needs gh with the 'user'
+    scope; returns None (never raises) when unavailable.
+    """
+    try:
+        login = subprocess.run(["gh", "api", "user", "--jq", ".login"],
+                               capture_output=True, text=True, timeout=10)
+        if login.returncode != 0 or not login.stdout.strip():
+            return None
+        now = dt.datetime.now()
+        r = subprocess.run(
+            ["gh", "api", f"users/{login.stdout.strip()}/settings/billing/usage?year={now.year}&month={now.month}"],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return None
+        net = 0.0
+        for item in json.loads(r.stdout).get("usageItems", []):
+            if "copilot" in str(item.get("product", "")).lower():
+                net += float(item.get("netAmount", 0) or 0)
+        return net
+    except Exception:
+        return None
 
 
 # ---- conversation memory -----------------------------------------------------
@@ -1215,7 +1325,10 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         quota_channel = "chatgpt-sub"
         spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
     elif runner == "copilot":
-        model_name = model or "claude-sonnet-4.5"
+        # gpt-5-mini bills at 0x premium on Copilot Pro (see
+        # copilot_multipliers.json in the data dir for the live table);
+        # escalate per-task via --model gpt-5 / claude-sonnet-4.5.
+        model_name = model or "gpt-5-mini"
         quota_channel = "copilot-sub"
         spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
     else:
@@ -1350,7 +1463,13 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         if not ok:
             fail_output = vout
             
-    premium_req = 1 if runner == "copilot" else None
+    if runner == "copilot":
+        # Multiplier comes from the vault config (copilot_multipliers.json);
+        # 0x models don't consume the monthly premium-request allowance.
+        m = copilot_premium_multiplier(model_name)
+        premium_req = int(m) if m == int(m) else m
+    else:
+        premium_req = None
             
     _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id, premium_requests=premium_req)
 
@@ -1497,6 +1616,7 @@ def main():
 
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(RedactingFilter())
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING if a.quiet else logging.DEBUG)
 

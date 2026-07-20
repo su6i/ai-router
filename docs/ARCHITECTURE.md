@@ -13,7 +13,7 @@
 | Cost Report | **Done** | SQL aggregations per WO 0002 |
 | Budget Caps | **Done** | Enforced per WO 0003 |
 | Prometheus Exporter | **Parked** | Phase 2 parked until stable |
-| Semantic Cache / RAG | **Rejected/Shipped** | Phase 3a (retrieval context loading) shipped; Phase 3b (semantic response caching) stays rejected |
+| Semantic Cache / RAG | **Rejected/Shipped** | Phase 3a (rules retrieval) and Phase 3b (code retrieval, `r code` — see [CODE-RAG.md](CODE-RAG.md)) shipped; semantic response caching (Phase 3c) stays rejected |
 
 ## 1. Why this exists
 
@@ -82,6 +82,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 | **Grafana** | `grafana/grafana` | Dashboards provisioned as code. Two data sources: Prometheus (graphs) + Postgres (detail tables). |
 | **semantic cache / RAG** | pgvector + local embeddings | Pre-router interception (see §6). |
 | **local embedder** | `intfloat/multilingual-e5-small` (384-d, ONNX/CPU, offline, free) | Multilingual (fa/en/fr) prompt embeddings for the cache. Chosen for CPU/offline/free; dim 384 is wired into the schema. |
+| **code index** | `src/code_index.py` (tree-sitter `>=0.25,<0.26` + stdlib `ast`) | Phase 3b: AST function/class chunks of tracked `*.py`/`*.sh` → `code_chunks` (pgvector HNSW) + static call graph `code_edges`. Chunking runs in an isolated child process (native-lib segfault guard, see [CODE-RAG.md](CODE-RAG.md)). Query-only API: `r code` / MCP `code_lookup`; nothing in `delegate.py` imports it. |
 
 **Worker Context Discipline**: To prevent worker/agent models from wasting tokens on large files, a context discipline pack now ships. It includes a strict reading-rules template (`AGENTS-context-discipline.md`) injected as a cache-friendly constant preamble in all prompts, and an auto-generated compact repo map (`src/repo_map.py`) to guide initial symbol discovery.
 
@@ -117,7 +118,7 @@ always overrides the classifier.
 | Tier | Models | Assigned work |
 |---|---|---|
 | **FREE** | gemini-2.5-flash, gemma | Trivial: classification, quick factual lookup, format/JSON conversion, first-draft prose, commit-message drafts. Rate-limited → light one-shots. |
-| **SUBSCRIPTION** | codex, copilot | Paid via existing subscriptions, effectively $0 marginal cost. Used via local CLIs (`codex exec`, `copilot`). Tracked in audit.log with premium request counters to prevent quota abuse. |
+| **SUBSCRIPTION** | codex, copilot | Paid via existing subscriptions, effectively $0 marginal cost. Used via local CLIs (`codex exec`, `copilot`). Tracked in audit.log with premium request counters to prevent quota abuse. Copilot default model is `gpt-5-mini` (0× premium-request multiplier); harder tasks escalate explicitly to `gpt-5` / `claude-sonnet-4.5`. Multipliers are config, not code: `<data>/copilot_multipliers.json`, unknown models bill at `default` (1×); `r cost` cross-checks the ledger against GitHub's billed Copilot **overage** (billing API, `user` scope) — `$0` while inside quota, non-zero once the premium quota is exceeded. |
 | **CHEAP code** | deepseek-flash (default), deepseek-pro | flash: boilerplate, refactors, unit tests, docstrings, SQL, regex. pro: multi-file logic, debugging flash fails at. |
 | **CHEAP reason (prepaid)** | minimax-m3 | Long-form reasoning/analysis, planning drafts, non-code writeups. **Not** clean codegen (verbose `<think>`). Spend prepaid credit first. |
 | **QUALITY** | sonnet-5, grok-4.3 | sonnet-5: production code needing care, reviews of delegated output. grok: needs current knowledge or an independent second opinion. |
@@ -169,7 +170,8 @@ because near-identical prompts can need different answers as code changes.
   `amir router cost` (SQL). Everything else depends on this.
 - **Phase 2 — observability:** exporter + Prometheus + Grafana (dashboards-as-code). **(Parked)**
 - **Phase 3a — Retrieval context loading:** local embedder (intfloat/multilingual-e5-small) + pgvector rules index. **(Shipped)**
-- **Phase 3b — Semantic response cache:** semantic matching for exact-hash fallback. **(Rejected)**
+- **Phase 3b — Code retrieval:** AST-chunked code index (`src/code_index.py`, tree-sitter) + static call graph in the same pgvector store; `r code` CLI + `code_lookup` MCP tool. Design/economics: [CODE-RAG.md](CODE-RAG.md). **(Shipped)**
+- **Phase 3c — Semantic response cache:** semantic matching for exact-hash fallback. **(Rejected)**
 
 ## 9. Open decisions (to finalize before executing)
 

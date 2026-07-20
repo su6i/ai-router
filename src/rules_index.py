@@ -311,10 +311,13 @@ def main():
     parser_search.add_argument("-k", type=int, default=5, help="Number of results")
     
     args = parser.parse_args()
-    if args.cmd == "reindex":
-        cmd_reindex(args)
-    elif args.cmd == "search":
-        cmd_search(args)
+    try:
+        if args.cmd == "reindex":
+            cmd_reindex(args)
+        elif args.cmd == "search":
+            cmd_search(args)
+    except psycopg.OperationalError:
+        sys.exit("❌ Postgres not reachable — start it first: colima start")
 
 if __name__ == "__main__":
     main()

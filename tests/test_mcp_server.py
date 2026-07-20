@@ -132,7 +132,7 @@ def test_tools_list_exposes_exactly_tools(server_proc):
     resp = _recv(server_proc)
     tools = resp["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"delegate_research", "delegate_worker", "delegate_agent", "rules_lookup"}
+    assert names == {"delegate_research", "delegate_worker", "delegate_agent", "rules_lookup", "code_lookup"}
 
     research = next(t for t in tools if t["name"] == "delegate_research")
     assert set(research["inputSchema"]["properties"]) == {

@@ -14,6 +14,19 @@
 #   AI_ROUTER_REPO    path to the ai-router repo (default below)
 #   AI_ROUTER_PYTHON  interpreter (default: python3; delegate is stdlib-only)
 
+# code/rules need the project venv (psycopg, tree-sitter, onnxruntime) which
+# the stdlib-only `python3` used for chat/audit/worker does NOT have — so from
+# any other directory `r code` would crash with ModuleNotFoundError. Run those
+# two subcommands under `uv run` inside the repo, which resolves the deps.
+_r_heavy() {  # _r_heavy <module> <args...>
+  local repo="${AI_ROUTER_REPO:-/Users/su6i/@-github/ai-router}"
+  if command -v uv >/dev/null 2>&1; then
+    ( cd "$repo" && uv run --quiet python -m "$@" )
+  else
+    ( cd "$repo" && "${AI_ROUTER_PYTHON:-python3}" -m "$@" )
+  fi
+}
+
 r() {
   local repo="${AI_ROUTER_REPO:-/Users/su6i/@-github/ai-router}"
   local py="${AI_ROUTER_PYTHON:-python3}"
@@ -30,11 +43,23 @@ r() {
 
   if [ "$1" = "rules" ]; then
     shift
-    (cd "$repo" && if [ "$1" = "--reindex" ]; then
-      "$py" -m src.rules_index reindex
+    if [ "$1" = "--reindex" ]; then
+      _r_heavy src.rules_index reindex
     else
-      "$py" -m src.rules_index search "$@"
-    fi)
+      _r_heavy src.rules_index search "$@"
+    fi
+    return "$?"
+  fi
+
+  if [ "$1" = "code" ]; then
+    shift
+    if [ "$1" = "--reindex" ]; then
+      _r_heavy src.code_index reindex
+    elif [ "$1" = "--rebuild" ]; then
+      _r_heavy src.code_index reindex --rebuild
+    else
+      _r_heavy src.code_index search "$@"
+    fi
     return "$?"
   fi
 
