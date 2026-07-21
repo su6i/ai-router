@@ -1677,6 +1677,89 @@ def list_notes(project: str, unread_only: bool = True, peek: bool = False):
     return notes
 
 
+def parse_task_note_file(path: Path) -> dict:
+    content = path.read_text()
+    meta = {}
+    body = content
+    if content.startswith("---\n"):
+        header_end = content.find("\n---\n", 4)
+        if header_end != -1:
+            header = content[4:header_end]
+            for line in header.split("\n"):
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip()
+            body = content[header_end+5:].strip()
+
+    repo = None
+    goal_lines = []
+    
+    for line in body.split("\n"):
+        if line.startswith("repo:"):
+            repo = line[5:].strip()
+        else:
+            goal_lines.append(line)
+            
+    if not repo:
+        raise ValueError("task-note body missing 'repo: <path>'")
+        
+    return {
+        "repo": repo,
+        "goal": "\n".join(goal_lines).strip(),
+        "constraints": meta.get("constraints", ""),
+        "priority": meta.get("priority", "normal"),
+        "from_project": meta.get("from")
+    }
+
+
+def route_task(task_note: dict, verify_cmd: str = "") -> str:
+    goal = task_note.get("goal", "")
+    constraints = task_note.get("constraints", "")
+    repo = task_note.get("repo")
+
+    if not repo:
+        raise ValueError("task-note missing repo")
+
+    combined_check = (goal + " " + constraints).lower()
+    for word in ("push", "git push", "merge", "git merge"):
+        if word in combined_check:
+            raise ValueError("route_task refuses: task-note requests push/merge, which stays behind the architect/owner gate")
+
+    full_goal = goal
+    if constraints:
+        full_goal += f"\nConstraints:\n{constraints}"
+
+    report = ""
+    fallback_needed = False
+    fallback_reason = ""
+
+    try:
+        report = agent_delegate(task=full_goal, runner="agy", workdir=repo, verify_cmd=verify_cmd)
+        if "VERIFY FAILED" in report:
+            fallback_needed = True
+            fallback_reason = "verify failed"
+    except (Exception, SystemExit) as e:
+        # SystemExit covers check_budget()'s daily-cap/quota-exceeded abort
+        # inside agent_delegate (sys.exit, not a raised Exception) — a quota
+        # hit must fall through to the paid ladder step too, per the WO's
+        # "verify fail OR free-tier quota hit" escalation trigger.
+        report = f"agy run failed with exception: {e}"
+        fallback_needed = True
+        fallback_reason = f"exception: {e}"
+        
+    if fallback_needed:
+        try:
+            fallback_report = agent_delegate(task=full_goal, runner="codewhale", model="flash", workdir=repo, verify_cmd=verify_cmd)
+            report = f"Original agy run failed ({fallback_reason}). Paid fallback used (codewhale flash):\n\n{fallback_report}"
+        except Exception as e:
+            report = f"Original agy run failed ({fallback_reason}). Paid fallback (codewhale flash) also failed: {str(e)}"
+            
+    from_project = task_note.get("from_project")
+    if from_project:
+        send_note(to_project=from_project, message=report, priority=task_note.get("priority", "normal"), subject="task-note result")
+        
+    return report
+
 def cmd_channels(enable_channel=None, disable_channel=None):
     import shutil
     channels_json = DATA_DIR / "channels.json"
@@ -1787,6 +1870,7 @@ def main():
     ap.add_argument("--agent", action="store_true", help="agent mode: use agy or codewhale exec for multi-step exploration")
     ap.add_argument("--runner", default="agy", help="agent mode runner: agy (default) or codewhale")
     ap.add_argument("--timeout", type=int, default=600, help="agent mode: timeout in seconds (default 600, max 1800)")
+    ap.add_argument("--route-task", help="path to a note file to execute via route_task")
     a = ap.parse_args()
 
     handler = logging.StreamHandler(sys.stderr)
@@ -1850,6 +1934,15 @@ def main():
         except Exception as e:
             sys.exit(f"❌ {e}")
         return
+
+    if a.route_task:
+        try:
+            task_note = parse_task_note_file(Path(a.route_task))
+            print(route_task(task_note, verify_cmd=a.verify))
+        except Exception as e:
+            sys.exit(f"❌ {e}")
+        return
+
 
     load_env()
     prompt = Path(a.plan).read_text() if a.plan else a.prompt

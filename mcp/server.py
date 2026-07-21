@@ -161,6 +161,28 @@ TOOLS = [
             "required": ["project"]
         }
     },
+    {
+        "name": "route_task",
+        "description": "Execute a task-note with push/merge refusal and a $0-first executor ladder.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_note": {
+                    "type": "object",
+                    "properties": {
+                        "repo": {"type": "string"},
+                        "goal": {"type": "string"},
+                        "constraints": {"type": "string", "default": ""},
+                        "priority": {"type": "string", "default": "normal"},
+                        "from_project": {"type": "string"}
+                    },
+                    "required": ["repo", "goal"]
+                },
+                "verify": {"type": "string", "default": ""}
+            },
+            "required": ["task_note"]
+        }
+    },
 ]
 
 
@@ -326,6 +348,20 @@ def handle_list_notes(args: dict) -> dict:
     
     return _text_result("\n---\n".join(lines))
 
+
+def handle_route_task(args: dict) -> dict:
+    task_note = args.get("task_note")
+    if not task_note or not isinstance(task_note, dict):
+        raise ValueError("'task_note' is required and must be an object")
+        
+    verify_cmd = args.get("verify", "")
+    
+    with contextlib.redirect_stdout(io.StringIO()):
+        report = d.route_task(task_note, verify_cmd=verify_cmd)
+        
+    return _text_result(report)
+
+
 TOOL_HANDLERS = {
     "delegate_research": handle_delegate_research,
     "delegate_worker": handle_delegate_worker,
@@ -334,6 +370,7 @@ TOOL_HANDLERS = {
     "code_lookup": handle_code_lookup,
     "send_note": handle_send_note,
     "list_notes": handle_list_notes,
+    "route_task": handle_route_task,
 }
 
 

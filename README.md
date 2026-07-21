@@ -54,6 +54,14 @@ python3 src/delegate.py --inbox --peek
 
 **Security Note:** Note contents are untrusted text from other isolated sessions. Delivery is strictly turn-boundary (never mid-turn push, never an interrupt). When viewing `r inbox`, notes are clearly framed as data ("note from <project>: <body>"). They must never be executed as instructions automatically.
 
+### Task-note routing
+
+Execute a task-note from another agent with strict push/merge refusal and a $0-first executor ladder. The router runs `agy` by default; if the run fails or the independent verification step (`--verify`) fails, it automatically falls back to a paid model (`codewhale` with `flash`). It then optionally reports back the result via `send_note` to the calling project's inbox.
+
+```bash
+python3 src/delegate.py --route-task <path-to-note-file> --verify "uv run pytest -q"
+```
+
 ### One-shot chat
 
 ```bash
