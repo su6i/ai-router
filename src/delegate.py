@@ -1351,7 +1351,35 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         except Exception:
             return ""
 
-    status_before = _git_status()
+    def _is_git_repo():
+        try:
+            r = subprocess.run(["git", "-C", str(project_root), "rev-parse", "--is-inside-work-tree"],
+                               capture_output=True, text=True, timeout=GIT_TIMEOUT)
+            return r.returncode == 0 and r.stdout.strip() == "true"
+        except Exception:
+            return False
+
+    def _fs_snapshot():
+        # Fallback change-detection for a NON-git workdir. git status sees
+        # nothing outside a repo, so without this the router reported 0 files
+        # changed even when the runner wrote — the false "agy hallucinated"
+        # signal (2026-07-21). Map each file to (size, mtime_ns); .git skipped.
+        snap = {}
+        for root, dirs, files in os.walk(project_root):
+            if ".git" in dirs:
+                dirs.remove(".git")
+            for fn in files:
+                p = Path(root) / fn
+                try:
+                    st = p.stat()
+                    snap[str(p.relative_to(project_root))] = (st.st_size, st.st_mtime_ns)
+                except OSError:
+                    pass
+        return snap
+
+    git_mode = _is_git_repo()
+    status_before = _git_status() if git_mode else ""
+    snap_before = {} if git_mode else _fs_snapshot()
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     stdout_fd, stdout_path = tempfile.mkstemp(dir=str(DATA_DIR), prefix="agent_", suffix=".log")
@@ -1410,12 +1438,20 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
 
     elapsed = time.time() - t0
     
-    status_after = _git_status()
     files_changed = []
-    before_lines = set(status_before.splitlines())
-    after_lines = set(status_after.splitlines())
-    for line in (after_lines - before_lines):
-        files_changed.append(line)
+    if git_mode:
+        status_after = _git_status()
+        before_lines = set(status_before.splitlines())
+        after_lines = set(status_after.splitlines())
+        for line in (after_lines - before_lines):
+            files_changed.append(line)
+    else:
+        snap_after = _fs_snapshot()
+        for rel, sig in snap_after.items():
+            if snap_before.get(rel) != sig:
+                files_changed.append(f" A {rel}")
+        for rel in set(snap_before) - set(snap_after):
+            files_changed.append(f" D {rel}")
 
     cost_usd = 0.0
     cost_unknown = False
@@ -1477,6 +1513,19 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         status = "TIMEOUT — process group killed"
     elif exit_code != 0:
         status = f"FAILED (exit {exit_code})"
+    elif verify_status == "FAIL":
+        # Exit 0 but the independent check we ran said otherwise — do not let
+        # a green exit code mask a failed verify.
+        status = "COMPLETED — ⚠️ VERIFY FAILED"
+    elif len(files_changed) == 0 and verify_status == "SKIPPED":
+        # Silent-success hole: unlike the worker path (where the router itself
+        # writes the model's ===FILE=== blocks to disk), the agent path relies
+        # on the CLI's own tool-calls to change files and only diffs git after.
+        # A clean exit with zero filesystem changes and no independent verify
+        # therefore proves nothing — the CLI may have printed a plan or a
+        # fabricated success (e.g. an invented commit hash) without writing.
+        # Surface it as UNVERIFIED instead of a trustworthy COMPLETED.
+        status = "COMPLETED — ⚠️ 0 files changed, UNVERIFIED (runner self-report not trusted; pass --verify to confirm)"
     else:
         status = "COMPLETED"
     lines = [

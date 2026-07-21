@@ -33,6 +33,19 @@ def create_fake_bin(bin_dir, name, script_content):
     return path
 
 
+def _git_init_ignoring_router_data(repo):
+    # A committed .gitignore keeps the router's own scratch (data/ log, sessions,
+    # budgets, cache, audit — all under the isolated tmp paths) out of the
+    # git-status diff, so files_changed reflects only what the runner wrote.
+    import subprocess
+    subprocess.run(["git", "init"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("data/\nsessions/\nbudgets.json\ncache.db\naudit.log\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+
 def test_agent_codewhale_happy_path(isolated_paths, tmp_path, monkeypatch):
     create_fake_bin(isolated_paths, "codewhale", """#!/usr/bin/env python3
 import sys
@@ -124,6 +137,54 @@ open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
     assert "COMPLETED" in out
     argv = json.loads(argv_log.read_text())
     assert "--dangerously-skip-permissions" in argv
+
+
+def test_agent_exit0_but_zero_files_is_unverified(isolated_paths, tmp_path):
+    # The 2026-07-21 failure: agy exited 0 and printed a rosy report (even a
+    # fabricated commit hash) but wrote nothing to disk. The agent path only
+    # diffs git after the run, so a clean exit with 0 files changed and no
+    # --verify must NOT be reported as a trustworthy COMPLETED.
+    create_fake_bin(isolated_paths, "agy", """#!/usr/bin/env python3
+print("Done. Created the file and committed as 5bcd074. No git command failed.")
+""")
+    _git_init_ignoring_router_data(tmp_path)
+    out = d.agent_delegate("write hello.txt", runner="agy", workdir=tmp_path)
+    assert "UNVERIFIED" in out
+    assert "0 files changed" in out
+    # honest audit: zero files recorded despite the runner's self-report
+    rec = json.loads(d.AUDIT.read_text().strip().splitlines()[0])
+    assert rec["files_changed_count"] == 0
+
+
+def test_agent_exit0_with_real_write_is_clean_completed(isolated_paths, tmp_path):
+    # The healthy case must stay clean: a runner that actually writes a file
+    # gets a plain COMPLETED with no UNVERIFIED warning.
+    create_fake_bin(isolated_paths, "agy", """#!/usr/bin/env python3
+open("hello.txt", "w").write("HELLO")
+print("wrote hello.txt")
+""")
+    _git_init_ignoring_router_data(tmp_path)
+    out = d.agent_delegate("write hello.txt", runner="agy", workdir=tmp_path)
+    assert "UNVERIFIED" not in out
+    assert "files changed : 1 files" in out
+
+
+def test_agent_detects_writes_in_non_git_workdir(isolated_paths, tmp_path):
+    # The actual 2026-07-21 root cause: in a NON-git workdir the router's
+    # git-status-based diff sees nothing, so a runner that really wrote a file
+    # was reported as "0 files changed" — the false "agy hallucinated" signal.
+    # DATA_DIR (the run log) stays outside the workdir, as in production.
+    create_fake_bin(isolated_paths, "agy", """#!/usr/bin/env python3
+open("hello.txt", "w").write("HELLO_FROM_AGY")
+print("Created hello.txt.")
+""")
+    work = tmp_path / "work"
+    work.mkdir()
+    out = d.agent_delegate("write hello.txt", runner="agy", workdir=work)
+    assert (work / "hello.txt").read_text() == "HELLO_FROM_AGY"
+    assert "files changed : 1 files" in out
+    assert "UNVERIFIED" not in out
+    assert json.loads(d.AUDIT.read_text().strip().splitlines()[0])["files_changed_count"] == 1
 
 
 def test_agent_runner_failure_reported_loudly(isolated_paths, tmp_path):

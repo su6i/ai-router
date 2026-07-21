@@ -7,6 +7,26 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Fixed
+
+- **`agent_delegate` now detects file changes in a non-git workdir.** Change
+  detection ran *only* `git status --porcelain`, so when the workdir was not a
+  git repo the diff was always empty and a runner that genuinely wrote files
+  was reported as `0 files changed`. This is the real cause of the
+  2026-07-21 "agy hallucinated" signal: a live probe confirmed agy (Gemini 3.1
+  Pro) wrote the requested file correctly, but the router — measuring an empty
+  non-git dir with git — reported zero. A filesystem snapshot (size + mtime,
+  `.git` skipped) is now used as a fallback whenever the workdir is not a git
+  work tree; git repos keep using `git status` (so `.gitignore` is respected).
+- **Agent delegation no longer reports a silent success.** `status` was
+  derived purely from the runner's exit code, so a clean exit with no
+  filesystem effect was reported as `COMPLETED`. It is now flagged
+  `COMPLETED — ⚠️ 0 files changed, UNVERIFIED` when the runner changed no
+  files and no `--verify` ran, and `COMPLETED — ⚠️ VERIFY FAILED` when an
+  explicit verify failed — a safety net for the case a runner really did
+  nothing. Regression tests now exercise the real write outcome of a fake
+  runner (git and non-git workdirs), not just its argv.
+
 ### Added
 
 - **Phase 3b: Code-Aware RAG (`r code` / `code_lookup`)** — semantic
