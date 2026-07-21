@@ -39,6 +39,13 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **Phase 3a+: Sessions Retrieval (`r sessions` / `rules_lookup`)** — semantic
+  retrieval over past session context (the `~/.local/share/agent-projects/*/workspace/SESSION.md` files).
+  Files are chunked by markdown headings (e.g., `## YYYY-MM-DD` and subheadings) and stored in the
+  `session_chunks` pgvector collection. Includes an optional `--reindex` flag for incremental indexing.
+  Exposed via the `r sessions` CLI and available to MCP hosts by passing `collection: "sessions"`
+  to the `rules_lookup` tool.
+
 - **Phase 3b: Code-Aware RAG (`r code` / `code_lookup`)** — semantic
   retrieval over code: git-tracked `*.py`/`*.sh` files are chunked at
   function/class/method boundaries with tree-sitter (oversized defs split at

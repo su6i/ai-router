@@ -82,6 +82,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 | **Grafana** | `grafana/grafana` | Dashboards provisioned as code. Two data sources: Prometheus (graphs) + Postgres (detail tables). |
 | **semantic cache / RAG** | pgvector + local embeddings | Pre-router interception (see §6). |
 | **local embedder** | `intfloat/multilingual-e5-small` (384-d, ONNX/CPU, offline, free) | Multilingual (fa/en/fr) prompt embeddings for the cache. Chosen for CPU/offline/free; dim 384 is wired into the schema. |
+| **sessions index** | `src/sessions_index.py` | Indexes agent session histories (`workspace/SESSION.md`) by date/heading → `session_chunks` (pgvector HNSW). Exposes `r sessions` and `collection: "sessions"` in the MCP `rules_lookup` tool. |
 | **code index** | `src/code_index.py` (tree-sitter `>=0.25,<0.26` + stdlib `ast`) | Phase 3b: AST function/class chunks of tracked `*.py`/`*.sh` → `code_chunks` (pgvector HNSW) + static call graph `code_edges`. Chunking runs in an isolated child process (native-lib segfault guard, see [CODE-RAG.md](CODE-RAG.md)). Query-only API: `r code` / MCP `code_lookup`; nothing in `delegate.py` imports it. |
 
 **Worker Context Discipline**: To prevent worker/agent models from wasting tokens on large files, a context discipline pack now ships. It includes a strict reading-rules template (`AGENTS-context-discipline.md`) injected as a cache-friendly constant preamble in all prompts, and an auto-generated compact repo map (`src/repo_map.py`) to guide initial symbol discovery.
@@ -169,7 +170,7 @@ because near-identical prompts can need different answers as code changes.
 - **Phase 1 — data plane:** Postgres+pgvector (Docker/Colima) + schema + ingest +
   `amir router cost` (SQL). Everything else depends on this.
 - **Phase 2 — observability:** exporter + Prometheus + Grafana (dashboards-as-code). **(Parked)**
-- **Phase 3a — Retrieval context loading:** local embedder (intfloat/multilingual-e5-small) + pgvector rules index. **(Shipped)**
+- **Phase 3a — Retrieval context loading:** local embedder (intfloat/multilingual-e5-small) + pgvector rules/sessions index. **(Shipped)**
 - **Phase 3b — Code retrieval:** AST-chunked code index (`src/code_index.py`, tree-sitter) + static call graph in the same pgvector store; `r code` CLI + `code_lookup` MCP tool. Design/economics: [CODE-RAG.md](CODE-RAG.md). **(Shipped)**
 - **Phase 3c — Semantic response cache:** semantic matching for exact-hash fallback. **(Rejected)**
 

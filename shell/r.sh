@@ -51,6 +51,16 @@ r() {
     return "$?"
   fi
 
+  if [ "$1" = "sessions" ]; then
+    shift
+    if [ "$1" = "--reindex" ]; then
+      _r_heavy src.sessions_index reindex
+    else
+      _r_heavy src.sessions_index search "$@"
+    fi
+    return "$?"
+  fi
+
   if [ "$1" = "code" ]; then
     shift
     if [ "$1" = "--reindex" ]; then

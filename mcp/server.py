@@ -114,6 +114,7 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string"},
                 "k": {"type": "integer", "default": 5},
+                "collection": {"type": "string", "default": "rules", "enum": ["rules", "sessions"]},
             },
             "required": ["query"],
         },
@@ -221,10 +222,16 @@ def handle_rules_lookup(args: dict) -> dict:
     k = args.get("k", 5)
     if not isinstance(k, int) or isinstance(k, bool) or not (0 < k <= 20):
         raise ValueError("'k' must be an integer in (0, 20]")
+    collection = args.get("collection", "rules")
+    if collection not in ("rules", "sessions"):
+        raise ValueError("'collection' must be 'rules' or 'sessions'")
 
     # src/ is already on sys.path (top of this file) — importing as
     # "rules_index" keeps delegate a single module identity in this process.
-    import rules_index as ri
+    if collection == "sessions":
+        import sessions_index as index_mod
+    else:
+        import rules_index as index_mod
 
     class Args:
         pass
@@ -234,7 +241,7 @@ def handle_rules_lookup(args: dict) -> dict:
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        ri.cmd_search(a)
+        index_mod.cmd_search(a)
     return _text_result(out.getvalue())
 
 

@@ -72,6 +72,21 @@ r rules --reindex
 The output is hard-capped at ~8000 characters to protect context limits.
 If the index was built on a different commit than the current one, `r rules` will print a single warning line before the results.
 
+### Sessions retrieval: r sessions
+
+`ai-router` provides semantic retrieval over past session context (the `~/.local/share/agent-projects/*/workspace/SESSION.md` files) exactly like it does for rules.
+It chunks by headings (like `## YYYY-MM-DD`) and stores them in the `session_chunks` pgvector collection.
+
+```bash
+# Query the sessions index (returns top 5 chunks by default)
+r sessions "codewhale token accounting"
+
+# Re-index all sessions
+r sessions --reindex
+```
+
+This is exposed to MCP hosts via the `rules_lookup` tool by passing `collection: "sessions"`.
+
 ### Code retrieval: r code
 
 Phase 3b indexes **code** the way `r rules` indexes text: git-tracked
