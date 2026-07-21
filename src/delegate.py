@@ -1564,6 +1564,119 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     return "\n".join(lines[:25])
 
 
+
+def send_note(to_project: str, message: str, priority: str = "normal", subject: str = "") -> str:
+    """Send a note to another project's inbox."""
+    if priority not in ("low", "normal", "high"):
+        priority = "normal"
+    
+    if ".." in to_project or "/" in to_project or "\\" in to_project:
+        raise ValueError(f"invalid project name: {to_project}")
+        
+    target_root = (AGENT_PROJECTS / to_project).resolve()
+    
+    if not target_root.is_relative_to(AGENT_PROJECTS) or target_root == AGENT_PROJECTS:
+        raise ValueError(f"invalid project path: {to_project}")
+        
+    if not target_root.exists() or not target_root.is_dir():
+        raise ValueError(f"unknown project: {to_project}")
+        
+    inbox_dir = target_root / "workspace" / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    
+    from_project, _ = project_info()
+    
+    now = dt.datetime.now().astimezone()
+    slug = "".join(c if c.isalnum() else "-" for c in (subject or "note")).strip("-")[:20] or "note"
+    filename = f"NOTE-{now.strftime('%Y-%m-%d-%H%M%S')}-{from_project}-{slug}.md"
+    file_path = inbox_dir / filename
+    
+    redacted_message = _redact(message)
+    
+    content_note = f"""---
+from: {from_project}
+to: {to_project}
+created: {now.isoformat(timespec='seconds')}
+priority: {priority}
+read: false"""
+    if subject:
+        content_note += f"\nsubject: {subject}"
+    content_note += f"""
+---
+
+{redacted_message}
+"""
+    
+    file_path.write_text(content_note)
+    
+    AUDIT.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "ts": now.isoformat(timespec="seconds"),
+        "mode": "note",
+        "action": "send",
+        "from": from_project,
+        "to": to_project,
+        "priority": priority,
+        "bytes": len(redacted_message.encode("utf-8"))
+    }
+    with AUDIT.open("a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+        
+    return f"note sent to {to_project} inbox ({file_path.name})"
+
+
+def list_notes(project: str, unread_only: bool = True, peek: bool = False):
+    """List notes for a project, optionally marking them as read."""
+    if ".." in project or "/" in project or "\\" in project:
+        raise ValueError(f"invalid project name: {project}")
+    target_root = (AGENT_PROJECTS / project).resolve()
+    
+    if not target_root.is_relative_to(AGENT_PROJECTS) or target_root == AGENT_PROJECTS:
+        raise ValueError(f"invalid project path: {project}")
+        
+    inbox_dir = target_root / "workspace" / "inbox"
+    if not inbox_dir.exists():
+        return []
+        
+    notes = []
+    for f in inbox_dir.glob("NOTE-*.md"):
+        content_text = f.read_text()
+        if content_text.startswith("---\n"):
+            header_end = content_text.find("\n---\n", 4)
+            if header_end != -1:
+                header = content_text[4:header_end]
+                meta = {}
+                for line in header.split("\n"):
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip()
+                if unread_only and meta.get("read") == "true":
+                    continue
+                notes.append((f, meta, content_text[header_end+5:]))
+                
+    notes.sort(key=lambda x: x[1].get("created", ""), reverse=True)
+    
+    if not peek and notes:
+        now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        for f, meta, _ in notes:
+            old_content = f.read_text()
+            new_content = old_content.replace("\nread: false", "\nread: true", 1)
+            f.write_text(new_content)
+            
+            AUDIT.parent.mkdir(parents=True, exist_ok=True)
+            rec = {
+                "ts": now,
+                "mode": "note",
+                "action": "read",
+                "from": meta.get("from", "unknown"),
+                "to": project,
+            }
+            with AUDIT.open("a") as fh:
+                fh.write(json.dumps(rec) + "\n")
+                
+    return notes
+
+
 def cmd_channels(enable_channel=None, disable_channel=None):
     import shutil
     channels_json = DATA_DIR / "channels.json"
@@ -1666,6 +1779,11 @@ def main():
                     help="worker mode: shell command run after writing (never guessed)")
     ap.add_argument("--retries", type=int, default=1,
                     help="worker mode: verify-failure retries (default 1, max 2)")
+    ap.add_argument("--note", help="send a note to the specified project inbox")
+    ap.add_argument("--inbox", action="store_true", help="list unread notes in the current project inbox")
+    ap.add_argument("--peek", action="store_true", help="peek at the inbox (show count/subjects, don't mark read)")
+    ap.add_argument("--subject", default="", help="subject for the note")
+    ap.add_argument("--priority", default="normal", help="priority for the note (low|normal|high)")
     ap.add_argument("--agent", action="store_true", help="agent mode: use agy or codewhale exec for multi-step exploration")
     ap.add_argument("--runner", default="agy", help="agent mode runner: agy (default) or codewhale")
     ap.add_argument("--timeout", type=int, default=600, help="agent mode: timeout in seconds (default 600, max 1800)")
@@ -1699,6 +1817,38 @@ def main():
 
     if a.channels or a.enable or a.disable:
         cmd_channels(enable_channel=a.enable, disable_channel=a.disable)
+        return
+
+    if a.inbox:
+        try:
+            curr_proj, _ = project_info()
+            notes = list_notes(curr_proj, unread_only=True, peek=a.peek)
+            if a.peek:
+                if notes:
+                    print(f"📬 {len(notes)} unread notes from manager")
+                    for _, meta, _ in notes:
+                        if meta.get("subject"):
+                            print(f"  - {meta['subject']}")
+                # If peek and 0 notes, print nothing as specified
+            else:
+                if not notes:
+                    print("inbox is empty.")
+                for i, (f, meta, body) in enumerate(notes, 1):
+                    subj = f" - {meta.get('subject')}" if meta.get("subject") else ""
+                    print(f"[{i}/{len(notes)}] note from {meta.get('from', 'unknown')} ({meta.get('created', '')}){subj}")
+                    print(body.strip())
+                    print("-" * 40)
+        except Exception as e:
+            sys.exit(f"❌ {e}")
+        return
+
+    if a.note:
+        if not a.prompt:
+            sys.exit("❌ need -p PROMPT or message string for the note body")
+        try:
+            print(send_note(a.note, a.prompt, priority=a.priority, subject=a.subject))
+        except Exception as e:
+            sys.exit(f"❌ {e}")
         return
 
     load_env()

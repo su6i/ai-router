@@ -79,6 +79,29 @@ r() {
     return "$?"
   fi
 
+
+  if [ "$1" = "note" ]; then
+    shift
+    local to_proj="$1"
+    shift
+    if [ "$#" -eq 0 ]; then
+      echo 'usage: r note <project> <message...>' >&2
+      return 2
+    fi
+    "$py" "$repo/src/delegate.py" --note "$to_proj" -p "$*"
+    return "$?"
+  fi
+
+  if [ "$1" = "inbox" ]; then
+    shift
+    if [ "$1" = "--peek" ]; then
+      "$py" "$repo/src/delegate.py" --inbox --peek
+    else
+      "$py" "$repo/src/delegate.py" --inbox "$@"
+    fi
+    return "$?"
+  fi
+
   if [ "$1" = "agent" ]; then
     shift
     if [ "$#" -eq 0 ]; then

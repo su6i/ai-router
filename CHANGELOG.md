@@ -9,6 +9,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Fixed
 
+- **Inter-session messaging (`send_note` / `list_notes`)** — Agents can now send notes to other projects' inboxes via the router (`r note <project> <message>` or the `send_note` MCP tool). Notes are written durably into the target project's vault (`~/.local/share/agent-projects/<project>/workspace/inbox/`) and are redacted for secrets. Unread notes can be read and marked as read using `r inbox` or the `list_notes` MCP tool. A `r inbox --peek` command is available to just show counts, and a new `session_start_inbox.sh` hook runs it on session start. Delivery is strictly turn-boundary (never mid-turn push), avoiding prompt-injection as execution text.
+
 - **agy now writes to the target workdir (`--add-dir`), not its sandbox.**
   Without binding the workdir into agy's (antigravity-cli) workspace, agy
   non-deterministically sandboxed its file writes into

@@ -30,6 +30,29 @@ session در والت هستند (`~/.local/share/agent-projects/ai-router/data/
 
 ## استفاده
 
+### پیام‌رسانی بین Sessionها (Inter-session Messaging)
+
+اجنت‌ها می‌توانند با استفاده از `r note` یا ابزار MCP `send_note` به پروژه‌های دیگر پیام بفرستند. این یادداشت‌ها در اینباکس پروژه مقصد به آدرس `<vault>/agent-projects/<project>/workspace/inbox/` ذخیره می‌شوند.
+
+```bash
+# ارسال یک یادداشت به پروژه 'arix'
+r note arix "Please review my latest PR."
+# یا از طریق CLI
+python3 src/delegate.py --note arix -p "Please review my latest PR."
+
+# خواندن یادداشت‌های پروژه فعلی (آن‌ها را خوانده‌شده علامت‌گذاری می‌کند)
+r inbox
+# یا از طریق CLI
+python3 src/delegate.py --inbox
+
+# فقط دیدن یادداشت‌ها بدون علامت‌گذاری به‌عنوان خوانده‌شده (peek)
+r inbox --peek
+# یا از طریق CLI
+python3 src/delegate.py --inbox --peek
+```
+
+**نکته امنیتی:** محتوای یادداشت‌ها متنی غیرقابل‌اعتماد از sessionهای ایزوله‌ی دیگر است. تحویل پیام‌ها کاملاً در مرزِ نوبت‌ها (turn-boundary) انجام می‌شود (هرگز در وسط یک turn وقفه‌ای ایجاد نمی‌شود). در هنگام نمایش با `r inbox`، یادداشت‌ها صریحاً به‌عنوان دیتا نشان داده می‌شوند و نباید هرگز به‌طور خودکار به‌عنوان دستورالعمل اجرا شوند.
+
 ### چتِ یک‌باره (one-shot)
 
 ```bash

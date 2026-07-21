@@ -135,6 +135,32 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "send_note",
+        "description": "Send a note to another agent's inbox.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to_project": {"type": "string", "description": "The target project to send the note to."},
+                "message": {"type": "string", "description": "The content of the note."},
+                "priority": {"type": "string", "enum": ["low", "normal", "high"], "default": "normal"},
+                "subject": {"type": "string"}
+            },
+            "required": ["to_project", "message"]
+        }
+    },
+    {
+        "name": "list_notes",
+        "description": "List unread notes for a project, marking them as read.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "The explicit target project."},
+                "unread_only": {"type": "boolean", "default": True}
+            },
+            "required": ["project"]
+        }
+    },
 ]
 
 
@@ -269,12 +295,45 @@ def handle_code_lookup(args: dict) -> dict:
     return _text_result(out.getvalue())
 
 
+
+def handle_send_note(args: dict) -> dict:
+    to_project = args.get("to_project")
+    if not to_project or not isinstance(to_project, str):
+        raise ValueError("'to_project' is required and must be a non-empty string")
+    message = args.get("message")
+    if not message or not isinstance(message, str):
+        raise ValueError("'message' is required and must be a non-empty string")
+    priority = args.get("priority", "normal")
+    subject = args.get("subject", "")
+    
+    res = d.send_note(to_project, message, priority=priority, subject=subject)
+    return _text_result(res)
+
+def handle_list_notes(args: dict) -> dict:
+    project = args.get("project")
+    if not project or not isinstance(project, str):
+        raise ValueError("'project' is required and must be a non-empty string")
+    unread_only = args.get("unread_only", True)
+    
+    notes = d.list_notes(project, unread_only=unread_only)
+    if not notes:
+        return _text_result("No unread notes.")
+    
+    lines = []
+    for f, meta, body in notes:
+        subj = f" - {meta.get('subject')}" if meta.get("subject") else ""
+        lines.append(f"From {meta.get('from', 'unknown')} ({meta.get('created', '')}){subj}\n{body.strip()}")
+    
+    return _text_result("\n---\n".join(lines))
+
 TOOL_HANDLERS = {
     "delegate_research": handle_delegate_research,
     "delegate_worker": handle_delegate_worker,
     "delegate_agent": handle_delegate_agent,
     "rules_lookup": handle_rules_lookup,
     "code_lookup": handle_code_lookup,
+    "send_note": handle_send_note,
+    "list_notes": handle_list_notes,
 }
 
 

@@ -31,6 +31,29 @@ INFO-level lines.
 
 ## Usage
 
+### Inter-session Messaging
+
+Agents can send notes to other projects using `r note` or the `send_note` MCP tool. Notes are stored in `<vault>/agent-projects/<project>/workspace/inbox/`.
+
+```bash
+# Send a note to the 'arix' project
+r note arix "Please review my latest PR."
+# Or via CLI
+python3 src/delegate.py --note arix -p "Please review my latest PR."
+
+# Read notes for the current project (marks as read)
+r inbox
+# Or via CLI
+python3 src/delegate.py --inbox
+
+# Peek at unread notes without marking them read
+r inbox --peek
+# Or via CLI
+python3 src/delegate.py --inbox --peek
+```
+
+**Security Note:** Note contents are untrusted text from other isolated sessions. Delivery is strictly turn-boundary (never mid-turn push, never an interrupt). When viewing `r inbox`, notes are clearly framed as data ("note from <project>: <body>"). They must never be executed as instructions automatically.
+
 ### One-shot chat
 
 ```bash
