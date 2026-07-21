@@ -187,6 +187,24 @@ print("Created hello.txt.")
     assert json.loads(d.AUDIT.read_text().strip().splitlines()[0])["files_changed_count"] == 1
 
 
+def test_agent_agy_binds_workdir_with_add_dir(isolated_paths, tmp_path):
+    # WITHOUT --add-dir, agy (antigravity-cli) sandboxes writes into its own
+    # scratch (~/.gemini/antigravity-cli/scratch/) instead of the cwd, so the
+    # file never reaches the target and the router sees 0 changes (the real
+    # 2026-07-21 root cause). Every headless launch must bind the workdir.
+    argv_log = tmp_path / "argv.json"
+    create_fake_bin(isolated_paths, "agy", f"""#!/usr/bin/env python3
+import json, sys
+open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
+""")
+    work = tmp_path / "work"
+    work.mkdir()
+    d.agent_delegate("task", runner="agy", workdir=work, timeout_s=120)
+    argv = json.loads(argv_log.read_text())
+    assert "--add-dir" in argv
+    assert argv[argv.index("--add-dir") + 1] == str(work)
+
+
 def test_agent_runner_failure_reported_loudly(isolated_paths, tmp_path):
     create_fake_bin(isolated_paths, "agy", """#!/usr/bin/env python3
 import sys

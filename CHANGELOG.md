@@ -9,6 +9,16 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Fixed
 
+- **agy now writes to the target workdir (`--add-dir`), not its sandbox.**
+  Without binding the workdir into agy's (antigravity-cli) workspace, agy
+  non-deterministically sandboxed its file writes into
+  `~/.gemini/antigravity-cli/scratch/` and reported success, so nothing
+  reached the target directory and the router saw `0 files changed`. This is
+  the actual cause of the 2026-07-21 "agy did the work but 0 files changed /
+  fabricated hash" signal (a live probe found the file in agy's scratch, not
+  the cwd). `agent_delegate` now passes `--add-dir <workdir>`; probed on git
+  and non-git workdirs, 3/3 runs landed the file in the target. The
+  non-git-detection and UNVERIFIED changes below remain as the safety net.
 - **`agent_delegate` now detects file changes in a non-git workdir.** Change
   detection ran *only* `git status --porcelain`, so when the workdir was not a
   git repo the diff was always empty and a runner that genuinely wrote files

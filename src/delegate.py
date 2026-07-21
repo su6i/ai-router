@@ -1396,8 +1396,16 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         # allow-rules (verified: no ~/.agy or ~/.config/agy), so the
         # documented skip flag is the only headless path; router-managed
         # launches only, never interactive sessions.
+        # --add-dir <project_root>: WITHOUT it, agy (antigravity-cli) does not
+        # reliably write to the cwd we hand it — it non-deterministically
+        # sandboxes writes into ~/.gemini/antigravity-cli/scratch/ and then
+        # reports success, so the file never reaches the target and the router
+        # sees 0 changes. This was the real "agy did the work but 0 files
+        # changed / fabricated hash" signal (verified 2026-07-21: file landed
+        # in scratch, not cwd). Binding the workdir into agy's workspace makes
+        # it write there; probed git + non-git workdirs, 3/3 landed in cwd.
         cmd = ["agy", "-p", task, "--model", model_name, "--mode", "accept-edits",
-               "--dangerously-skip-permissions",
+               "--dangerously-skip-permissions", "--add-dir", str(project_root),
                "--print-timeout", f"{timeout_s}s"]
     elif runner == "codewhale":
         # Flags verified against `codewhale exec --auto --help` (2026-07-14):

@@ -291,7 +291,15 @@ Three tools only, all capped — no uncapped chat tool, ever:
   `write_file`/`command` in print mode, so every headless run died with
   "permission check failed … auto-denied". The flag applies only to these
   managed launches (workdir-confined task, output to a log), never to
-  interactive sessions.
+  interactive sessions. They also pass `--add-dir <workdir>`: without it agy
+  non-deterministically writes into its own sandbox
+  (`~/.gemini/antigravity-cli/scratch/`) instead of the target dir, so the
+  file never lands and the router reports `0 files changed` (the false "agy
+  did nothing" signal). Change detection uses `git status` in a git workdir
+  and a filesystem snapshot otherwise; a run that exits 0 but changes 0 files
+  with no `--verify` is reported as `COMPLETED — ⚠️ UNVERIFIED` (and
+  `⚠️ VERIFY FAILED` when an explicit verify fails) rather than a trustworthy
+  success — always pass `verify` on change-work.
 
 Claude models stay banned inside delegate (unchanged). Audit rows from MCP
 calls get `via: "mcp"` (an extra field alongside the existing columns) so
