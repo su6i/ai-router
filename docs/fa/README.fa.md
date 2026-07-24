@@ -61,6 +61,18 @@ python3 src/delegate.py --inbox --peek
 python3 src/delegate.py --route-task <path-to-note-file> --verify "uv run pytest -q"
 ```
 
+### ارسال فایل به تلگرام مالک (Telegram File Delivery)
+
+شما می‌توانید فایل‌ها را مستقیماً به عنوان سند (ضمیمه) به تلگرام مالک ارسال کنید. این قابلیت برای تحویل فایل‌های بزرگ بدون گم شدن در چت بسیار مفید است.
+
+```bash
+python3 src/delegate.py --send-to-owner --file /absolute/path/to/file.md --title "عنوان کوتاه"
+```
+
+این قابلیت از طریق ابزار MCP با نام `send_to_owner` نیز در دسترس است.
+
+نیازمند `AI_ROUTER_BOT_TOKEN` (بات اختصاصی خودِ پروژه، `@su6i_ai_router_bot`) و `TELEGRAM_OWNER_CHAT_ID` در vault ِ rule-035 است (`ai-router/secrets/.env`) — باتی جدا از بات تلگرام هر پروژه‌ی دیگر.
+
 ### چتِ یک‌باره (one-shot)
 
 ```bash
@@ -302,6 +314,7 @@ r audit                                               # print the ledger
 | **`delegate_research`** | جست‌وجوی واقعیت، چکِ داده‌ی زنده، راستی‌آزمایی سند | `grok` (جست‌وجوی وب) | پاسخ با `max_output_tokens` سقف می‌خورد. |
 | **`delegate_worker`** | فایل‌های مشخص: تغییرات مکانیکی، تست‌ها، boilerplate | `gemini` (رایگان) | مسیر فایل‌ها را بدهید. کدِ تولیدی هرگز از سیم رد نمی‌شود. |
 | **`delegate_agent`** | فایل‌های نامشخص: پیدا کردن و رفع چندمرحله‌ای، کاوش | `agy` (Gemini Pro) | فراخوانی `agy` یا `codewhale exec`. فقط یک خلاصه‌ی کوتاه برمی‌گرداند. |
+| **`send_to_owner`** | ارسال مستقیم فایل‌ها به تلگرام مالک | ندارد | برای تحویل نهایی خروجی‌ها بدون اشغال کردن توکن‌ها. |
 
 یک‌بار با scope کاربر ثبت کن تا در همه‌ی پروژه‌ها در دسترس باشد:
 

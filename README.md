@@ -62,6 +62,16 @@ Execute a task-note from another agent with strict push/merge refusal and a $0-f
 python3 src/delegate.py --route-task <path-to-note-file> --verify "uv run pytest -q"
 ```
 
+### Telegram File Delivery
+
+You can send files directly to the owner's Telegram as documents (attachments) using the `--send-to-owner` CLI flag or MCP tool. This is useful for delivering WO/note files without losing them in chat.
+
+```bash
+python3 src/delegate.py --send-to-owner --file /absolute/path/to/file.md --title "Short title"
+```
+
+Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_router_bot`) and `TELEGRAM_OWNER_CHAT_ID` in the rule-035 vault (`ai-router/secrets/.env`). This is a distinct bot from any other project's Telegram bot.
+
 ### One-shot chat
 
 ```bash
@@ -309,6 +319,7 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 | **`delegate_research`** | Fact lookup, live-data checks, doc verification | `grok` (web search) | Answer is capped by `max_output_tokens`. |
 | **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `gemini` (free) | Pass known file paths. Generated code never crosses the wire. |
 | **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
+| **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
 
 Register it once, user scope, so it's available in every project:
 

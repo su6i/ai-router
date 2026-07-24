@@ -41,6 +41,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **Telegram file delivery (`send_to_owner`)** — New CLI flag (`--send-to-owner`) and MCP tool to send files directly to the owner's Telegram chat as document attachments. Uses the existing `httpx` dependency and the project's own dedicated bot token (`AI_ROUTER_BOT_TOKEN` + `TELEGRAM_OWNER_CHAT_ID`) from the rule-035 vault (`ai-router/secrets/.env`) — a bot distinct from any other project's. This prevents large deliverables and notes from getting lost in chat.
+
 - **Task-note routing (`route_task`)** — A new routing layer (`route_task` MCP tool and `--route-task` CLI flag) that sits in front of `agent_delegate` and `send_note`. It executes a task-note with strict push/merge refusal and a $0-first executor ladder (defaults to `agy`, falls back to paid `codewhale` with `flash` on verification failure or crash). It optionally reports back the result via `send_note` to the calling project's inbox.
 
 - **Phase 3a+: Sessions Retrieval (`r sessions` / `rules_lookup`)** — semantic

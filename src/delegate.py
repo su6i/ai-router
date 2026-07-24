@@ -31,21 +31,22 @@ Keys come from the vault .env (_shared, then this project's own override — rul
 layered secrets). No key is printed in full.
 Claude is intentionally NOT reachable here — grunt work never falls back to the
 subscription. See STRATEGY.md (source of truth) for the routing policy.
-"""
+"""  # noqa: EXE001
 import argparse
+import datetime as dt
 import fnmatch
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
 import subprocess
 import sys
-import logging
 import time
 import unicodedata
-import datetime as dt
 from pathlib import Path
+
 import httpx
 
 HTTP_TIMEOUT = 180
@@ -119,7 +120,7 @@ def _post_with_retry(model, *args, **kwargs):
             reason = "timeout"
         except httpx.RequestError as e:
             status = "NETWORK_ERROR"
-            reason = f"{type(e).__name__}: {str(e)}"
+            reason = f"{type(e).__name__}: {e!s}"
 
         if attempt < max_attempts - 1:
             time.sleep(sleeps[attempt])
@@ -161,23 +162,23 @@ CACHE = DATA_DIR / "cache.db"
 # deepseek 0.014/0.0435 = assumed 10x cache-hit discount (research 2026-07-11,
 # official page lists no v4 models) — verify against real DeepSeek billing.
 MODELS = {
-    "minimax": dict(api="MiniMax-M3",        provider="openai", url="https://api.minimax.io/v1",
-                    cin=0.30, cin_cached=0.06, cout=1.20, key="MINIMAX_API_KEY", quota_channel="minimax-api"),
-    "flash":   dict(api="deepseek-v4-flash", provider="openai", url="https://api.deepseek.com/v1",
-                    cin=0.14, cin_cached=0.014, cout=0.28, key="DEEPSEEK_API_KEY", quota_channel="deepseek-api"),
-    "pro":     dict(api="deepseek-v4-pro",   provider="openai", url="https://api.deepseek.com/v1",
-                    cin=0.435, cin_cached=0.0435, cout=0.87, key="DEEPSEEK_API_KEY", quota_channel="deepseek-api"),
-    "grok":    dict(api="grok-4.3",          provider="openai", url="https://api.x.ai/v1",
-                    cin=1.25, cout=2.50, key="GROK_API_KEY", quota_channel="grok-api"),
-    "gemini":  dict(api="gemini-2.5-flash",  provider="gemini",
-                    url="https://generativelanguage.googleapis.com/v1beta",
-                    cin=0.0, cout=0.0, key="GEMINI_API_KEY", quota_channel="gemini-free"),
-    "gemini-lite": dict(api="gemini-2.5-flash-lite", provider="gemini",
-                    url="https://generativelanguage.googleapis.com/v1beta",
-                    cin=0.0, cout=0.0, key="GEMINI_API_KEY", quota_channel="gemini-free"),
-    "gemma":   dict(api="gemma-4-31b-it", provider="gemini",
-                    url="https://generativelanguage.googleapis.com/v1beta",
-                    cin=0.0, cout=0.0, key="GEMINI_API_KEY", quota_channel="gemini-free"),
+    "minimax": {"api": "MiniMax-M3",        "provider": "openai", "url": "https://api.minimax.io/v1",
+                    "cin": 0.30, "cin_cached": 0.06, "cout": 1.20, "key": "MINIMAX_API_KEY", "quota_channel": "minimax-api"},
+    "flash":   {"api": "deepseek-v4-flash", "provider": "openai", "url": "https://api.deepseek.com/v1",
+                    "cin": 0.14, "cin_cached": 0.014, "cout": 0.28, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
+    "pro":     {"api": "deepseek-v4-pro",   "provider": "openai", "url": "https://api.deepseek.com/v1",
+                    "cin": 0.435, "cin_cached": 0.0435, "cout": 0.87, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
+    "grok":    {"api": "grok-4.3",          "provider": "openai", "url": "https://api.x.ai/v1",
+                    "cin": 1.25, "cout": 2.50, "key": "GROK_API_KEY", "quota_channel": "grok-api"},
+    "gemini":  {"api": "gemini-2.5-flash",  "provider": "gemini",
+                    "url": "https://generativelanguage.googleapis.com/v1beta",
+                    "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY", "quota_channel": "gemini-free"},
+    "gemini-lite": {"api": "gemini-2.5-flash-lite", "provider": "gemini",
+                    "url": "https://generativelanguage.googleapis.com/v1beta",
+                    "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY", "quota_channel": "gemini-free"},
+    "gemma":   {"api": "gemma-4-31b-it", "provider": "gemini",
+                    "url": "https://generativelanguage.googleapis.com/v1beta",
+                    "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY", "quota_channel": "gemini-free"},
 }
 
 # Friendly aliases -> canonical key.
@@ -223,7 +224,7 @@ def copilot_premium_multiplier(model_name: str) -> float:
         default = float(data.get("default", 1))
         logger.warning(f"⚠️  copilot model '{model_name}' not in {path.name} — billing {default:g}x premium")
         return default
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(f"⚠️  could not read {path} — billing 1x premium")
         return 1.0
 
@@ -241,7 +242,7 @@ def is_channel_enabled(channel: str) -> bool:
         data = json.loads(channels_json.read_text())
         if channel in data:
             return bool(data[channel].get("enabled", True))
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     return True
 
@@ -279,10 +280,10 @@ def project_info():
     cwd = os.getcwd()
     def git(*a):
         try:
-            r = subprocess.run(["git", *a], cwd=cwd, capture_output=True,
+            r = subprocess.run(["git", *a], cwd=cwd, capture_output=True,  # noqa: PLW1510
                                text=True, timeout=GIT_TIMEOUT)
             return r.stdout.strip() if r.returncode == 0 else ""
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ""
     remote = git("config", "--get", "remote.origin.url")
     project = remote.rstrip("/").split("/")[-1].removesuffix(".git") if remote else ""
@@ -296,7 +297,7 @@ def show_audit():
     print(AUDIT.read_text().rstrip() if AUDIT.exists() else "(no audit.log yet)")
 
 
-def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_estimate: bool = False, model_spec: dict = None):
+def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_estimate: bool = False, model_spec: dict | None = None):
     has_budgets = BUDGETS.exists()
     if not has_budgets:
         if not print_estimate:
@@ -307,7 +308,7 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
             budgets = json.loads(BUDGETS.read_text())
             if not budgets and not print_estimate:
                 logger.info("⚠️  no budgets.json — spend uncapped")
-        except Exception:
+        except Exception:  # noqa: BLE001
             if not print_estimate:
                 logger.info("⚠️  budgets.json is invalid JSON — spend uncapped")
             budgets = {}
@@ -339,7 +340,7 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                     continue
                 try:
                     rec = json.loads(line)
-                except Exception:
+                except Exception:  # noqa: BLE001, S112
                     continue
                 
                 ts = rec.get("ts", "")
@@ -442,7 +443,7 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
             logger.warning(f"⚠️  BUDGET WARNING: copilot premium requests at {spent_premium} (cap: {copilot_monthly})")
 
 
-def show_cost(since: str = None, by: str = "model"):
+def show_cost(since: str | None = None, by: str = "model"):
     if not AUDIT.exists():
         print("(no audit.log yet)")
         return
@@ -465,7 +466,7 @@ def show_cost(since: str = None, by: str = "model"):
                 continue
             try:
                 rec = json.loads(line)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 malformed += 1
                 continue
 
@@ -570,7 +571,7 @@ def show_cost(since: str = None, by: str = "model"):
         if BUDGETS.exists():
             try:
                 caps = json.loads(BUDGETS.read_text()).get("daily_calls", {})
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         print(f"\ntoday's calls per quota channel ({today_str}):")
         for ch in sorted(today_channel_calls):
@@ -604,12 +605,12 @@ def _github_copilot_billed_this_month():
     scope; returns None (never raises) when unavailable.
     """
     try:
-        login = subprocess.run(["gh", "api", "user", "--jq", ".login"],
+        login = subprocess.run(["gh", "api", "user", "--jq", ".login"],  # noqa: PLW1510
                                capture_output=True, text=True, timeout=10)
         if login.returncode != 0 or not login.stdout.strip():
             return None
-        now = dt.datetime.now()
-        r = subprocess.run(
+        now = dt.datetime.now()  # noqa: DTZ005
+        r = subprocess.run(  # noqa: PLW1510
             ["gh", "api", f"users/{login.stdout.strip()}/settings/billing/usage?year={now.year}&month={now.month}"],
             capture_output=True, text=True, timeout=15)
         if r.returncode != 0:
@@ -619,7 +620,7 @@ def _github_copilot_billed_this_month():
             if "copilot" in str(item.get("product", "")).lower():
                 net += float(item.get("netAmount", 0) or 0)
         return net
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -664,7 +665,7 @@ def cache_get(key):
             con.commit()
         con.close()
         return row[0] if row else None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None      # fail-open: cache never breaks a call
 
 
@@ -677,7 +678,7 @@ def cache_put(key, model, prompt, response):
         con.commit()
         con.close()
         cache_prune()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
 
@@ -698,7 +699,7 @@ def cache_prune():
         rows_after = con.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
         con.close()
         return rows_before, rows_after
-    except Exception:
+    except Exception:  # noqa: BLE001
         return -1, -1
 
 
@@ -903,7 +904,7 @@ def run_verify(cmd: str, cwd: Path):
     try:
         # shell=True is deliberate and required to support shell pipelines (e.g., cmd1 | cmd2)
         # in verify commands. The caller is trusted by design, so shlex/shell=False is rejected.
-        r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
+        r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,  # noqa: PLW1510
                            text=True, timeout=VERIFY_TIMEOUT)
         ok = r.returncode == 0
         output = (r.stdout or "") + (r.stderr or "")
@@ -926,7 +927,7 @@ def _get_channel_system_prompt(model: str) -> str:
         p = Path(__file__).parent.parent / "templates" / "system-prompts" / f"{channel}.md"
         if p.exists():
             return p.read_text().strip() + "\n\n"
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     return ""
 
@@ -979,7 +980,7 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
 
 
 def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_arg: str,
-                     verify_cmd: str, retries: int, project_root: Path = None,
+                     verify_cmd: str, retries: int, project_root: Path | None = None,
                      via: str | None = None, estimate: bool = False) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
@@ -1029,7 +1030,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
 
     def call_once():
         nonlocal total_cost, echoed_model
-        answer, echoed, rid, pin, pout, cache, cache_miss = caller(spec, key, history, WORKER_PROTOCOL_SYSTEM)
+        answer, echoed, _rid, pin, pout, cache, _cache_miss = caller(spec, key, history, WORKER_PROTOCOL_SYSTEM)
         
         cached = min(cache, pin)
         cin = spec["cin"]
@@ -1117,7 +1118,7 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
 
 
 def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
-                     verify_cmd: str, retries: int, project_root: Path = None,
+                     verify_cmd: str, retries: int, project_root: Path | None = None,
                      via: str | None = None, estimate: bool = False) -> str:
     ch = get_model_channel(model)
     if not is_channel_enabled(ch):
@@ -1289,6 +1290,7 @@ def _write_agent_audit(model, echoed, project, commit, files_changed_count, veri
 def agent_delegate(task: str, runner: str = "agy", model: str | None = None, workdir: str | Path | None = None, verify_cmd: str = "", via: str | None = None, estimate: bool = False, timeout_s: int = 600) -> str:
     import signal
     import tempfile
+
     import repo_map
     
     project_root = Path(workdir) if workdir else Path.cwd()
@@ -1347,16 +1349,16 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
 
     def _git_status():
         try:
-            return subprocess.run(["git", "-C", str(project_root), "status", "--porcelain"], capture_output=True, text=True, timeout=GIT_TIMEOUT).stdout.strip()
-        except Exception:
+            return subprocess.run(["git", "-C", str(project_root), "status", "--porcelain"], capture_output=True, text=True, timeout=GIT_TIMEOUT).stdout.strip()  # noqa: PLW1510
+        except Exception:  # noqa: BLE001
             return ""
 
     def _is_git_repo():
         try:
-            r = subprocess.run(["git", "-C", str(project_root), "rev-parse", "--is-inside-work-tree"],
+            r = subprocess.run(["git", "-C", str(project_root), "rev-parse", "--is-inside-work-tree"],  # noqa: PLW1510
                                capture_output=True, text=True, timeout=GIT_TIMEOUT)
             return r.returncode == 0 and r.stdout.strip() == "true"
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def _fs_snapshot():
@@ -1435,7 +1437,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
 
     with open(stdout_path, "w") as f:
         try:
-            proc = subprocess.Popen(cmd, cwd=project_root, stdout=f, stderr=subprocess.STDOUT, preexec_fn=os.setsid, env=run_env)
+            proc = subprocess.Popen(cmd, cwd=project_root, stdout=f, stderr=subprocess.STDOUT, preexec_fn=os.setsid, env=run_env)  # noqa: PLW1509
             exit_code = proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -1452,7 +1454,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         before_lines = set(status_before.splitlines())
         after_lines = set(status_after.splitlines())
         for line in (after_lines - before_lines):
-            files_changed.append(line)
+            files_changed.append(line)  # noqa: PERF402
     else:
         snap_after = _fs_snapshot()
         for rel, sig in snap_after.items():
@@ -1482,20 +1484,20 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
                         cost_usd = float(data[key])
                         cost_unknown = False
                         break
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         if cost_unknown:
             # Fallback: audit-log rollup, window sized to this run (metrics
             # --since takes durations like 30m; 1m would miss a long run).
             since = f"{int(elapsed // 60) + 2}m"
             try:
-                r = subprocess.run(["codewhale", "metrics", "--json", "--since", since], capture_output=True, text=True, timeout=5)
+                r = subprocess.run(["codewhale", "metrics", "--json", "--since", since], capture_output=True, text=True, timeout=5)  # noqa: PLW1510
                 if r.returncode == 0:
                     data = json.loads(r.stdout)
                     if "cost_usd" in data:
                         cost_usd = float(data["cost_usd"])
                         cost_unknown = False
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
     verify_status = "SKIPPED"
@@ -1563,6 +1565,54 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         
     return "\n".join(lines[:25])
 
+
+
+def send_to_owner(files: list[str], title: str) -> str:
+    """Send files to the owner's Telegram as documents."""
+    token = os.environ.get("AI_ROUTER_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_OWNER_CHAT_ID")
+    if not token or not chat_id:
+        raise ValueError("AI_ROUTER_BOT_TOKEN or TELEGRAM_OWNER_CHAT_ID not in env")
+
+    if not files:
+        raise ValueError("No files provided")
+
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    
+    first = True
+    msg_ids = []
+
+    with httpx.Client(timeout=30.0) as client:
+        for filepath in files:
+            p = Path(filepath)
+            if not p.is_absolute():
+                raise ValueError(f"Path must be absolute: {filepath}")
+            if not p.is_file():
+                raise ValueError(f"File not found: {filepath}")
+
+            data = {"chat_id": chat_id}
+            if first and title:
+                data["caption"] = title
+                first = False
+
+            with open(p, "rb") as f:
+                files_payload = {"document": (p.name, f)}
+                try:
+                    resp = client.post(url, data=data, files=files_payload)
+                    resp.raise_for_status()
+                    result = resp.json()
+                except httpx.HTTPError as e:
+                    err_msg = str(e).replace(token, "<redacted>")
+                    raise RuntimeError(f"Telegram API error: {err_msg}") from None
+            # A 200 with ok=false (or no message_id) is still a failure —
+            # never report success without the message_id proof.
+            msg_id = result.get("result", {}).get("message_id")
+            if not result.get("ok") or msg_id is None:
+                desc = str(result.get("description", "no description")).replace(token, "<redacted>")
+                raise RuntimeError(f"Telegram refused {p.name}: {desc}")
+            msg_ids.append(msg_id)
+
+    return "message_id=" + ",".join(str(m) for m in msg_ids)
 
 
 def send_note(to_project: str, message: str, priority: str = "normal", subject: str = "") -> str:
@@ -1738,7 +1788,7 @@ def route_task(task_note: dict, verify_cmd: str = "") -> str:
         if "VERIFY FAILED" in report:
             fallback_needed = True
             fallback_reason = "verify failed"
-    except (Exception, SystemExit) as e:
+    except (Exception, SystemExit) as e:  # noqa: BLE001
         # SystemExit covers check_budget()'s daily-cap/quota-exceeded abort
         # inside agent_delegate (sys.exit, not a raised Exception) — a quota
         # hit must fall through to the paid ladder step too, per the WO's
@@ -1751,8 +1801,8 @@ def route_task(task_note: dict, verify_cmd: str = "") -> str:
         try:
             fallback_report = agent_delegate(task=full_goal, runner="codewhale", model="flash", workdir=repo, verify_cmd=verify_cmd)
             report = f"Original agy run failed ({fallback_reason}). Paid fallback used (codewhale flash):\n\n{fallback_report}"
-        except Exception as e:
-            report = f"Original agy run failed ({fallback_reason}). Paid fallback (codewhale flash) also failed: {str(e)}"
+        except Exception as e:  # noqa: BLE001
+            report = f"Original agy run failed ({fallback_reason}). Paid fallback (codewhale flash) also failed: {e!s}"
             
     from_project = task_note.get("from_project")
     if from_project:
@@ -1770,7 +1820,7 @@ def cmd_channels(enable_channel=None, disable_channel=None):
             try:
                 import json
                 data = json.loads(channels_json.read_text())
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         if enable_channel:
             if enable_channel not in data:
@@ -1793,7 +1843,7 @@ def cmd_channels(enable_channel=None, disable_channel=None):
         try:
             import json
             data = json.loads(channels_json.read_text())
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
             
     env_disabled = [c.strip() for c in os.environ.get("AI_ROUTER_DISABLE_CHANNELS", "").split(",") if c.strip()]
@@ -1815,10 +1865,10 @@ def cmd_channels(enable_channel=None, disable_channel=None):
                 
                 if ch == "codex":
                     try:
-                        r = subprocess.run(["codex", "login", "status"], capture_output=True, text=True, timeout=2)
+                        r = subprocess.run(["codex", "login", "status"], capture_output=True, text=True, timeout=2)  # noqa: PLW1510
                         if r.returncode == 0:
                             auth_str = r.stdout.strip().split("\n")[0]
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110
                         pass
                 elif ch == "copilot":
                     # Copilot CLI relies on GH CLI or env vars, no native auth status command
@@ -1871,6 +1921,9 @@ def main():
     ap.add_argument("--runner", default="agy", help="agent mode runner: agy (default) or codewhale")
     ap.add_argument("--timeout", type=int, default=600, help="agent mode: timeout in seconds (default 600, max 1800)")
     ap.add_argument("--route-task", help="path to a note file to execute via route_task")
+    ap.add_argument("--send-to-owner", action="store_true", help="send files to owner's telegram")
+    ap.add_argument("--file", action="append", default=[], help="file to send to owner (repeatable, absolute path)")
+    ap.add_argument("--title", default="", help="title (caption) for the file being sent")
     a = ap.parse_args()
 
     handler = logging.StreamHandler(sys.stderr)
@@ -1922,7 +1975,7 @@ def main():
                     print(f"[{i}/{len(notes)}] note from {meta.get('from', 'unknown')} ({meta.get('created', '')}){subj}")
                     print(body.strip())
                     print("-" * 40)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             sys.exit(f"❌ {e}")
         return
 
@@ -1931,7 +1984,7 @@ def main():
             sys.exit("❌ need -p PROMPT or message string for the note body")
         try:
             print(send_note(a.note, a.prompt, priority=a.priority, subject=a.subject))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             sys.exit(f"❌ {e}")
         return
 
@@ -1939,7 +1992,15 @@ def main():
         try:
             task_note = parse_task_note_file(Path(a.route_task))
             print(route_task(task_note, verify_cmd=a.verify))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            sys.exit(f"❌ {e}")
+        return
+
+    if a.send_to_owner:
+        load_env()
+        try:
+            print(send_to_owner(a.file, a.title))
+        except Exception as e:  # noqa: BLE001
             sys.exit(f"❌ {e}")
         return
 

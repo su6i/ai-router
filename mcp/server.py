@@ -16,7 +16,7 @@ delegate_worker returns only the existing <=25-line summary contract (file
 contents never cross the wire); delegate_research is capped by
 max_output_tokens (request parameter, low default). No uncapped chat tool,
 ever — see "Non-goals" in the design doc.
-"""
+"""  # noqa: EXE001
 import contextlib
 import io
 import json
@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-import delegate as d  # noqa: E402
+import delegate as d
 
 PROTOCOL_VERSION = "2025-11-25"
 SERVER_NAME = "ai-router-mcp"
@@ -181,6 +181,25 @@ TOOLS = [
                 "verify": {"type": "string", "default": ""}
             },
             "required": ["task_note"]
+        }
+    },
+    {
+        "name": "send_to_owner",
+        "description": "Send one or more files to the owner's Telegram as a document attachment.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of absolute file paths to send."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short title or caption for the files."
+                }
+            },
+            "required": ["files", "title"]
         }
     },
 ]
@@ -362,6 +381,20 @@ def handle_route_task(args: dict) -> dict:
     return _text_result(report)
 
 
+def handle_send_to_owner(args: dict) -> dict:
+    files = args.get("files")
+    if not files or not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        raise ValueError("'files' is required and must be a non-empty list of strings")
+    title = args.get("title", "")
+    
+    try:
+        res = d.send_to_owner(files, title)
+    except Exception as e:
+        raise ValueError(str(e)) from e
+        
+    return _text_result(res)
+
+
 TOOL_HANDLERS = {
     "delegate_research": handle_delegate_research,
     "delegate_worker": handle_delegate_worker,
@@ -371,6 +404,7 @@ TOOL_HANDLERS = {
     "send_note": handle_send_note,
     "list_notes": handle_list_notes,
     "route_task": handle_route_task,
+    "send_to_owner": handle_send_to_owner,
 }
 
 
