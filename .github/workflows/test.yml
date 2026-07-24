@@ -24,4 +24,4 @@ jobs:
       - name: Run pytest
         run: uv run pytest -q
       - name: Run ruff check
-        run: uvx ruff check src/ mcp/ hooks/ tests/
+        run: uv run ruff check src/ mcp/ hooks/ tests/

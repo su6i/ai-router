@@ -9,6 +9,14 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Fixed
 
+- **CI ruff now uses the project's pinned version, not a floating one.** The
+  `Test` workflow ran `uvx ruff check`, which fetches the *latest* ruff each
+  run, while local checks use `uv run ruff` (the locked `0.15.22`). When ruff
+  `0.16.0` shipped with stricter defaults, the first push afterwards
+  (`e10e466`) turned CI red with 76 style errors even though the code was
+  clean under the pinned version. The step now runs `uv run ruff check`, so CI
+  and local use the same locked ruff and stay deterministic.
+
 - **Inter-session messaging (`send_note` / `list_notes`)** — Agents can now send notes to other projects' inboxes via the router (`r note <project> <message>` or the `send_note` MCP tool). Notes are written durably into the target project's vault (`~/.local/share/agent-projects/<project>/workspace/inbox/`) and are redacted for secrets. Unread notes can be read and marked as read using `r inbox` or the `list_notes` MCP tool. A `r inbox --peek` command is available to just show counts, and a new `session_start_inbox.sh` hook runs it on session start. Delivery is strictly turn-boundary (never mid-turn push), avoiding prompt-injection as execution text.
 
 - **agy now writes to the target workdir (`--add-dir`), not its sandbox.**
