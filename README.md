@@ -316,7 +316,7 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 
 | Door | Best For | Default Model | Notes |
 | --- | --- | --- | --- |
-| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `grok` (web search) | Answer is capped by `max_output_tokens`. |
+| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `grok` (4.3, `/v1/responses` + web_search) | ~$0.02-$0.05/call (3-6 search calls at $0.005 each), not $0.003. Answer is capped by `max_output_tokens`. |
 | **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `gemini` (free) | Pass known file paths. Generated code never crosses the wire. |
 | **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
 | **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
@@ -330,9 +330,21 @@ claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/
 Three tools only, all capped — no uncapped chat tool, ever:
 
 - **`delegate_research`** — fact lookup / live-data checks / doc
-  verification (default model `grok` = live web/X search). Answer is capped
-  by `max_output_tokens` (default 500, max 2000) — a low default, not a
-  promise.
+  verification (default model `grok` = 4.3, routed through xAI's
+  `/v1/responses` endpoint with a server-side `web_search` tool — the old
+  `chat/completions` live-search request field is HTTP 410 Gone as of
+  2026-07). Each `web_search` call bills a flat **$0.005** on top of tokens
+  and a question typically triggers 3-6 calls, so a research call is
+  **~$0.02-$0.05, not $0.003** — `usage.cost_in_usd_ticks` (xAI's own billed
+  cost) is recorded verbatim in the ledger instead of the token-table
+  estimate, which cannot see per-search-call billing. `search` (default
+  true) disables the tool for a cheap plain-chat fallback; `max_tool_calls`
+  (default 6) caps `web_search` calls per request — an uncapped live
+  question once made 15 calls and cost $0.389. `grok-4.5` is available as an
+  opt-in `model`, but `grok` (4.3) stays the default: a live 5-question A/B
+  found 4.3 5/5 correct at $0.172 total vs 4.5's 4/5 at $0.618 total (3.6x
+  the cost, worse quality). Answer is capped by `max_output_tokens` (default
+  500, max 2000) — a low default, not a promise.
 - **`delegate_worker`** — grunt coding work (default model `gemini`). Same
   contract as CLI worker mode: `files`/`allow_write`/`verify`/`retries`
   mirror `--files`/`--allow-write`/`--verify`/`--retries`; `workdir` (an
@@ -395,10 +407,23 @@ From `MODELS` in `src/delegate.py` (cost per 1M tokens):
 | `minimax` | `MiniMax-M3` | MiniMax | $0.30 / $1.20 | Default — one-time prepaid credit, spend first |
 | `flash` | `deepseek-v4-flash` | DeepSeek | $0.14 / $0.28 | General grunt work — implementation, refactor, tests, boilerplate |
 | `pro` | `deepseek-v4-pro` | DeepSeek | $0.435 / $0.87 | Reasoner — escalation target when `flash` fails or needs deeper reasoning |
-| `grok` | `grok-4.3` | xAI | $1.25 / $2.50 | Second opinion / current-events knowledge — not for routine work |
+| `grok` | `grok-4.3` | xAI | $1.25 / $2.50 (+ $0.20 cached-in) | Second opinion / current-events knowledge — default for `delegate_research`, not for routine work |
+| `grok-4.5` | `grok-4.5` | xAI | $2.00 / $6.00 (+ $0.30 cached-in) | Opt-in only — a live A/B found it 3.6x the cost of `grok` for equal-or-worse research quality |
 | `gemini` | `gemini-2.5-flash` | Google (free tier) | $0 / $0 | Free-tier grunt work — commit messages, format conversion, categorization |
 | `gemini-lite` | `gemini-2.5-flash-lite` | Google (free tier) | $0 / $0 | Free-tier, lighter/faster variant of `gemini` |
 | `gemma` | `gemma-4-31b-it` | Google (free tier) | $0 / $0 | Free-tier, open-weight model |
+
+Both `grok` and `grok-4.5` route through xAI's `/v1/responses` endpoint
+(`call_xai_responses()`, not `chat/completions`) with a server-side
+`web_search` tool — the plain per-token prices above don't include it: each
+`web_search` call bills a flat **$0.005** on top of tokens (a research
+question typically makes 3-6), and above 200k input tokens both models'
+rates double (`cin_long`/`cout_long`). The ledger records xAI's own
+`usage.cost_in_usd_ticks` (1 tick = 1e-10 USD) as the true cost for these
+calls rather than the token-table estimate above, which cannot see
+per-search-call billing; the table is used only for the pre-flight
+`--estimate` path. Pass `--no-search` (CLI) or `search: false` (MCP) to
+force the old cheap plain-chat path when live data isn't needed.
 
 Priority order and full routing rationale (MiniMax credit-exhaustion
 fallback, why Claude is never in this router, provider vs. subscription-CLI
