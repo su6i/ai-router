@@ -7,6 +7,44 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Changed
+
+- **The free-quota Gemini API channel is removed (owner decree 2026-07-27).**
+  `gemini`, `gemini-lite` and `gemma` no longer exist as models. Asking for one
+  of those names does **not** silently remap: `resolve_model()` raises a
+  `ValueError` naming `agy` as the replacement, because a silent remap would
+  hide from the caller that the model they benchmarked against is gone. The
+  free-quota channel repeatedly defeated the `$0-first` ladder:
+  `delegate_worker` could not accept `agy` at all (agy was a runner, not an
+  HTTP backend), so its default fell through to free-quota `gemini-2.5-flash`
+  and the owner's "coding default = agy" ruling never actually took effect.
+
+- **`agy` is now a `delegate_worker` backend** via `call_agy_print()`, closing
+  that gap, and is the default coding model. Determinism is preserved exactly
+  as for the HTTP worker models: the *router*, not agy, applies file writes.
+  Worker mode therefore runs agy with `--mode plan` and deliberately **without**
+  `--add-dir`, so agy cannot write to the repo even if it tries — the opposite
+  of `agent_delegate`, where agy *is* the writer and `--add-dir` is required.
+
+- **No automatic fallback from a $0 channel to a paid one.** The old ladder
+  quietly re-ran a failed free-tier call on paid DeepSeek. Failures now raise
+  and name the explicit paid re-run, so spend is always a decision.
+
+### Added
+
+- **Large-file write guard (owner decree 2026-07-27) — the reason this release
+  exists.** On 2026-07-27 a three-line fix delegated to a cheap model came back
+  as a *full-file rewrite* that shrank a 50KB source file to 245 lines; only
+  git saved it. Full-file replacement is now refused where it is dangerous:
+  a `===FILE:` block targeting an existing file ≥ `LARGE_FILE_BYTES` (12 KB) is
+  rejected, as is any rewrite shrinking a file below `MAX_SHRINK_RATIO` (50%)
+  of its current size. Such edits must use the new `===PATCH:` /`===OLD===` /
+  `===NEW===` protocol, which is applied by literal exact match — the `old`
+  text must occur **exactly once** (zero matches or two matches are both
+  rejected), never a regex or fuzzy match. The escape hatch
+  `--allow-full-rewrite` exists on the CLI only and is deliberately not
+  exposed on the MCP tool.
+
 ### Fixed
 
 - **CI ruff now uses the project's pinned version, not a floating one.** The

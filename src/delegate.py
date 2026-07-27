@@ -7,17 +7,18 @@ you have an independent ledger. Optional conversation memory (--session) makes c
 iterative ("now add tests") instead of one-shot.
 
 Providers:
-  gemini  — Google Gemini/Gemma, FREE tier (cost $0), google endpoint
+  agy     — Gemini 3.1 Pro via the `agy` CLI, Google AI Pro subscription ($0)
   minimax — MiniMax-M3 (prepaid, spend first)
   flash   — deepseek-v4-flash    pro — deepseek-v4-pro    grok — grok-4.3
 
+Note: `gemini`/`gemini-lite`/`gemma` (the free-quota Gemini API channel) were
+REMOVED 2026-07-27 — they silently overrode the $0 `agy` default and 429'd
+into paid fallback constantly. See REMOVED_MODELS below; resolve_model()
+raises loudly for these names instead of silently remapping them.
+
 Usage:
   python3 delegate.py -p "prompt"                       # default model = minimax
-  python3 delegate.py --model gemini -p "..."           # free
   python3 delegate.py --model deepseek-v4-flash --plan PLAN.md --out ANSWER.md
-  python3 delegate.py --model gemini --session code -p "write a fib()"   # remembers
-  python3 delegate.py --model gemini --session code -p "now add memoization"
-  python3 delegate.py --session code --new              # reset that conversation
   python3 delegate.py --audit                           # print the ledger
 
   # worker mode (SPEC v1) — cheap model reads/rewrites files on disk directly;
@@ -170,15 +171,14 @@ MODELS = {
                     "cin": 0.435, "cin_cached": 0.0435, "cout": 0.87, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
     "grok":    {"api": "grok-4.3",          "provider": "openai", "url": "https://api.x.ai/v1",
                     "cin": 1.25, "cout": 2.50, "key": "GROK_API_KEY", "quota_channel": "grok-api"},
-    "gemini":  {"api": "gemini-2.5-flash",  "provider": "gemini",
-                    "url": "https://generativelanguage.googleapis.com/v1beta",
-                    "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY", "quota_channel": "gemini-free"},
-    "gemini-lite": {"api": "gemini-2.5-flash-lite", "provider": "gemini",
-                    "url": "https://generativelanguage.googleapis.com/v1beta",
-                    "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY", "quota_channel": "gemini-free"},
-    "gemma":   {"api": "gemma-4-31b-it", "provider": "gemini",
-                    "url": "https://generativelanguage.googleapis.com/v1beta",
-                    "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY", "quota_channel": "gemini-free"},
+    # $0 coding default (owner decree 2026-07-27). provider "agy_cli" is NOT an
+    # HTTP provider — it is dispatched to call_agy_print() (subprocess to the
+    # `agy` binary), never to call_openai/call_gemini. "key": "" is deliberate:
+    # agy authenticates via its own CLI session (Google AI Pro subscription),
+    # not an env-var API key — see the provider=="agy_cli" special case in
+    # _worker_delegate_inner.
+    "agy": {"api": "Gemini 3.1 Pro (High)", "provider": "agy_cli", "url": "",
+            "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro"},
 }
 
 # Friendly aliases -> canonical key.
@@ -188,9 +188,20 @@ ALIASES = {
     "deepseek-flash": "flash", "deepseek-v4-flash": "flash",
     "pro": "pro", "reasoner": "pro", "deepseek-pro": "pro", "deepseek-v4-pro": "pro",
     "grok": "grok", "grok-4.3": "grok", "grok4": "grok",
-    "gemini": "gemini", "gemini-2.5-flash": "gemini", "flash-gemini": "gemini",
-    "gemini-lite": "gemini-lite", "gemini-2.5-flash-lite": "gemini-lite", "lite": "gemini-lite",
-    "gemma": "gemma", "gemma-4": "gemma", "gemma-4-31b-it": "gemma", "gemma3": "gemma",
+    "agy": "agy", "antigravity": "agy", "gemini-3-pro": "agy",
+}
+
+# Owner decree 2026-07-27: the free-quota Gemini API channel ("gemini",
+# "gemini-lite", "gemma") is REMOVED, not silently remapped. It defeated the
+# standing $0-first policy by being delegate_worker's default, 429'd
+# constantly under the free quota, and silently auto-fell back to a PAID
+# model without the caller asking (see CHANGELOG "Removed"). resolve_model()
+# checks this FIRST and raises loudly — a caller must consciously switch to
+# the new default ('agy') or an explicit paid model.
+REMOVED_MODELS = {
+    "gemini": "agy", "gemini-2.5-flash": "agy", "flash-gemini": "agy",
+    "gemini-lite": "agy", "gemini-2.5-flash-lite": "agy", "lite": "agy",
+    "gemma": "agy", "gemma-4": "agy", "gemma-4-31b-it": "agy", "gemma3": "agy",
 }
 
 # Copilot premium-request multipliers are NOT hardcoded: GitHub changes them
@@ -257,10 +268,18 @@ def get_model_channel(model: str) -> str:
 
 
 def resolve_model(name: str) -> str:
-    key = ALIASES.get(name.strip().lower())
-    if key is None:
+    key = name.strip().lower()
+    if key in REMOVED_MODELS:
+        suggestion = REMOVED_MODELS[key]
+        raise ValueError(
+            f"model '{key}' was removed from the router (owner decree "
+            f"2026-07-27: free-quota Gemini flash truncates files and "
+            f"silently overrode the agy default). Use '{suggestion}'."
+        )
+    resolved = ALIASES.get(key)
+    if resolved is None:
         raise ValueError(f"unknown model '{name}'. Known: {', '.join(sorted(ALIASES))}")
-    return key
+    return resolved
 
 
 def load_env():
@@ -755,6 +774,11 @@ def call_openai(spec, key, history, system, max_output_tokens: int = 8192):
 
 
 def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
+    # Deliberately kept even though no MODELS entry registers provider
+    # "gemini" today (owner decree 2026-07-27 removed the free-quota
+    # gemini/gemini-lite/gemma entries). A future PAID Gemini API model can
+    # still register with provider "gemini" and reuse this function — do not
+    # "clean up" this plumbing.
     # Gemini roles: user / model. Map our history (user/assistant) accordingly.
     contents = [{"role": "model" if m["role"] == "assistant" else "user",
                  "parts": [{"text": m["content"]}]} for m in history]
@@ -780,6 +804,68 @@ def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
             um.get("cachedContentTokenCount", 0), None)
 
 
+# agy print-mode timeout for the worker backend. Sized like the CLI's own
+# --print-timeout default (5m) — worker tasks are single-file edits, not
+# long agentic explorations (that's agent_delegate's job).
+AGY_WORKER_TIMEOUT_S = 300
+
+AGY_NO_TOOLS_ADDENDUM = (
+    "\n\nIMPORTANT: you are running in headless TEXT-ONLY print mode for "
+    "this task. You have no file-editing, shell, or tool-call access from "
+    "here — any such attempt is a no-op. Respond with ONLY the sentinel "
+    "blocks described above, as plain text. Do not attempt to write or "
+    "edit any file yourself.\n"
+)
+
+
+def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: int = AGY_WORKER_TIMEOUT_S):
+    """Invoke `agy` in headless print mode as a pure TEXT GENERATOR for the
+    worker protocol (SPEC v1 / PATCH protocol). The router — not agy — is
+    the only writer: parse_worker_response() + _write_files()/_apply_patches()
+    parse this function's returned text and write to disk themselves.
+
+    Belt-and-braces, TWO independent guards against agy touching the repo:
+      1. --mode plan (agy --help confirms `plan` is a real, read-only mode
+         alongside `accept-edits`) stops agy from attempting any edit at all.
+      2. Deliberately NO --add-dir (verified 2026-07-21, see agent_delegate's
+         comment on the same flag for the opposite case): even if plan mode
+         were bypassed, without --add-dir agy (antigravity-cli) sandboxes any
+         write into ~/.gemini/antigravity-cli/scratch/ instead of
+         project_root, so it could never touch the real repo either way.
+    The router's own parse_worker_response() + _write_files()/_apply_patches()
+    stay the ONLY writer. Do not "fix" this by adding --add-dir or switching
+    to --mode accept-edits — that would defeat the whole point of routing
+    worker writes through the router instead of trusting the model's tool
+    use. Contrast with agent_delegate(), the OPPOSITE case: there agy IS
+    meant to be the writer, so it uses --add-dir + --mode accept-edits. Do
+    not "harmonise" the two call sites.
+
+    Return shape matches what call_openai/call_gemini return, so
+    _worker_delegate_inner can treat all three callers identically:
+    (content, echoed_model, request_id, pin, pout, cache, cache_miss).
+    agy print mode exposes no token counts, so pin/pout/cache are always 0;
+    callers must record cost_unknown=True for this channel (google-ai-pro),
+    mirroring how agent_delegate already handles the agy runner.
+    """
+    cmd = ["agy", "-p", prompt, "--model", model_name, "--mode", "plan",
+           "--dangerously-skip-permissions", "--print-timeout", f"{timeout_s}s"]
+    try:
+        r = subprocess.run(cmd, cwd=str(project_root), capture_output=True,  # noqa: PLW1510
+                           text=True, timeout=timeout_s + 30)
+    except subprocess.TimeoutExpired:
+        raise ProviderError("agy", "TIMEOUT", f"print mode exceeded {timeout_s}s") from None
+    except FileNotFoundError:
+        raise ProviderError("agy", "NOT_FOUND", "agy binary not found in PATH") from None
+
+    if r.returncode != 0:
+        reason = (r.stderr or r.stdout or "").strip()[:500]
+        raise ProviderError("agy", r.returncode, reason)
+    content = (r.stdout or "").strip()
+    if not content:
+        raise ProviderError("agy", "EMPTY", "empty stdout from agy print mode")
+    return (content, model_name, None, 0, 0, 0, None)
+
+
 # Sentinel-line protocol (not markdown fences: file content may itself contain
 # backticks). Full-file replacement only — cheap models are unreliable with diffs.
 # Rationale: Markdown code fences fail when the target file contains fences itself.
@@ -794,19 +880,42 @@ EXACTLY this format — no markdown code fences, no commentary outside these mar
 <entire new file content — full replacement, never a diff or patch>
 ===END FILE===
 (repeat the FILE block for every file you changed)
+
+For a file marked "large" below, you MUST NOT use a FILE block — use one or
+more PATCH blocks instead, one per distinct edit:
+
+===PATCH: relative/path/from/project/root.py===
+===OLD===
+<literal text that currently exists in the file, verbatim, including
+indentation — copied EXACTLY from the CURRENT FILE content you were given>
+===NEW===
+<replacement text>
+===END PATCH===
+(repeat the PATCH block for every distinct edit; OLD must match EXACTLY ONE
+location in the file — if the text you want to change appears more than
+once, include enough surrounding context in OLD to make it unique)
+
 ===SUMMARY===
 3-5 lines: what was done, what was NOT done, any assumption you made.
 ===END SUMMARY===
 
 Rules:
-- Always emit the FULL file content, never a partial diff.
-- Only emit FILE blocks for files you are actually changing.
+- Always emit the FULL file content for a FILE block, never a partial diff.
+- Only emit FILE/PATCH blocks for files you are actually changing.
 - Never wrap file content in markdown fences.
 - Paths are relative to the project root: no leading slash, no ".." segments.
+- OLD text in a PATCH block must be copied verbatim from the file content
+  you were given — never paraphrased, re-indented, or reconstructed from
+  memory. If you cannot quote it exactly, use a smaller/different OLD span
+  that you CAN quote exactly.
 """
 
 _FILE_START_RE = re.compile(r"^===FILE: (.+)===$")
 _FILE_END = "===END FILE==="
+_PATCH_START_RE = re.compile(r"^===PATCH: (.+)===$")
+_OLD_START = "===OLD==="
+_NEW_START = "===NEW==="
+_PATCH_END = "===END PATCH==="
 _SUMMARY_START = "===SUMMARY==="
 _SUMMARY_END = "===END SUMMARY==="
 
@@ -822,13 +931,23 @@ CONTEXT_DISCIPLINE_PREAMBLE = """=== CONTEXT DISCIPLINE ===
 
 
 def parse_worker_response(text: str):
-    """Parse sentinel-line blocks. Returns (files: list[(path, content)], summary: str|None).
+    """Parse sentinel-line blocks. Returns (files: list[(path, content)],
+    patches: list[(path, old, new)], summary: str|None).
 
     Regex on line starts per SPEC v1 — content between markers is written verbatim
     (a trailing newline is added by the caller if missing, never here).
+
+    PATCH blocks (owner decree 2026-07-27, the large-file guard) are the
+    mandatory alternative to a full ===FILE=== rewrite for files at/above
+    LARGE_FILE_BYTES: ===PATCH: path=== / ===OLD=== / ===NEW=== /
+    ===END PATCH===. `old`/`new` are joined verbatim from their line ranges,
+    exactly like a FILE body — no stripping, no normalisation. A malformed
+    PATCH header (missing the ===OLD=== sentinel right after it) is simply
+    not treated as a patch; parsing falls through to the next line so a
+    single bad block can never hang the parser.
     """
     lines = text.split("\n")
-    files, summary = [], None
+    files, patches, summary = [], [], None
     i, n = 0, len(lines)
     while i < n:
         line = lines[i].rstrip("\r")
@@ -843,6 +962,29 @@ def parse_worker_response(text: str):
             files.append((path, "\n".join(body)))
             i += 1  # skip ===END FILE===
             continue
+        m2 = _PATCH_START_RE.match(line)
+        if m2:
+            path = m2.group(1).strip()
+            i += 1
+            if i >= n or lines[i].rstrip("\r") != _OLD_START:
+                # Malformed: no ===OLD=== right after the header. Do not
+                # consume further lines as part of this non-patch — let the
+                # outer loop reprocess line i normally (no infinite loop:
+                # i already advanced past the ===PATCH:...=== header line).
+                continue
+            i += 1  # skip ===OLD===
+            old_body = []
+            while i < n and lines[i].rstrip("\r") != _NEW_START:
+                old_body.append(lines[i])
+                i += 1
+            i += 1  # skip ===NEW===
+            new_body = []
+            while i < n and lines[i].rstrip("\r") != _PATCH_END:
+                new_body.append(lines[i])
+                i += 1
+            patches.append((path, "\n".join(old_body), "\n".join(new_body)))
+            i += 1  # skip ===END PATCH===
+            continue
         if line == _SUMMARY_START:
             i += 1
             body = []
@@ -853,7 +995,7 @@ def parse_worker_response(text: str):
             i += 1
             continue
         i += 1
-    return files, summary
+    return files, patches, summary
 
 
 def _safe_write_path(rel: str, project_root: Path, allow_patterns: list):
@@ -876,7 +1018,61 @@ def _safe_write_path(rel: str, project_root: Path, allow_patterns: list):
     return candidate, None
 
 
-def _write_files(files: list, project_root: Path, allow_patterns: list):
+# Owner decree 2026-07-27 (root cause of the 50KB->245-line incident): a
+# cheap worker model must never full-rewrite a file this large — it must
+# emit ===PATCH: blocks instead. MAX_SHRINK_RATIO catches the same failure
+# mode on smaller files (a "fix" that quietly drops most of the file).
+LARGE_FILE_BYTES = 12_000
+MAX_SHRINK_RATIO = 0.5
+
+
+def _human_size(n: int) -> str:
+    return f"{n}b" if n < 1024 else f"{n / 1024:.1f}k"
+
+
+def _apply_patches(patches: list, project_root: Path, allow_patterns: list):
+    """Apply ===PATCH: blocks. ASSERT-style exact match ONLY: `old` must
+    appear in the current file content EXACTLY ONCE, byte for byte. No
+    regex, no whitespace normalisation, no "closest match" fallback — a
+    fuzzy match here would silently corrupt the file, which is exactly the
+    failure mode this protocol exists to prevent (owner decree 2026-07-27).
+    """
+    applied, rejected = [], []
+    for rel, old, new in patches:
+        path, err = _safe_write_path(rel, project_root, allow_patterns)
+        if err:
+            rejected.append((rel, err))
+            continue
+        if not path.exists():
+            rejected.append((rel, "PATCH target does not exist — use ===FILE: for a new file"))
+            continue
+        content = path.read_text()
+        count = content.count(old)
+        if count == 0:
+            rejected.append((rel, "OLD text not found verbatim"))
+            continue
+        if count > 1:
+            rejected.append((rel, f"OLD text ambiguous ({count} matches)"))
+            continue
+        new_content = content.replace(old, new, 1)
+        path.write_text(new_content)
+        new_size = len(new_content.encode())
+        # (path, resulting size, delta) — size stays an int so this list can be
+        # formatted and audited with the same helpers as _write_files() output.
+        applied.append((rel, new_size, new_size - len(content.encode())))
+    return applied, rejected
+
+
+def _write_files(files: list, project_root: Path, allow_patterns: list, allow_full_rewrite: bool = False):
+    """Write ===FILE: blocks. Guards a full rewrite of an existing file per
+    the owner decree 2026-07-27 large-file protocol:
+      - existing size >= LARGE_FILE_BYTES: reject, the model must use
+        ===PATCH: instead.
+      - new size < MAX_SHRINK_RATIO * existing size: reject as a suspicious
+        shrink (the actual 50KB->245-line incident pattern).
+    Both guards are bypassed ONLY by allow_full_rewrite=True (CLI
+    --allow-full-rewrite; deliberately NOT exposed on the MCP tool).
+    """
     written, rejected = [], []
     for rel, content in files:
         path, err = _safe_write_path(rel, project_root, allow_patterns)
@@ -884,14 +1080,21 @@ def _write_files(files: list, project_root: Path, allow_patterns: list):
             rejected.append((rel, err))
             continue
         data = content if content.endswith("\n") else content + "\n"
+        new_size = len(data.encode())
+        if path.exists() and not allow_full_rewrite:
+            existing_size = path.stat().st_size
+            if existing_size >= LARGE_FILE_BYTES:
+                rejected.append((rel, f"large file ({_human_size(existing_size)}): full rewrite "
+                                       f"forbidden — use ===PATCH: (owner decree 2026-07-27)"))
+                continue
+            if existing_size > 0 and new_size < MAX_SHRINK_RATIO * existing_size:
+                rejected.append((rel, f"suspicious shrink {_human_size(existing_size)} -> "
+                                       f"{_human_size(new_size)} — use ===PATCH: or --allow-full-rewrite"))
+                continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(data)
-        written.append((rel, len(data.encode())))
+        written.append((rel, new_size))
     return written, rejected
-
-
-def _human_size(n: int) -> str:
-    return f"{n}b" if n < 1024 else f"{n / 1024:.1f}k"
 
 
 def _tail_lines(text: str, n: int) -> str:
@@ -918,7 +1121,10 @@ def _get_channel_system_prompt(model: str) -> str:
         channel = "deepseek"
     elif model in ("minimax", "m3"):
         channel = "minimax"
-    elif model in ("gemini", "gemini-lite", "gemma", "Gemini 3.1 Pro (High)"):
+    elif model in ("agy", "antigravity", "Gemini 3.1 Pro (High)"):
+        # agy IS Gemini 3.1 Pro under the hood — same vendor, same template
+        # file (templates/system-prompts/gemini.md). Keep the template file
+        # name as "gemini"; only the MODELS registration changed.
         channel = "gemini"
     else:
         channel = model
@@ -945,23 +1151,42 @@ def build_worker_prompt(task: str, file_specs: list, model: str | None = None) -
     # files block; the variable task text stays last.
     for path, content in file_specs:
         parts.append(f"===CURRENT FILE: {path}===\n{content}\n===END CURRENT FILE===\n")
+        size = len(content.encode())
+        if size >= LARGE_FILE_BYTES:
+            parts.append(
+                f"NOTE: file {path} is large ({_human_size(size)}) — you MUST answer "
+                f"with ===PATCH: blocks for it, never a full ===FILE: rewrite "
+                f"(owner decree 2026-07-27).\n"
+            )
     parts.append(f"Task:\n{task}\n")
     return "\n".join(parts)
 
 
 def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                             max_attempts, elapsed, summary, total_files, cost,
-                            echoed_model, fail_tail, hit_rates):
+                            echoed_model, fail_tail, hit_rates, patched=()):
     def fmt_written(items):
         return ", ".join(f"{p} ({_human_size(sz)})" for p, sz in items) if items else "(none)"
+
+    def fmt_patched(items):
+        return ", ".join(
+            f"{p} ({_human_size(sz)}, {'+' if d >= 0 else ''}{d}b)" for p, sz, d in items
+        ) if items else "(none)"
 
     def fmt_rejected(items):
         return ", ".join(f"REJECTED: {p} ({reason})" for p, reason in items) if items else "(none)"
 
-    lines = [
+    lines = []
+    if not written and not patched and total_files > 0:
+        # Owner decree 2026-07-27: a run where every block was rejected
+        # (e.g. every FILE was a forbidden large-file rewrite) must NOT read
+        # as a quiet success — the caller must see this as a failure.
+        lines.append("status        : ALL BLOCKS REJECTED — nothing written, this is a FAILURE")
+    lines.extend([
         f"files written : {fmt_written(written)}",
+        f"files patched : {fmt_patched(patched)}",
         f"rejected      : {fmt_rejected(rejected)}",
-    ]
+    ])
     if verify_cmd:
         v = f"verify        : {verify_cmd} → {verify_status}"
         if verify_status != "SKIPPED":
@@ -981,13 +1206,19 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
 
 def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path | None = None,
-                     via: str | None = None, estimate: bool = False) -> str:
+                     via: str | None = None, estimate: bool = False,
+                     allow_full_rewrite: bool = False) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
     spec = MODELS[model]
-    key = os.environ.get(spec["key"], "")
-    if not key:
-        sys.exit(f"❌ {spec['key']} not set in vault .env")
+    if spec["provider"] == "agy_cli":
+        # agy authenticates via its own CLI session (Google AI Pro
+        # subscription) — there is no env-var API key to check.
+        key = ""
+    else:
+        key = os.environ.get(spec["key"], "")
+        if not key:
+            sys.exit(f"❌ {spec['key']} not set in vault .env")
 
     project_root = project_root or Path.cwd()
     project, commit = project_info()
@@ -1020,7 +1251,22 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
         content = p.read_text() if p.exists() else "(file does not exist yet)"
         file_specs.append((rel, content))
 
-    caller = call_gemini if spec["provider"] == "gemini" else call_openai
+    if spec["provider"] == "gemini":
+        caller = call_gemini
+    elif spec["provider"] == "agy_cli":
+        def caller(spec, key, history, system, max_output_tokens=8192, _root=project_root):
+            # agy -p takes ONE flat text prompt, not a chat-turn array like
+            # the HTTP providers. Flatten system + accumulated history
+            # (retries append turns, exactly like the other providers) into
+            # a single ordered text block, oldest turn first.
+            parts = [system + AGY_NO_TOOLS_ADDENDUM] if system else [AGY_NO_TOOLS_ADDENDUM]
+            parts.extend(
+                f"[{'ASSISTANT' if m['role'] == 'assistant' else 'USER'}]\n{m['content']}"
+                for m in history
+            )
+            return call_agy_print("\n\n".join(parts), spec["api"], _root, AGY_WORKER_TIMEOUT_S)
+    else:
+        caller = call_openai
     # Prefix discipline: system prompt (WORKER_PROTOCOL_SYSTEM) is the constant head;
     # history is append-only for retries; files come before the task string.
     history = [{"role": "user", "content": build_worker_prompt(task, file_specs, model)}]
@@ -1043,21 +1289,23 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
         return answer
 
     answer = call_once()
-    files, summary = parse_worker_response(answer)
-    if not files:
+    files, patches, summary = parse_worker_response(answer)
+    if not files and not patches:
         # Protocol failure: exactly one automatic re-prompt, then fail loudly.
         history.append({"role": "assistant", "content": answer})
         history.append({"role": "user",
-                        "content": "your output did not follow the FILE protocol, re-emit"})
+                        "content": "your output did not follow the FILE/PATCH protocol, re-emit"})
         answer = call_once()
-        files, summary = parse_worker_response(answer)
-        if not files:
-            sys.exit("❌ worker returned no ===FILE=== blocks after one re-prompt "
-                     "— protocol failure")
+        files, patches, summary = parse_worker_response(answer)
+        if not files and not patches:
+            sys.exit("❌ worker returned no ===FILE=== or ===PATCH=== blocks after "
+                     "one re-prompt — protocol failure")
     history.append({"role": "assistant", "content": answer})
 
-    written, rejected = _write_files(files, project_root, allow_patterns)
-    total_files = len(files)
+    written, rejected = _write_files(files, project_root, allow_patterns, allow_full_rewrite)
+    patched, patch_rejected = _apply_patches(patches, project_root, allow_patterns)
+    rejected.extend(patch_rejected)
+    total_files = len(files) + len(patches)
 
     attempt = 1
     verify_status, elapsed, fail_output = "SKIPPED", 0.0, ""
@@ -1070,30 +1318,38 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                 break
             history.append({"role": "user",
                             "content": f"verify failed:\n{_tail_lines(output, 40)}\n"
-                                       f"fix the files and re-emit the full FILE protocol."})
+                                       f"fix the files and re-emit the full FILE/PATCH protocol."})
             attempt += 1
             answer = call_once()
             history.append({"role": "assistant", "content": answer})
-            retry_files, retry_summary = parse_worker_response(answer)
+            retry_files, retry_patches, retry_summary = parse_worker_response(answer)
             if retry_summary:
                 summary = retry_summary
-            if retry_files:
-                more_written, more_rejected = _write_files(retry_files, project_root, allow_patterns)
+            if retry_files or retry_patches:
+                more_written, more_rejected = _write_files(retry_files, project_root, allow_patterns, allow_full_rewrite)
+                more_patched, more_patch_rejected = _apply_patches(retry_patches, project_root, allow_patterns)
+                more_rejected.extend(more_patch_rejected)
                 written.extend(more_written)
+                patched.extend(more_patched)
                 rejected.extend(more_rejected)
-                total_files += len(retry_files)
+                total_files += len(retry_files) + len(retry_patches)
 
     project, commit = project_info()
-    _write_worker_audit(model, echoed_model, project, commit, written, rejected,
-                        verify_cmd, verify_status, attempt, total_cost, via=via)
+    # Patched files are audited alongside written ones (path + resulting size);
+    # the per-patch delta is a summary-only detail.
+    audit_written = written + [(p, sz) for p, sz, _ in patched]
+    _write_worker_audit(model, echoed_model, project, commit, audit_written, rejected,
+                        verify_cmd, verify_status, attempt, total_cost, via=via,
+                        cost_unknown=(spec["provider"] == "agy_cli"))
 
     return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                                   max_attempts, elapsed, summary, total_files, total_cost,
-                                  echoed_model, fail_output, hit_rates)
+                                  echoed_model, fail_output, hit_rates, patched=patched)
 
 
 def _write_worker_audit(model, echoed, project, commit, written, rejected,
-                        verify_cmd, verify_status, attempts, cost, via=None):
+                        verify_cmd, verify_status, attempts, cost, via=None,
+                        cost_unknown=False):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1113,35 +1369,37 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
         
     if via is not None:
         rec["via"] = via
+    if cost_unknown:
+        # agy print mode exposes no token counts — cost is genuinely
+        # unknown, not "$0 verified"; mirrors agent_delegate's agy handling.
+        rec["cost_unknown"] = True
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
 
 
 def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path | None = None,
-                     via: str | None = None, estimate: bool = False) -> str:
+                     via: str | None = None, estimate: bool = False,
+                     allow_full_rewrite: bool = False) -> str:
     ch = get_model_channel(model)
     if not is_channel_enabled(ch):
         msg = f"channel {ch} disabled in channels.json"
         print(msg)
         logger.warning(msg)
-        if model in ("minimax", "gemini"):
-            return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
         raise ValueError(f"All candidates disabled (last tried: {ch})")
 
     try:
-        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
+        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate, allow_full_rewrite)
     except ProviderError as e:
-        if model == "minimax" and e.status in (401, 402, 429):
-            logger.warning(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
-                  f"Per policy MiniMax is NOT recharged; falling back to DeepSeek flash. "
-                  f"Make 'flash' your default from now on.")
-            return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
-        if model == "gemini" and e.status == 429:
-            logger.warning("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
-                  "Spend is now NONZERO.")
-            return worker_delegate(task, "flash", files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate)
-        raise
+        # Owner decree 2026-07-27: silent escalation from a $0 channel to a
+        # PAID one is exactly the "silent overspend" this project bans. No
+        # automatic fallback of any kind — the caller must explicitly accept
+        # the spend by re-running with a named paid model.
+        raise ValueError(
+            f"{model} unavailable ({e}). No automatic paid fallback (owner "
+            f"decree 2026-07-27). Re-run explicitly with model='flash'|'pro'"
+            f"|'minimax' if you accept the spend."
+        ) from e
 
 def _delegate_inner(prompt: str, model: str, session: str = "", system: str = "",
              use_cache: bool = True, max_output_tokens: int = 8192,
@@ -1242,23 +1500,18 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
         msg = f"channel {ch} disabled in channels.json"
         print(msg)
         logger.warning(msg)
-        if model in ("minimax", "gemini"):
-            return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
         raise ValueError(f"All candidates disabled (last tried: {ch})")
 
     try:
         return _delegate_inner(prompt, model, session, system, use_cache, max_output_tokens, via, estimate)
     except ProviderError as e:
-        if model == "minimax" and e.status in (401, 402, 429):
-            logger.warning(f"⚠️  MiniMax failed (HTTP {e.status}) — credit likely exhausted. "
-                  f"Per policy MiniMax is NOT recharged; falling back to DeepSeek flash. "
-                  f"Make 'flash' your default from now on.")
-            return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
-        if model == "gemini" and e.status == 429:
-            logger.warning("⚠️  Gemini free tier exhausted (HTTP 429). Falling back to DeepSeek flash. "
-                  "Spend is now NONZERO.")
-            return delegate(prompt, "flash", session, system, use_cache, max_output_tokens, via, estimate)
-        raise
+        # Owner decree 2026-07-27: no automatic fallback of any kind — see
+        # the identical rationale in worker_delegate() above.
+        raise ValueError(
+            f"{model} unavailable ({e}). No automatic paid fallback (owner "
+            f"decree 2026-07-27). Re-run explicitly with model='flash'|'pro'"
+            f"|'minimax' if you accept the spend."
+        ) from e
 
 def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None, premium_requests=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
@@ -1848,7 +2101,7 @@ def cmd_channels(enable_channel=None, disable_channel=None):
             
     env_disabled = [c.strip() for c in os.environ.get("AI_ROUTER_DISABLE_CHANNELS", "").split(",") if c.strip()]
     
-    for ch in ["agy", "codex", "copilot", "codewhale", "gemini-free", "deepseek", "minimax", "grok"]:
+    for ch in ["agy", "codex", "copilot", "codewhale", "google-ai-pro", "deepseek", "minimax", "grok"]:
         enabled = data.get(ch, {}).get("enabled", True)
         if ch in env_disabled:
             enabled = False
@@ -1886,7 +2139,7 @@ def main():
     ap.add_argument("--plan", help="read the prompt from this file")
     ap.add_argument("--out", help="write the answer to this file (else stdout)")
     ap.add_argument("--model", default=None,
-                    help="model or alias (minimax|flash|pro|grok|gemini or full names); "
+                    help="model or alias (minimax|flash|pro|grok|agy or full names); "
                          "chat/worker default: minimax; agent mode: per-runner default")
     ap.add_argument("--session", default="", help="conversation name to remember across calls")
     ap.add_argument("--new", action="store_true", help="reset the named session before running")
@@ -1912,6 +2165,11 @@ def main():
                     help="worker mode: shell command run after writing (never guessed)")
     ap.add_argument("--retries", type=int, default=1,
                     help="worker mode: verify-failure retries (default 1, max 2)")
+    ap.add_argument("--allow-full-rewrite", action="store_true",
+                    help="worker mode: bypass the large-file/shrink guard and allow a "
+                         "full ===FILE: rewrite of a file >=12KB or a >50%% shrink "
+                         "(dangerous — this guard exists because of the 2026-07-27 "
+                         "50KB-to-245-line truncation incident; use only if you mean it)")
     ap.add_argument("--note", help="send a note to the specified project inbox")
     ap.add_argument("--inbox", action="store_true", help="list unread notes in the current project inbox")
     ap.add_argument("--peek", action="store_true", help="peek at the inbox (show count/subjects, don't mark read)")
@@ -2026,7 +2284,8 @@ def main():
         sys.exit(f"❌ {e}")
 
     if a.files:
-        print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries, estimate=a.estimate))
+        print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries,
+                              estimate=a.estimate, allow_full_rewrite=a.allow_full_rewrite))
         return
 
     use_cache = not a.no_cache

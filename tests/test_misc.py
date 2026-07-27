@@ -47,32 +47,25 @@ def test_call_openai_error_path(monkeypatch):
         call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
     assert exc.value.status == 400
 
-def test_minimax_fallback_end_to_end(monkeypatch, capsys, tmp_path):
+def test_minimax_failure_raises_valueerror(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr("delegate.check_budget", lambda *args, **kwargs: None)
     monkeypatch.setattr("delegate._write_audit", lambda *args, **kwargs: None)
     monkeypatch.setattr("delegate.CACHE", tmp_path / "cache.db")
     
-    flash_called = []
     def mock_post(*args, **kwargs):
         if "minimax" in args[0]:
             return httpx.Response(402, request=httpx.Request("POST", args[0]))
-        flash_called.append(1)
-        return httpx.Response(200, json={
-            "id": "123", "model": "ds",
-            "choices": [{"message": {"content": "flash fallback"}}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
-        }, request=httpx.Request("POST", args[0]))
 
     monkeypatch.setattr("httpx.post", mock_post)
     
     test_args = ["delegate.py", "--model", "minimax", "-p", "hello", "--no-cache"]
     monkeypatch.setattr("sys.argv", test_args)
     
-    main()
-    assert len(flash_called) == 1
+    with pytest.raises(ValueError) as exc:
+        main()
     
-    captured = capsys.readouterr()
-    assert "MiniMax failed (HTTP 402)" in captured.err
+    assert "MiniMax-M3 failed: HTTP 402" in str(exc.value)
+    assert "No automatic paid fallback" in str(exc.value)
 
 def test_show_audit(tmp_path, capsys, monkeypatch):
     audit_file = tmp_path / "audit.log"

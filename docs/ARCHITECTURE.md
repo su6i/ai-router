@@ -42,7 +42,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
               ▼                          ▼                                ▼
       ┌───────────────┐        ┌──────────────────┐            ┌──────────────────┐
       │ FREE tier     │        │ CHEAP coders     │            │ QUALITY / HEAVY  │
-      │ gemini, gemma │        │ deepseek flash/  │            │ sonnet5, grok,   │
+      │ agy (sub)     │        │ deepseek flash/  │            │ sonnet5, grok,   │
       │               │        │ pro, minimax     │            │ fable5           │
       └───────────────┘        └──────────────────┘            └──────────────────┘
                                          │
@@ -121,7 +121,7 @@ always overrides the classifier.
 
 | Tier | Models | Assigned work |
 |---|---|---|
-| **FREE** | gemini-2.5-flash, gemma | Trivial: classification, quick factual lookup, format/JSON conversion, first-draft prose, commit-message drafts. Rate-limited → light one-shots. |
+| **FREE** | agy (Gemini 3.1 Pro, Google AI Pro sub) | Trivial: classification, quick factual lookup, format/JSON conversion, first-draft prose, commit-message drafts. |
 | **SUBSCRIPTION** | codex, copilot | Paid via existing subscriptions, effectively $0 marginal cost. Used via local CLIs (`codex exec`, `copilot`). Tracked in audit.log with premium request counters to prevent quota abuse. Copilot default model is `gpt-5-mini` (0× premium-request multiplier); harder tasks escalate explicitly to `gpt-5` / `claude-sonnet-4.5`. Multipliers are config, not code: `<data>/copilot_multipliers.json`, unknown models bill at `default` (1×); `r cost` cross-checks the ledger against GitHub's billed Copilot **overage** (billing API, `user` scope) — `$0` while inside quota, non-zero once the premium quota is exceeded. |
 | **CHEAP code** | deepseek-flash (default), deepseek-pro | flash: boilerplate, refactors, unit tests, docstrings, SQL, regex. pro: multi-file logic, debugging flash fails at. |
 | **CHEAP reason (prepaid)** | minimax-m3 | Long-form reasoning/analysis, planning drafts, non-code writeups. **Not** clean codegen (verbose `<think>`). Spend prepaid credit first. |
@@ -131,7 +131,7 @@ always overrides the classifier.
 | **EMBEDDINGS** | e5-small (local) | Cache vectors only. Never used for chat. |
 
 Escalation ladder for a coding task:
-`gemini (if trivial) → deepseek-flash → deepseek-pro → sonnet-5 → opus-4.8 (me) → fable-5`.
+`agy (default) → deepseek-flash → deepseek-pro → sonnet-5 → opus-4.8 (me) → fable-5`.
 Each step only if the previous output fails review.
 
 ## 6. Pre-router (mechanical delegation)

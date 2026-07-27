@@ -19,6 +19,18 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "AUDIT", tmp_path / "audit.log")
     monkeypatch.setattr(d, "SESSIONS", tmp_path / "sessions")
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-tests")
+    # call_gemini()/provider=="gemini" dispatch is deliberately kept in
+    # delegate.py for a future paid Gemini registration (owner decree
+    # 2026-07-27 removed the free-quota "gemini" MODELS entry, not the
+    # plumbing) — register a throwaway MODELS entry here so these
+    # cache/session tests can keep exercising that surviving code path.
+    monkeypatch.setitem(d.MODELS, "test-gemini", {
+        "api": "test-gemini-model", "provider": "gemini",
+        "url": "https://generativelanguage.googleapis.com/v1beta",
+        "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY",
+        "quota_channel": "test-free",
+    })
+    monkeypatch.setitem(d.ALIASES, "test-gemini", "test-gemini")
     yield
 
 
@@ -28,26 +40,26 @@ def test_norm_collapses_whitespace():
 
 
 def test_cache_make_key_deterministic_and_sensitive():
-    k1 = d.cache_make_key("gemini", "", "say hi", 8192)
-    k2 = d.cache_make_key("gemini", "sys", "say hi", 8192)
+    k1 = d.cache_make_key("test-gemini", "", "say hi", 8192)
+    k2 = d.cache_make_key("test-gemini", "sys", "say hi", 8192)
     k3 = d.cache_make_key("flash", "", "say hi", 8192)
     # same ignoring whitespace
-    k4 = d.cache_make_key("gemini", "", " say  hi\n", 8192)
+    k4 = d.cache_make_key("test-gemini", "", " say  hi\n", 8192)
     assert k1 != k2
     assert k1 != k3
     assert k1 == k4
 
 
 def test_cache_put_get_roundtrip():
-    key = d.cache_make_key("gemini", "", "hello", 8192)
+    key = d.cache_make_key("test-gemini", "", "hello", 8192)
     assert d.cache_get(key) is None
-    d.cache_put(key, "gemini", "hello", "hi there")
+    d.cache_put(key, "test-gemini", "hello", "hi there")
     assert d.cache_get(key) == "hi there"
 
 
 def test_cache_get_increments_hits():
-    key = d.cache_make_key("gemini", "", "hello", 8192)
-    d.cache_put(key, "gemini", "hello", "hi there")
+    key = d.cache_make_key("test-gemini", "", "hello", 8192)
+    d.cache_put(key, "test-gemini", "hello", "hi there")
     
     con = d._cache_conn()
     hits1 = con.execute("SELECT hits FROM cache WHERE key=?", (key,)).fetchone()[0]
@@ -68,7 +80,7 @@ def test_cache_get_fails_open_on_bad_db(monkeypatch):
 def test_cache_put_fails_open_on_bad_db():
     bad_dir = d.CACHE
     bad_dir.mkdir(parents=True)
-    d.cache_put("k", "gemini", "p", "r")   # must not raise
+    d.cache_put("k", "test-gemini", "p", "r")   # must not raise
 
 
 def test_delegate_cache_miss_then_hit(monkeypatch):
@@ -80,11 +92,11 @@ def test_delegate_cache_miss_then_hit(monkeypatch):
 
     monkeypatch.setattr(d, "call_gemini", fake_call_gemini)
 
-    answer1 = d.delegate("say hi", "gemini")
+    answer1 = d.delegate("say hi", "test-gemini")
     assert answer1 == "cached answer"
     assert calls["n"] == 1
 
-    answer2 = d.delegate("say hi", "gemini")
+    answer2 = d.delegate("say hi", "test-gemini")
     assert answer2 == "cached answer"
     assert calls["n"] == 1, "second identical call must be served from cache, not the provider"
 
@@ -98,8 +110,8 @@ def test_delegate_no_cache_flag_always_calls_provider(monkeypatch):
 
     monkeypatch.setattr(d, "call_gemini", fake_call_gemini)
 
-    d.delegate("say hi", "gemini", use_cache=False)
-    d.delegate("say hi", "gemini", use_cache=False)
+    d.delegate("say hi", "test-gemini", use_cache=False)
+    d.delegate("say hi", "test-gemini", use_cache=False)
     assert calls["n"] == 2, "--no-cache must bypass the cache on every call"
 
 
@@ -112,8 +124,8 @@ def test_delegate_session_bypasses_cache(monkeypatch):
 
     monkeypatch.setattr(d, "call_gemini", fake_call_gemini)
 
-    d.delegate("say hi", "gemini", session="mysession")
-    d.delegate("say hi", "gemini", session="mysession")
+    d.delegate("say hi", "test-gemini", session="mysession")
+    d.delegate("say hi", "test-gemini", session="mysession")
     assert calls["n"] == 2, "a --session conversation must never be served from the exact-hash cache"
 
 
@@ -123,8 +135,8 @@ def test_delegate_writes_audit_line_with_cached_flag(monkeypatch):
 
     monkeypatch.setattr(d, "call_gemini", fake_call_gemini)
 
-    d.delegate("say hi", "gemini")   # miss -> cached: false
-    d.delegate("say hi", "gemini")   # hit  -> cached: true
+    d.delegate("say hi", "test-gemini")   # miss -> cached: false
+    d.delegate("say hi", "test-gemini")   # hit  -> cached: true
 
     lines = d.AUDIT.read_text().strip().splitlines()
     assert len(lines) == 2

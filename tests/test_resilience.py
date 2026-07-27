@@ -71,35 +71,13 @@ def test_immediate_fail(monkeypatch):
     assert exc.value.status == 400
     assert sleeps == []
 
-def test_gemini_fallback(monkeypatch, capsys):
+def test_minimax_failure_raises_no_fallback(monkeypatch):
+    # Owner decree 2026-07-27: silent escalation from a failing channel to a
+    # PAID one is banned outright. minimax failing with HTTP 402 must raise
+    # loudly, and flash (DeepSeek) must never be called automatically.
     sleeps = []
     monkeypatch.setattr("time.sleep", lambda x: sleeps.append(x))
-    
-    flash_called = []
-    def mock_post(*args, **kwargs):
-        if "generativelanguage.googleapis.com" in args[0]:
-            return httpx.Response(429, request=httpx.Request("POST", args[0]))
-        if "api.deepseek.com" in args[0]:
-            flash_called.append(1)
-            return httpx.Response(200, json={
-                "choices": [{"message": {"content": "flash answer"}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 20}
-            }, request=httpx.Request("POST", args[0]))
-        return httpx.Response(500, request=httpx.Request("POST", args[0]))
 
-    monkeypatch.setattr("httpx.post", mock_post)
-    
-    ans = delegate("hello", "gemini", use_cache=False)
-    assert ans == "flash answer"
-    assert len(flash_called) == 1
-    
-    captured = capsys.readouterr()
-    assert "Gemini free tier exhausted (HTTP 429)" in captured.err
-
-def test_minimax_fallback(monkeypatch, capsys):
-    sleeps = []
-    monkeypatch.setattr("time.sleep", lambda x: sleeps.append(x))
-    
     flash_called = []
     def mock_post(*args, **kwargs):
         if "api.minimax.io" in args[0]:
@@ -113,13 +91,11 @@ def test_minimax_fallback(monkeypatch, capsys):
         return httpx.Response(500, request=httpx.Request("POST", args[0]))
 
     monkeypatch.setattr("httpx.post", mock_post)
-    
-    ans = delegate("hello", "minimax", use_cache=False)
-    assert ans == "flash answer"
-    assert len(flash_called) == 1
-    
-    captured = capsys.readouterr()
-    assert "MiniMax failed (HTTP 402)" in captured.err
+
+    with pytest.raises(ValueError, match="No automatic paid fallback"):
+        delegate("hello", "minimax", use_cache=False)
+
+    assert len(flash_called) == 0, "paid flash must NEVER be called automatically"
 
 def test_malformed_response(monkeypatch):
     def mock_post(*args, **kwargs):
@@ -127,10 +103,11 @@ def test_malformed_response(monkeypatch):
 
     monkeypatch.setattr("httpx.post", mock_post)
     
-    with pytest.raises(ProviderError) as exc:
+    with pytest.raises(ValueError) as exc:
         delegate("hello", "flash", use_cache=False)
         
     assert "missing choices[0].message.content" in str(exc.value)
+    assert "No automatic paid fallback" in str(exc.value)
 
 def test_resolve_model_raises_value_error():
     with pytest.raises(ValueError, match="unknown model 'nope'"):

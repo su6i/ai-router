@@ -32,9 +32,9 @@ def test_cost_arithmetic_no_cache_regression():
     import math
     assert math.isclose(old_cost, new_cost, rel_tol=1e-9)
 
-def test_cost_arithmetic_clamp_and_gemini():
-    spec = MODELS["gemini"]
-    # Free tier, should cost 0
+def test_cost_arithmetic_clamp_and_agy():
+    spec = MODELS["agy"]
+    # $0 subscription channel, should cost 0
     assert spec["cin"] == 0.0
     assert spec["cout"] == 0.0
     

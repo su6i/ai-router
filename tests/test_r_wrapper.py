@@ -54,11 +54,11 @@ def test_leading_dash_passes_args_through_unchanged(shell, fake_repo):
     proc = run_r(
         shell,
         fake_repo,
-        'gemini --files a.py --allow-write "src/**" -p "fix it"',
+        'agy --files a.py --allow-write "src/**" -p "fix it"',
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == [
-        "--model", "gemini",
+        "--model", "agy",
         "--files", "a.py",
         "--allow-write", "src/**",
         "-p", "fix it",

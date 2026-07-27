@@ -66,9 +66,14 @@ TOOLS = [
                          "implementation over ~40 lines, test files, boilerplate, or "
                          "the same mechanical change across 2+ files. Golden rule: "
                          "call it BEFORE reading the target files — pass paths, not "
-                         "contents. Model ladder: gemini (free, default) -> flash/pro "
-                         "(DeepSeek) when gemini fails verify. Always pass verify "
-                         "(e.g. 'uv run pytest -q') when the repo has tests. Claude "
+                         "contents. Model ladder: agy (Google AI Pro sub, $0, default) "
+                         "-> flash/pro/minimax (PAID, explicit only) when agy fails "
+                         "verify. No automatic fallback between them (owner decree "
+                         "2026-07-27) — a paid model must be named explicitly. Always "
+                         "pass verify (e.g. 'uv run pytest -q') when the repo has "
+                         "tests. Large existing files (>=12KB) are patched via the "
+                         "router's PATCH protocol, never fully rewritten — a full "
+                         "rewrite of a large file is rejected automatically. Claude "
                          "models are never reachable here."),
         "inputSchema": {
             "type": "object",
@@ -79,7 +84,7 @@ TOOLS = [
                 "allow_write": {"type": "string",
                                 "description": "globs, as --allow-write"},
                 "verify": {"type": "string", "default": ""},
-                "model": {"type": "string", "default": "gemini"},
+                "model": {"type": "string", "default": "agy"},
                 "retries": {"type": "integer", "default": 1, "maximum": 2},
                 "workdir": {"type": "string",
                             "description": "absolute path of the repo the files live in"},
@@ -252,7 +257,7 @@ def handle_delegate_worker(args: dict) -> dict:
     retries = args.get("retries", 1)
     if not isinstance(retries, int) or isinstance(retries, bool) or not (0 <= retries <= 2):
         raise ValueError("'retries' must be an integer in [0, 2]")
-    model = d.resolve_model(args.get("model", "gemini"))
+    model = d.resolve_model(args.get("model", "agy"))
 
     with contextlib.redirect_stdout(io.StringIO()):
         summary = d.worker_delegate(
@@ -441,7 +446,7 @@ def handle_request(msg: dict):
             if tool == "delegate_research":
                 m = "grok"
             elif tool == "delegate_worker":
-                m = "gemini"
+                m = "agy"
             elif tool == "delegate_agent":
                 m = "None"
         print(f"[req {id_}] {method} {tool} model={m}", file=sys.stderr)

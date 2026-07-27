@@ -31,7 +31,13 @@ def test_gemini_key_in_header_not_url(monkeypatch):
         return _FakeResponse()
 
     monkeypatch.setattr(d, "_post_with_retry", fake_post)
-    spec = d.MODELS["gemini"]
+    # call_gemini() is deliberately kept in delegate.py even though no
+    # MODELS entry uses provider "gemini" today (owner decree 2026-07-27) —
+    # test it directly against an inline spec, with no MODELS dependency.
+    spec = {"api": "gemini-2.5-flash", "provider": "gemini",
+            "url": "https://generativelanguage.googleapis.com/v1beta",
+            "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY",
+            "quota_channel": "test-free"}
     d.call_gemini(spec, "SECRET-KEY-123", [{"role": "user", "content": "hi"}], "")
     assert "SECRET-KEY-123" not in captured["url"]
     assert "key=" not in captured["url"]
@@ -49,10 +55,10 @@ def test_redact_scrubs_key_query_param():
 
 
 def test_redact_scrubs_env_key_values(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyENVLEAK456")
+    monkeypatch.setenv("MINIMAX_API_KEY", "AIzaSyENVLEAK456")
     out = server._redact("boom AIzaSyENVLEAK456 in message")
     assert "AIzaSyENVLEAK456" not in out
-    assert "<GEMINI_API_KEY...K456>" in out
+    assert "<MINIMAX_API_KEY...K456>" in out
 
 
 def test_rpc_error_applies_redaction(monkeypatch):

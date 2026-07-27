@@ -36,10 +36,11 @@ REASON = (
     "delegation-first (Cost Routing): this is a {n}-line code write to {path} — "
     "grunt implementation belongs to the cheap worker, not the premium architect. "
     "Call mcp__ai-router__delegate_worker instead: pass prompt + files (paths, "
-    "not contents) + allow_write + workdir + verify. Ladder: gemini (free) -> "
-    "flash/pro. If this code is genuinely architecture-critical and only the "
-    "architect may write it, state why in one line and retry the exact same "
-    "call — the second attempt on this file will pass."
+    "not contents) + allow_write + workdir + verify. Ladder: agy (Google AI Pro "
+    "sub, $0, default) -> flash/pro/minimax (PAID, explicit only). If this code "
+    "is genuinely architecture-critical and only the architect may write it, "
+    "state why in one line and retry the exact same call — the second attempt "
+    "on this file will pass."
 )
 
 

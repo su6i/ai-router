@@ -4,12 +4,15 @@ tools (delegate_research, delegate_worker) over stdio JSON-RPC.
 Wire format verified against the Model Context Protocol specification
 revision 2025-11-25 (see comment at the top of mcp/server.py).
 
-No network calls: the server subprocess is booted through a tiny bootstrap
-script that monkeypatches BOTH delegate.call_gemini (canned stub, the same
-fake-call_gemini pattern used in test_delegate_worker.py) and
-delegate.call_openai (hard-fails if ever invoked) before running
-server.main(). This is required, not optional: server.main() calls
-delegate.load_env(), which reloads real provider keys from the shared vault
+No network calls, no real `agy` subprocess: the server subprocess is booted
+through a tiny bootstrap script that monkeypatches delegate.call_gemini
+(canned stub — kept in delegate.py for research-tool tests via a throwaway
+"test-gemini" MODELS entry, owner decree 2026-07-27 removed the real
+free-quota "gemini" entry but not the plumbing), delegate.call_agy_print
+(canned stub for the new agy worker-backend default), and delegate.call_openai
+(hard-fails if ever invoked) before running server.main(). This is required,
+not optional: server.main() calls delegate.load_env(), which reloads real
+provider keys from the shared vault
 (~/.local/share/agent-projects/_shared/secrets/.env) regardless of what this
 test's subprocess env sets or unsets — so any un-stubbed call path would be a
 live, billable request. GEMINI_API_KEY is also set to a placeholder so
@@ -34,6 +37,18 @@ sys.path.insert(0, {src!r})
 sys.path.insert(0, {mcp_dir!r})
 import delegate as d
 
+# call_gemini()/provider=="gemini" is deliberately kept in delegate.py (owner
+# decree 2026-07-27 removed the free-quota "gemini" MODELS entry, not the
+# plumbing) -- register a throwaway MODELS entry so delegate_research tests
+# can still exercise it via the canned fake below.
+d.MODELS["test-gemini"] = {{
+    "api": "test-gemini-model", "provider": "gemini",
+    "url": "https://generativelanguage.googleapis.com/v1beta",
+    "cin": 0.0, "cout": 0.0, "key": "GEMINI_API_KEY",
+    "quota_channel": "test-free",
+}}
+d.ALIASES["test-gemini"] = "test-gemini"
+
 _RESPONSES = {responses!r}
 _calls = {{"n": 0}}
 
@@ -45,6 +60,13 @@ def _fake_call_gemini(spec, key, history, system, max_output_tokens=8192):
     return (text.format(max_output_tokens=max_output_tokens), spec["api"],
             "resp-%d" % _calls["n"], 10, 5, 0, None)
 
+def _fake_call_agy_print(prompt, model_name, project_root, timeout_s):
+    text = _RESPONSES[min(_calls["n"], len(_RESPONSES) - 1)]
+    _calls["n"] += 1
+    if text == "__RAISE__":
+        raise RuntimeError("stubbed provider failure")
+    return (text, model_name, None, 0, 0, 0, None)
+
 def _fake_call_openai(spec, key, history, system, max_output_tokens=8192):
     # Hard safety net: this test suite must make zero real provider calls.
     # load_env() (called by server.main()) reloads real keys from the shared
@@ -53,6 +75,7 @@ def _fake_call_openai(spec, key, history, system, max_output_tokens=8192):
     raise AssertionError("call_openai must never be invoked in tests")
 
 d.call_gemini = _fake_call_gemini
+d.call_agy_print = _fake_call_agy_print
 d.call_openai = _fake_call_openai
 
 def _fake_agent_delegate(*args, **kwargs):
@@ -151,7 +174,7 @@ def test_tools_call_delegate_research_returns_capped_answer_with_cost(tmp_path):
         _send(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                      "params": {"name": "delegate_research",
                                 "arguments": {"question": "what is 2+2?",
-                                              "model": "gemini",
+                                              "model": "test-gemini",
                                               "max_output_tokens": 321}}})
         resp = _recv(proc)
         assert "error" not in resp
@@ -185,7 +208,6 @@ def test_tools_call_delegate_worker_writes_file_within_workdir(tmp_path):
                                               "files": "src/foo.py",
                                               "allow_write": "src/**",
                                               "verify": "true",
-                                              "model": "gemini",
                                               "retries": 1,
                                               "workdir": str(workdir)}}})
         resp = _recv(proc)
@@ -194,6 +216,29 @@ def test_tools_call_delegate_worker_writes_file_within_workdir(tmp_path):
         assert len(text.splitlines()) <= 25
         assert (workdir / "src" / "foo.py").read_text() == "def foo():\n    return 1\n"
         assert not (tmp_path / "src").exists()  # nothing written outside workdir
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+
+def test_tools_call_delegate_worker_defaults_to_agy(tmp_path):
+    # WO-0023 requirement: delegate_worker's MCP default model must be
+    # "agy" (the $0 coding default), not the removed "gemini".
+    workdir = tmp_path / "project2"
+    workdir.mkdir()
+    response = "===FILE: src/bar.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n"
+    proc = _spawn_server(tmp_path, [response])
+    try:
+        _init(proc)
+        _send(proc, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                     "params": {"name": "delegate_worker",
+                                "arguments": {"prompt": "add bar()",
+                                              "files": "src/bar.py",
+                                              "allow_write": "src/**",
+                                              "workdir": str(workdir)}}})
+        resp = _recv(proc)
+        assert "error" not in resp
+        assert (workdir / "src" / "bar.py").read_text() == "x = 1\n"
     finally:
         proc.stdin.close()
         proc.wait(timeout=5)
@@ -225,7 +270,7 @@ def test_tools_call_delegate_failure_returns_jsonrpc_error(tmp_path):
         _init(proc)
         _send(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                      "params": {"name": "delegate_research",
-                                "arguments": {"question": "anything", "model": "gemini"}}})
+                                "arguments": {"question": "anything", "model": "test-gemini"}}})
         resp = _recv(proc)
         assert "result" not in resp
         assert resp["error"]["code"] < 0
@@ -265,13 +310,13 @@ def test_sequential_tools_call_behaves_correctly(tmp_path):
         _init(proc)
         _send(proc, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                      "params": {"name": "delegate_research",
-                                "arguments": {"question": "q1", "model": "gemini"}}})
+                                "arguments": {"question": "q1", "model": "test-gemini"}}})
         resp1 = _recv(proc)
         assert resp1["result"]["content"][0]["text"].startswith("ans1")
 
         _send(proc, {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
                      "params": {"name": "delegate_research",
-                                "arguments": {"question": "q2", "model": "gemini"}}})
+                                "arguments": {"question": "q2", "model": "test-gemini"}}})
         resp2 = _recv(proc)
         assert resp2["result"]["content"][0]["text"].startswith("ans2")
     finally:

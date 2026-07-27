@@ -78,8 +78,8 @@ Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_route
 python3 src/delegate.py --model flash -p "summarize this changelog"
 ```
 
-`--model` accepts an alias (default `minimax`; also `flash`, `pro`, `grok`,
-`gemini`, `gemini-lite`, `gemma`, or a full model name — see `ALIASES` in
+`--model` accepts an alias (default `minimax`; also `agy`, `flash`, `pro`, `grok`,
+or a full model name — see `ALIASES` in
 `src/delegate.py`). `--plan <file>` reads the prompt from a file instead of
 `-p`; `--out <file>` writes the answer to a file instead of stdout.
 
@@ -216,6 +216,10 @@ cost          : $0.000421 · model echoed: deepseek-v4-flash
 
 Full wire protocol: the private `DELEGATE-TOOL-DESIGN.md` (vault).
 
+### Large File Guard
+
+A full-file rewrite of an existing file >= 12KB (`LARGE_FILE_BYTES`) is rejected, as is any rewrite shrinking a file below 50% (`MAX_SHRINK_RATIO`) of its current size. Such edits must use the `===PATCH:` / `===OLD===` / `===NEW===` protocol, applied by literal exact match where the old text must occur exactly once. CLI escape hatch `--allow-full-rewrite`; not exposed on MCP.
+
 ### Worker context discipline
 
 To prevent workers from churning through unnecessary tokens or getting lost in huge files, `delegate.py` strictly enforces context hygiene:
@@ -261,7 +265,7 @@ Schema (see `budgets.example.json` in the repo root):
   "weekly_usd": 2.0,
   "per_session_usd": 0.50,
   "per_project_monthly_usd": {},
-  "daily_calls": {"google-ai-pro": 50, "gemini-free": 400}
+  "daily_calls": {"google-ai-pro": 50}
 }
 ```
 
@@ -298,7 +302,7 @@ Then delegate from any directory without touching an agent's context:
 
 ```bash
 r flash "write a regex that matches ISO-8601 dates"   # chat (words → one -p)
-r gemini --files src/calc.py --allow-write "src/**" --verify "pytest -q" -p "fix the bug"
+r agy --files src/calc.py --allow-write "src/**" --verify "pytest -q" -p "fix the bug"
 r cost --today                                        # print today's cost report
 r audit                                               # print the ledger
 ```
@@ -317,7 +321,7 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 | Door | Best For | Default Model | Notes |
 | --- | --- | --- | --- |
 | **`delegate_research`** | Fact lookup, live-data checks, doc verification | `grok` (web search) | Answer is capped by `max_output_tokens`. |
-| **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `gemini` (free) | Pass known file paths. Generated code never crosses the wire. |
+| **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `agy` (free, Google AI Pro sub) | Pass known file paths. Generated code never crosses the wire. |
 | **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
 | **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
 
@@ -333,7 +337,7 @@ Three tools only, all capped — no uncapped chat tool, ever:
   verification (default model `grok` = live web/X search). Answer is capped
   by `max_output_tokens` (default 500, max 2000) — a low default, not a
   promise.
-- **`delegate_worker`** — grunt coding work (default model `gemini`). Same
+- **`delegate_worker`** — grunt coding work (default model `agy`). Same
   contract as CLI worker mode: `files`/`allow_write`/`verify`/`retries`
   mirror `--files`/`--allow-write`/`--verify`/`--retries`; `workdir` (an
   absolute path) is required because the MCP server process does not
@@ -396,9 +400,7 @@ From `MODELS` in `src/delegate.py` (cost per 1M tokens):
 | `flash` | `deepseek-v4-flash` | DeepSeek | $0.14 / $0.28 | General grunt work — implementation, refactor, tests, boilerplate |
 | `pro` | `deepseek-v4-pro` | DeepSeek | $0.435 / $0.87 | Reasoner — escalation target when `flash` fails or needs deeper reasoning |
 | `grok` | `grok-4.3` | xAI | $1.25 / $2.50 | Second opinion / current-events knowledge — not for routine work |
-| `gemini` | `gemini-2.5-flash` | Google (free tier) | $0 / $0 | Free-tier grunt work — commit messages, format conversion, categorization |
-| `gemini-lite` | `gemini-2.5-flash-lite` | Google (free tier) | $0 / $0 | Free-tier, lighter/faster variant of `gemini` |
-| `gemma` | `gemma-4-31b-it` | Google (free tier) | $0 / $0 | Free-tier, open-weight model |
+| `agy` | `Gemini 3.1 Pro (High)` | Google AI Pro sub (local `agy` CLI) | $0 / $0 | Default coding worker — mechanical changes, tests, boilerplate |
 
 Priority order and full routing rationale (MiniMax credit-exhaustion
 fallback, why Claude is never in this router, provider vs. subscription-CLI
@@ -409,12 +411,11 @@ distinction): `STRATEGY.md` and `ROLES.md` in
 
 - **Retries**: All provider calls automatically retry on transient errors (HTTP 429, 5xx, or timeouts) with an exponential backoff (1s, then 3s). Hard errors (like HTTP 400 or malformed JSON responses) fail immediately with a specific `ProviderError`.
 - **MiniMax Fallback**: If the prepaid `minimax` model fails with a credit exhaustion or 401/402/429 error after retries, the router will automatically fall back to `flash` (`deepseek-v4-flash`).
-- **Gemini Fallback**: If `gemini` exhausts the free tier rate limits (HTTP 429) after retries, the router will automatically fall back to `flash`. A loud warning is printed because the fallback incurs non-zero costs.
-- **HTTP 503**: A 503 means the provider itself is down (e.g. Google's free gemini endpoint under load). The built-in 3-attempt retry already ran; there is NO automatic paid fallback for 503 — per the $0-first policy a transient upstream outage does not authorize paid spend. Wait and retry later, or ask the owner before switching channels.
+- **HTTP 503**: A 503 means the provider itself is down (e.g. a paid provider endpoint under load). The built-in 3-attempt retry already ran; there is NO automatic paid fallback for 503 — per the $0-first policy a transient upstream outage does not authorize paid spend. Wait and retry later, or ask the owner before switching channels.
 
 ### Secret hygiene
 
-- API keys never travel in URLs (gemini uses the `x-goog-api-key` header), and every error message the MCP server sends over the wire is scrubbed (`key=` query params and any loaded key values are redacted).
+- API keys never travel in URLs (e.g., passed via headers like `x-api-key`), and every error message the MCP server sends over the wire is scrubbed (`key=` query params and any loaded key values are redacted).
 - **Stale server caveat**: MCP server processes are long-lived — a session started before a router update keeps running the OLD code until that session restarts. After a router merge, restart open agent sessions (or `/mcp` reconnect) to pick up fixes.
 
 ## Status
