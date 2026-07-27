@@ -7,6 +7,32 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+
+- **Pinned Telegram dashboards (`src/dashboards.py`, `dashboard_push`)** — Two
+  Telegram messages the owner can glance at instead of asking an agent: an
+  unread-inbox digest (grouped by project, via the existing
+  `list_notes(..., peek=True)` — rendering a dashboard never marks a note
+  read) and an open-tasks digest parsed from `_memory/QUEUE.md`'s
+  `## 🎯 ترتیبِ اجرا` table (rows already marked `✅` are skipped). Both are
+  sent once, pinned, and thereafter *edited in place*; the render is
+  sha256-hashed against the last-pushed content so an unchanged dashboard
+  costs zero Telegram API calls, and a deleted/unpinned message is detected
+  from Telegram's error and transparently re-sent + re-pinned. Every dynamic
+  value is HTML-escaped (`parse_mode=HTML`, not MarkdownV2 — Persian prose and
+  repo names routinely contain `<`/`*`) and output is capped at Telegram's
+  4096-char limit with a `… +N more` marker. Both dashboards end with a RAG
+  ingest freshness line (`RAG ingest: 4h ago (312 rows)`, `⚠️ stale` past 24h,
+  `⚠️ never run` if `src/ingest.py` has never completed — `ingest.py` now
+  writes `<DATA_DIR>/last_ingest.json` on every successful run). Every
+  `send_note()` call also fires a best-effort short Telegram ping and
+  refreshes the pinned inbox dashboard (`notify=False` to suppress, e.g. in
+  tests) — a Telegram outage never blocks or loses the note itself. New CLI
+  flags `--dashboard inbox|tasks|both` (push) and `--dashboard-dry-run
+  inbox|tasks|both` (render to stdout, no API call) on `src/delegate.py`, and
+  a new MCP tool `dashboard_push` that returns only a short status line,
+  never the dashboard body.
+
 ### Fixed
 
 - **CI ruff now uses the project's pinned version, not a floating one.** The

@@ -6,8 +6,9 @@ import json
 import os
 import sys
 import psycopg
+import datetime as dt
 
-from delegate import load_env, AUDIT
+from delegate import load_env, AUDIT, DATA_DIR
 
 def parse_line(line: str) -> dict | None:
     line = line.strip()
@@ -92,6 +93,12 @@ def ingest():
             conn.commit()
 
     print(f"Ingest complete. Inserted: {inserted}. Skipped malformed/errors: {malformed}")
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "last_ingest.json").write_text(json.dumps({
+        "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "rows": inserted
+    }))
 
 if __name__ == "__main__":
     ingest()

@@ -1615,7 +1615,7 @@ def send_to_owner(files: list[str], title: str) -> str:
     return "message_id=" + ",".join(str(m) for m in msg_ids)
 
 
-def send_note(to_project: str, message: str, priority: str = "normal", subject: str = "") -> str:
+def send_note(to_project: str, message: str, priority: str = "normal", subject: str = "", notify: bool = True) -> str:
     """Send a note to another project's inbox."""
     if priority not in ("low", "normal", "high"):
         priority = "normal"
@@ -1672,6 +1672,21 @@ read: false"""
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
         
+    if notify:
+        bot_token = os.environ.get("AI_ROUTER_BOT_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_OWNER_CHAT_ID")
+        if bot_token and chat_id:
+            try:
+                import dashboards
+                ping_text = f"🔔 note → {to_project} · from {from_project} · {priority}\n"
+                if subject:
+                    ping_text += f"{subject}\n"
+                ping_text += redacted_message[:200]
+                dashboards.send_note_ping(ping_text)
+                dashboards.push_dashboard("inbox")
+            except Exception as e:
+                logger.warning(f"Telegram notification failed: {e}")
+
     return f"note sent to {to_project} inbox ({file_path.name})"
 
 
@@ -1924,6 +1939,10 @@ def main():
     ap.add_argument("--send-to-owner", action="store_true", help="send files to owner's telegram")
     ap.add_argument("--file", action="append", default=[], help="file to send to owner (repeatable, absolute path)")
     ap.add_argument("--title", default="", help="title (caption) for the file being sent")
+    ap.add_argument("--dashboard", choices=["inbox", "tasks", "both"], default=None,
+                    help="push the given pinned Telegram dashboard(s) (edits in place)")
+    ap.add_argument("--dashboard-dry-run", choices=["inbox", "tasks", "both"], default=None,
+                    help="render the given dashboard(s) to stdout — no Telegram API call")
     a = ap.parse_args()
 
     handler = logging.StreamHandler(sys.stderr)
@@ -1980,6 +1999,7 @@ def main():
         return
 
     if a.note:
+        load_env()
         if not a.prompt:
             sys.exit("❌ need -p PROMPT or message string for the note body")
         try:
@@ -2000,6 +2020,26 @@ def main():
         load_env()
         try:
             print(send_to_owner(a.file, a.title))
+        except Exception as e:  # noqa: BLE001
+            sys.exit(f"❌ {e}")
+        return
+
+    if a.dashboard_dry_run:
+        import dashboards  # lazy: see circular-import note
+        kinds = ["inbox", "tasks"] if a.dashboard_dry_run == "both" else [a.dashboard_dry_run]
+        for k in kinds:
+            text = dashboards.render_inbox() if k == "inbox" else dashboards.render_tasks()
+            print(f"===== {k} =====")
+            print(text)
+        return
+
+    if a.dashboard:
+        load_env()
+        import dashboards  # lazy
+        kinds = ["inbox", "tasks"] if a.dashboard == "both" else [a.dashboard]
+        try:
+            for k in kinds:
+                print(f"{k}: {dashboards.push_dashboard(k)}")
         except Exception as e:  # noqa: BLE001
             sys.exit(f"❌ {e}")
         return

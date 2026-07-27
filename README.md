@@ -12,6 +12,7 @@ need **cost-per-task as a SQL query** instead of a guess. Full design:
 | Path | What |
 | --- | --- |
 | `src/delegate.py` | Single LLM gateway (grunt-work delegation) — provider-echoed proof, exact-hash cache, session memory, worker mode (`--files`), audit ledger |
+| `src/dashboards.py` | Two pinned, edit-in-place Telegram dashboards (unread inbox notes, open `QUEUE.md` tasks) + a short Telegram ping fired on every `send_note()` |
 | `mcp/server.py` | MCP-lite server — exposes `delegate_research`/`delegate_worker` as MCP tools over stdio, so any MCP host can discover cheap delegation without a CLI |
 | `tests/` | pytest suite for `src/delegate.py` and `mcp/server.py` |
 | `docs/ARCHITECTURE.md` | Full design: Postgres + pgvector schema, exact-hash prompt cache, Prometheus/Grafana observability |
@@ -62,13 +63,27 @@ Execute a task-note from another agent with strict push/merge refusal and a $0-f
 python3 src/delegate.py --route-task <path-to-note-file> --verify "uv run pytest -q"
 ```
 
-### Telegram File Delivery
+### Telegram Delivery & Dashboards
 
 You can send files directly to the owner's Telegram as documents (attachments) using the `--send-to-owner` CLI flag or MCP tool. This is useful for delivering WO/note files without losing them in chat.
 
 ```bash
 python3 src/delegate.py --send-to-owner --file /absolute/path/to/file.md --title "Short title"
 ```
+
+**Pinned dashboards.** Instead of spamming the owner's chat, `src/dashboards.py` maintains two Telegram messages that get **pinned once and edited in place** thereafter — an unread-inbox digest and an open-`QUEUE.md`-tasks digest:
+
+```bash
+# Push/refresh both pinned dashboards (edits in place; no-op — zero API calls — if content is unchanged)
+python3 src/delegate.py --dashboard both        # or: inbox | tasks
+
+# Preview the rendered dashboard(s) on stdout without touching Telegram at all
+python3 src/delegate.py --dashboard-dry-run both
+```
+
+Each render groups unread notes by project (via `list_notes(..., peek=True)`, which — critically — never marks a note read just because a dashboard glanced at it) or parses the `## 🎯 ترتیبِ اجرا` table out of `~/.local/share/agent-projects/_memory/QUEUE.md`, skipping rows already marked `✅`. Both dashboards end with an **RAG ingest freshness** line (`RAG ingest: 4h ago (312 rows)`, with a `⚠️ stale` marker past 24h or `⚠️ never run` if `src/ingest.py` has never completed) so nobody trusts a stale semantic index. Output is capped at Telegram's 4096-char limit (oldest/lowest-priority items get truncated with a `… +N more` marker) and every dynamic value is HTML-escaped (`parse_mode=HTML`, not MarkdownV2 — Persian prose and repo names routinely contain `<`/`*`).
+
+Every `send_note()` call (CLI `--note`, MCP `send_note`) also fires a short, best-effort Telegram ping (`🔔 note → <project> · from <project> · <priority>`) and refreshes the pinned inbox dashboard — a Telegram outage never blocks or loses the note itself (pass `notify=False` to the Python API to suppress this, e.g. in tests). The MCP tool `dashboard_push` (`{"kind": "inbox"|"tasks"|"both"}`) exposes the push side to any MCP host; like every other tool here it returns only a short status line (`"inbox: edited (id=...) · tasks: unchanged"`), never the dashboard body.
 
 Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_router_bot`) and `TELEGRAM_OWNER_CHAT_ID` in the rule-035 vault (`ai-router/secrets/.env`). This is a distinct bot from any other project's Telegram bot.
 
@@ -320,6 +335,7 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 | **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `gemini` (free) | Pass known file paths. Generated code never crosses the wire. |
 | **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
 | **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
+| **`dashboard_push`** | Refresh the two pinned Telegram dashboards | N/A | Edits in place; returns a short status line only, never the dashboard body. |
 
 Register it once, user scope, so it's available in every project:
 
