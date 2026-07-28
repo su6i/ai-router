@@ -705,6 +705,43 @@ def save_history(session: str, history: list):
     (SESSIONS / f"{session}.json").write_text(json.dumps(history, ensure_ascii=False, indent=1))
 
 
+WORKER_SESSIONS = DATA_DIR / "worker_sessions.json"
+
+def _load_worker_sessions() -> dict:
+    if not WORKER_SESSIONS.exists():
+        return {}
+    try:
+        return json.loads(WORKER_SESSIONS.read_text())
+    except Exception:
+        return {}
+
+def _prune_worker_sessions(sessions: dict) -> dict:
+    now = time.time()
+    return {k: v for k, v in sessions.items() if now - v.get("ts", 0) <= 86400}
+
+def _save_worker_sessions(sessions: dict):
+    pruned = _prune_worker_sessions(sessions)
+    WORKER_SESSIONS.parent.mkdir(parents=True, exist_ok=True)
+    WORKER_SESSIONS.write_text(json.dumps(pruned, indent=1) + "\n")
+
+def _get_session_conversation(session_key: str) -> str | None:
+    return _load_worker_sessions().get(session_key, {}).get("conversation_id")
+
+def _set_session_conversation(session_key: str, conversation_id: str):
+    sessions = _load_worker_sessions()
+    sessions[session_key] = {"conversation_id": conversation_id, "ts": time.time()}
+    _save_worker_sessions(sessions)
+
+def _clear_worker_session(session_key: str | None = None):
+    if session_key is None:
+        WORKER_SESSIONS.write_text("{}\n")
+    else:
+        sessions = _load_worker_sessions()
+        if session_key in sessions:
+            sessions.pop(session_key)
+            _save_worker_sessions(sessions)
+
+
 # ---- exact-hash cache (playbook #13 — deterministic only, no semantic cache) --
 def _norm(s):
     if not s:
@@ -872,7 +909,10 @@ AGY_NO_TOOLS_ADDENDUM = (
 )
 
 
-def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: int = AGY_WORKER_TIMEOUT_S):
+_LAST_AGY_NUM_TURNS: int | None = None
+_LAST_AGY_DURATION_S: float | None = None
+
+def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: int = AGY_WORKER_TIMEOUT_S, conversation_id: str | None = None):
     """Invoke `agy` in headless print mode as a pure TEXT GENERATOR for the
     worker protocol (SPEC v1 / PATCH protocol). The router — not agy — is
     the only writer: parse_worker_response() + _write_files()/_apply_patches()
@@ -897,12 +937,18 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     Return shape matches what call_openai/call_gemini return, so
     _worker_delegate_inner can treat all three callers identically:
     (content, echoed_model, request_id, pin, pout, cache, cache_miss).
-    agy print mode exposes no token counts, so pin/pout/cache are always 0;
-    callers must record cost_unknown=True for this channel (google-ai-pro),
-    mirroring how agent_delegate already handles the agy runner.
+    Using --output-format json DOES expose real input_tokens/output_tokens/cache_read_tokens,
+    and the 3rd tuple slot now carries agy's conversation_id.
     """
+    global _LAST_AGY_NUM_TURNS, _LAST_AGY_DURATION_S
+    _LAST_AGY_NUM_TURNS = None
+    _LAST_AGY_DURATION_S = None
+
     cmd = ["agy", "-p", prompt, "--model", model_name, "--mode", "plan",
-           "--dangerously-skip-permissions", "--print-timeout", f"{timeout_s}s"]
+           "--dangerously-skip-permissions", "--output-format", "json",
+           "--print-timeout", f"{timeout_s}s"]
+    if conversation_id is not None:
+        cmd.extend(["--conversation", conversation_id])
     try:
         r = subprocess.run(cmd, cwd=str(project_root), capture_output=True,  # noqa: PLW1510
                            text=True, timeout=timeout_s + 30)
@@ -914,10 +960,28 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     if r.returncode != 0:
         reason = (r.stderr or r.stdout or "").strip()[:500]
         raise ProviderError("agy", r.returncode, reason)
-    content = (r.stdout or "").strip()
-    if not content:
+    raw_stdout = (r.stdout or "").strip()
+    if not raw_stdout:
         raise ProviderError("agy", "EMPTY", "empty stdout from agy print mode")
-    return (content, model_name, None, 0, 0, 0, None)
+        
+    try:
+        data = json.loads(raw_stdout)
+    except json.JSONDecodeError:
+        raise ProviderError("agy", "BAD_JSON", raw_stdout[:300])
+        
+    if data.get("status") != "SUCCESS":
+        raise ProviderError("agy", "BAD_JSON", raw_stdout[:300])
+        
+    content = data.get("response", "").strip()
+    usage = data.get("usage", {})
+    pin = usage.get("input_tokens", 0)
+    pout = usage.get("output_tokens", 0)
+    cache = usage.get("cache_read_tokens", 0)
+    conv_id = data.get("conversation_id")
+    _LAST_AGY_NUM_TURNS = data.get("num_turns")
+    _LAST_AGY_DURATION_S = data.get("duration_seconds")
+    
+    return (content, model_name, conv_id, pin, pout, cache, None)
 
 
 def call_xai_responses(spec: dict, key: str, history: list, system: str,
@@ -1222,7 +1286,7 @@ def _tail_lines(text: str, n: int) -> str:
 
 
 def run_verify(cmd: str, cwd: Path):
-    """Run --verify. Output is captured, NEVER printed in full. Returns (ok, output, elapsed_s)."""
+    """Run --verify. Output is captured, NEVER printed in full. Returns (ok, output, elapsed_s, returncode)."""
     t0 = time.time()
     try:
         # shell=True is deliberate and required to support shell pipelines (e.g., cmd1 | cmd2)
@@ -1231,9 +1295,11 @@ def run_verify(cmd: str, cwd: Path):
                            text=True, timeout=VERIFY_TIMEOUT)
         ok = r.returncode == 0
         output = (r.stdout or "") + (r.stderr or "")
+        returncode = r.returncode
     except subprocess.TimeoutExpired:
         ok, output = False, f"TIMEOUT after {VERIFY_TIMEOUT}s"
-    return ok, output, time.time() - t0
+        returncode = None
+    return ok, output, time.time() - t0, returncode
 
 
 def _get_channel_system_prompt(model: str) -> str:
@@ -1327,7 +1393,8 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
 def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path | None = None,
                      via: str | None = None, estimate: bool = False,
-                     allow_full_rewrite: bool = False) -> str:
+                     allow_full_rewrite: bool = False, session_key: str | None = None,
+                     resume: bool = True, self_fix: bool = True) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
     spec = MODELS[model]
@@ -1374,31 +1441,61 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
     if spec["provider"] == "gemini":
         caller = call_gemini
     elif spec["provider"] == "agy_cli":
+        initial_conv_id = _get_session_conversation(session_key) if (session_key and resume) else None
+        current_conv_id = [initial_conv_id]
+        send_delta_only = [False]
         def caller(spec, key, history, system, max_output_tokens=8192, _root=project_root):
             # agy -p takes ONE flat text prompt, not a chat-turn array like
             # the HTTP providers. Flatten system + accumulated history
             # (retries append turns, exactly like the other providers) into
             # a single ordered text block, oldest turn first.
-            parts = [system + AGY_NO_TOOLS_ADDENDUM] if system else [AGY_NO_TOOLS_ADDENDUM]
-            parts.extend(
-                f"[{'ASSISTANT' if m['role'] == 'assistant' else 'USER'}]\n{m['content']}"
-                for m in history
-            )
-            return call_agy_print("\n\n".join(parts), spec["api"], _root, AGY_WORKER_TIMEOUT_S)
+            if send_delta_only[0] and current_conv_id[0] is not None:
+                prompt_text = history[-1]["content"]
+            else:
+                parts = [system + AGY_NO_TOOLS_ADDENDUM] if system else [AGY_NO_TOOLS_ADDENDUM]
+                parts.extend(
+                    f"[{'ASSISTANT' if m['role'] == 'assistant' else 'USER'}]\n{m['content']}"
+                    for m in history
+                )
+                prompt_text = "\n\n".join(parts)
+            kwargs = {}
+            if current_conv_id[0] is not None:
+                kwargs["conversation_id"] = current_conv_id[0]
+            try:
+                res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S, **kwargs)
+            except ProviderError:
+                if current_conv_id[0] is not None:
+                    if session_key:
+                        _clear_worker_session(session_key)
+                    current_conv_id[0] = None
+                    res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S)
+                else:
+                    raise
+            
+            new_conv_id = res[2]
+            if new_conv_id is not None:
+                current_conv_id[0] = new_conv_id
+                if session_key:
+                    _set_session_conversation(session_key, new_conv_id)
+            return res
     else:
         caller = call_openai
     # Prefix discipline: system prompt (WORKER_PROTOCOL_SYSTEM) is the constant head;
     # history is append-only for retries; files come before the task string.
     history = [{"role": "user", "content": build_worker_prompt(task, file_specs, model)}]
     total_cost = 0.0
+    total_pin = total_pout = total_cache = 0
     echoed_model = spec["api"]
     hit_rates = []
 
     def call_once():
-        nonlocal total_cost, echoed_model
+        nonlocal total_cost, total_pin, total_pout, total_cache, echoed_model
         answer, echoed, _rid, pin, pout, cache, _cache_miss = caller(spec, key, history, WORKER_PROTOCOL_SYSTEM)
 
         total_cost += compute_token_cost(spec, pin, pout, cache)
+        total_pin += pin
+        total_pout += pout
+        total_cache += cache
 
         echoed_model = echoed or echoed_model
         if pin > 0:
@@ -1427,17 +1524,37 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
     attempt = 1
     verify_status, elapsed, fail_output = "SKIPPED", 0.0, ""
     if verify_cmd:
+        verify_max_attempts = max_attempts
+        if spec["provider"] == "agy_cli":
+            verify_max_attempts = min(max_attempts, 2) if self_fix else 1
+            
         while True:
-            ok, output, elapsed = run_verify(verify_cmd, project_root)
+            ok, output, elapsed, returncode = run_verify(verify_cmd, project_root)
             verify_status = "PASS" if ok else "FAIL"
-            if ok or attempt >= max_attempts:
+            if ok or attempt >= verify_max_attempts:
                 fail_output = output if not ok else ""
                 break
-            history.append({"role": "user",
-                            "content": f"verify failed:\n{_tail_lines(output, 40)}\n"
-                                       f"fix the files and re-emit the full FILE/PATCH protocol."})
-            attempt += 1
-            answer = call_once()
+            
+            if spec["provider"] == "agy_cli":
+                tail = _redact(output[-4000:])
+                content = (f"verify command failed: {verify_cmd}\n"
+                           f"exit code: {returncode}\n"
+                           f"output (last ~4000 chars):\n{tail}\n\n"
+                           f"Fix the files and re-emit the full FILE/PATCH protocol.")
+                history.append({"role": "user", "content": content})
+                send_delta_only[0] = True
+                try:
+                    attempt += 1
+                    answer = call_once()
+                finally:
+                    send_delta_only[0] = False
+            else:
+                history.append({"role": "user",
+                                "content": f"verify failed:\n{_tail_lines(output, 40)}\n"
+                                           f"fix the files and re-emit the full FILE/PATCH protocol."})
+                attempt += 1
+                answer = call_once()
+                
             history.append({"role": "assistant", "content": answer})
             retry_files, retry_patches, retry_summary = parse_worker_response(answer)
             if retry_summary:
@@ -1452,44 +1569,79 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                 total_files += len(retry_files) + len(retry_patches)
 
     project, commit = project_info()
+    
+    self_fix_rounds = 0
+    self_fix_outcome = "skipped"
+    if spec["provider"] == "agy_cli" and self_fix and attempt > 1:
+        self_fix_rounds = 1
+        self_fix_outcome = "fixed" if verify_status == "PASS" else "failed"
+
+    # agy-only: surface the live conversation id + agy's own num_turns/duration
+    # from the LAST call_agy_print() this invocation made, so the ledger row
+    # itself is proof of warm-session reuse (D1: "Record num_turns and
+    # duration_seconds") — not just the printed cache-hit-rate summary line.
+    agy_conversation_id = current_conv_id[0] if spec["provider"] == "agy_cli" else None
+    agy_num_turns = _LAST_AGY_NUM_TURNS if spec["provider"] == "agy_cli" else None
+    agy_duration_s = _LAST_AGY_DURATION_S if spec["provider"] == "agy_cli" else None
+
     # Patched files are audited alongside written ones (path + resulting size);
     # the per-patch delta is a summary-only detail.
     audit_written = written + [(p, sz) for p, sz, _ in patched]
+    # agy: $0 by subscription, tokens real — NOT cost_unknown (was a stale zero-tokens bug)
     _write_worker_audit(model, echoed_model, project, commit, audit_written, rejected,
                         verify_cmd, verify_status, attempt, total_cost, via=via,
-                        cost_unknown=(spec["provider"] == "agy_cli"))
+                        cost_unknown=False, self_fix_rounds=self_fix_rounds, self_fix_outcome=self_fix_outcome,
+                        agy_conversation_id=agy_conversation_id, agy_num_turns=agy_num_turns,
+                        agy_duration_s=agy_duration_s, pin=total_pin, pout=total_pout, cache=total_cache)
 
     return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
-                                  max_attempts, elapsed, summary, total_files, total_cost,
+                                  verify_max_attempts if verify_cmd else max_attempts,
+                                  elapsed, summary, total_files, total_cost,
                                   echoed_model, fail_output, hit_rates, patched=patched)
 
 
 def _write_worker_audit(model, echoed, project, commit, written, rejected,
                         verify_cmd, verify_status, attempts, cost, via=None,
-                        cost_unknown=False):
+                        cost_unknown=False, self_fix_rounds=0, self_fix_outcome="skipped",
+                        agy_conversation_id=None, agy_num_turns=None, agy_duration_s=None,
+                        pin=0, pout=0, cache=0):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "model_asked": model, "model_echoed": echoed,
         "session": None, "project": project, "commit": commit,
+        # Raw token counts across every call this delegation made (initial +
+        # any protocol/self-fix retries) — same field names as the chat-mode
+        # ledger (_write_audit's "in"/"out"/"cache"). Was always 0/0/0 for
+        # agy before D1 fixed call_agy_print()'s token accounting.
+        "in": pin, "out": pout, "cache": cache,
         "cost_usd": round(cost, 6), "cached": False,
         "mode": "worker",
         "files_written": [p for p, _ in written],
         "files_rejected": [p for p, _ in rejected],
         "verify_cmd": verify_cmd, "verify_status": verify_status,
         "attempts": attempts,
+        "self_fix_rounds": self_fix_rounds,
+        "self_fix_outcome": self_fix_outcome,
     }
     # For standalone worker delegate, use MODELS quota channel if not explicitly provided
     q_channel = MODELS.get(model, {}).get("quota_channel") if model in MODELS else None
     if q_channel:
         rec["quota_channel"] = q_channel
-        
+
     if via is not None:
         rec["via"] = via
     if cost_unknown:
-        # agy print mode exposes no token counts — cost is genuinely
-        # unknown, not "$0 verified"; mirrors agent_delegate's agy handling.
         rec["cost_unknown"] = True
+    # agy-only warm-session proof fields (D1/D2): the live conversation id and
+    # agy's own reported num_turns/duration_seconds for the last call this
+    # delegation made — absent entirely for non-agy providers.
+    if agy_conversation_id is not None:
+        rec["agy_conversation_id"] = agy_conversation_id
+    if agy_num_turns is not None:
+        rec["agy_num_turns"] = agy_num_turns
+    if agy_duration_s is not None:
+        rec["agy_duration_s"] = agy_duration_s
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
 
@@ -1497,7 +1649,8 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
 def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path | None = None,
                      via: str | None = None, estimate: bool = False,
-                     allow_full_rewrite: bool = False) -> str:
+                     allow_full_rewrite: bool = False, session_key: str | None = None,
+                     resume: bool = True, self_fix: bool = True) -> str:
     ch = get_model_channel(model)
     if not is_channel_enabled(ch):
         msg = f"channel {ch} disabled in channels.json"
@@ -1506,7 +1659,7 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
         raise ValueError(f"All candidates disabled (last tried: {ch})")
 
     try:
-        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate, allow_full_rewrite)
+        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate, allow_full_rewrite, session_key, resume, self_fix)
     except ProviderError as e:
         # Owner decree 2026-07-27: silent escalation from a $0 channel to a
         # PAID one is exactly the "silent overspend" this project bans. No
@@ -1887,7 +2040,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     verify_elapsed = 0.0
     fail_output = ""
     if verify_cmd and not timed_out:
-        ok, vout, verify_elapsed = run_verify(verify_cmd, project_root)
+        ok, vout, verify_elapsed, _rc = run_verify(verify_cmd, project_root)
         verify_status = "PASS" if ok else "FAIL"
         if not ok:
             fail_output = vout
@@ -2020,7 +2173,8 @@ def send_note(to_project: str, message: str, priority: str = "normal", subject: 
     from_project, _ = project_info()
     
     now = dt.datetime.now().astimezone()
-    slug = "".join(c if c.isalnum() else "-" for c in (subject or "note")).strip("-")[:20] or "note"
+    slug_raw = "".join(c if (c.isascii() and c.isalnum()) else "-" for c in (subject or "note"))
+    slug = re.sub(r"-+", "-", slug_raw).strip("-")[:20] or "note"
     filename = f"NOTE-{now.strftime('%Y-%m-%d-%H%M%S')}-{from_project}-{slug}.md"
     file_path = inbox_dir / filename
     
@@ -2318,11 +2472,17 @@ def main():
                     help="worker mode: shell command run after writing (never guessed)")
     ap.add_argument("--retries", type=int, default=1,
                     help="worker mode: verify-failure retries (default 1, max 2)")
+    ap.add_argument("--no-self-fix", action="store_true",
+                    help="disable the one-round agy self-fix retry on verify failure")
     ap.add_argument("--allow-full-rewrite", action="store_true",
                     help="worker mode: bypass the large-file/shrink guard and allow a "
                          "full ===FILE: rewrite of a file >=12KB or a >50%% shrink "
                          "(dangerous — this guard exists because of the 2026-07-27 "
                          "50KB-to-245-line truncation incident; use only if you mean it)")
+    ap.add_argument("--session-key", default="", help="worker mode: session key to resume conversation")
+    ap.add_argument("--worker-sessions", action="store_true", help="list all worker sessions and exit")
+    ap.add_argument("--worker-sessions-clear", nargs="?", const="__ALL__", default=None,
+                    help="clear worker sessions (bare flag clears all, or specify a key to clear one)")
     ap.add_argument("--note", help="send a note to the specified project inbox")
     ap.add_argument("--inbox", action="store_true", help="list unread notes in the current project inbox")
     ap.add_argument("--peek", action="store_true", help="peek at the inbox (show count/subjects, don't mark read)")
@@ -2369,6 +2529,35 @@ def main():
 
     if a.channels or a.enable or a.disable:
         cmd_channels(enable_channel=a.enable, disable_channel=a.disable)
+        return
+
+    if a.worker_sessions:
+        sessions = _load_worker_sessions()
+        if not sessions:
+            print("No worker sessions found.")
+        else:
+            print(f"{'SESSION KEY':<25} | {'CONVERSATION ID':<36} | AGE")
+            print("-" * 80)
+            now = time.time()
+            for key, data in sorted(sessions.items()):
+                conv_id = data.get("conversation_id", "")
+                age_s = now - data.get("ts", 0)
+                if age_s < 120:
+                    age_str = f"{int(age_s)}s"
+                elif age_s < 7200:
+                    age_str = f"{int(age_s/60)}m"
+                else:
+                    age_str = f"{int(age_s/3600)}h"
+                print(f"{key:<25} | {conv_id:<36} | {age_str}")
+        return
+
+    if a.worker_sessions_clear is not None:
+        key_to_clear = None if a.worker_sessions_clear == "__ALL__" else a.worker_sessions_clear
+        _clear_worker_session(key_to_clear)
+        if key_to_clear:
+            print(f"↺ cleared worker session '{key_to_clear}'")
+        else:
+            print("↺ cleared all worker sessions")
         return
 
     if a.inbox:
@@ -2463,7 +2652,8 @@ def main():
 
     if a.files:
         print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries,
-                              estimate=a.estimate, allow_full_rewrite=a.allow_full_rewrite))
+                              estimate=a.estimate, allow_full_rewrite=a.allow_full_rewrite,
+                              session_key=a.session_key or None, self_fix=not a.no_self_fix))
         return
 
     use_cache = not a.no_cache

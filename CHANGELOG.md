@@ -32,6 +32,24 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **Warm `agy` worker sessions, one-round self-fix, and real token accounting
+  (owner decree 2026-07-24).** `call_agy_print()` now calls `agy` with
+  `--output-format json`, fixing a real bug: the router recorded zero
+  `pin`/`pout`/`cache` and `cost_unknown=True` for every `agy` call, even
+  though `agy` genuinely exposes real token usage — cost stays $0 (Google AI
+  Pro subscription) but the ledger row is no longer lying about tokens.
+  `--session-key <name>` resumes the SAME `agy` `conversation_id` across
+  separate `delegate.py` invocations (state in
+  `<DATA_DIR>/worker_sessions.json`, never git, pruned after 24h; a stale id
+  self-heals with one silent cold retry, never a hard failure). On a verify
+  failure, the `agy` channel gets exactly ONE self-fix round — the verify
+  command, exit code, and a truncated+redacted tail of its output are sent
+  back into the same warm conversation instead of a full context replay —
+  opt out with `--no-self-fix`; the ledger records `self_fix_rounds` /
+  `self_fix_outcome`. `send_note()`'s filename slug is now ASCII-only
+  (`c.isascii() and c.isalnum()`), fixing Persian subjects producing Persian
+  filenames that broke the manager surfacing hook.
+
 - **Large-file write guard (owner decree 2026-07-27) — the reason this release
   exists.** On 2026-07-27 a three-line fix delegated to a cheap model came back
   as a *full-file rewrite* that shrank a 50KB source file to 245 lines; only
