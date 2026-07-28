@@ -183,6 +183,8 @@ def test_incremental_reindex_mocked(monkeypatch, tmp_path):
             if self.queries[-1][0].startswith("SELECT id FROM code_chunks"):
                 return None
             return (1,) # dummy id
+        def fetchall(self):
+            return [(1,)]
 
     class FakeConn:
         def __init__(self):
@@ -229,9 +231,9 @@ def test_incremental_reindex_mocked(monkeypatch, tmp_path):
     ci.cmd_reindex(FakeArgs())
 
     queries = " ".join([q[0] for q in conn.cur.queries])
-    assert "DELETE FROM code_chunks WHERE repo = %s AND path = ANY(%s)" in queries # vanished.py deleted
+    assert "DELETE FROM code_chunks WHERE repo = %s AND path = ANY(%s) RETURNING id" in queries # vanished.py deleted
     assert "INSERT INTO code_chunks" in queries # fake_file.py inserted
-    assert "DELETE FROM code_chunks WHERE repo = %s AND path = %s AND NOT" in queries # gc chunks in fake_file.py
+    assert "DELETE FROM code_chunks WHERE repo = %s AND path = %s AND NOT (chunk_hash = ANY(%s)) RETURNING id" in queries # gc chunks in fake_file.py
 
 def test_file_discovery_ignores_untracked(monkeypatch, tmp_path):
     import subprocess
@@ -255,6 +257,7 @@ def test_file_discovery_ignores_untracked(monkeypatch, tmp_path):
         def __exit__(self, *args): pass
         def execute(self, *args, **kwargs): pass
         def fetchone(self): return (1,)
+        def fetchall(self): return []
         
     class FakeConn:
         def __init__(self):

@@ -262,3 +262,33 @@ def test_send_note_notify_true_fails_gracefully(fake_agent_projects, monkeypatch
     
     notes = list((proj / "workspace" / "inbox").glob("NOTE-*.md"))
     assert len(notes) == 1
+
+def test_rag_index_freshness_line_byte_identical_and_flags(fake_agent_projects, monkeypatch):
+    import datetime as dt
+    now = dt.datetime.now().astimezone()
+    iso_2h = (now - dt.timedelta(hours=2)).isoformat()
+    iso_3d = (now - dt.timedelta(days=3)).isoformat()
+
+    mock_state = {
+        "rules": {"last_ingest": iso_2h, "status": "ok", "docs": 41, "chunks": 100, "stale": False},
+        "sessions": {"last_ingest": None, "status": "failed", "docs": 0, "chunks": 0, "stale": True},
+        "code": {"last_ingest": iso_3d, "status": "failed", "docs": 36, "chunks": 588, "stale": True}
+    }
+    monkeypatch.setattr(dashboards.rag_ingest, "rag_freshness", lambda: mock_state)
+
+    out1 = dashboards.render_tasks()
+    out2 = dashboards.render_tasks()
+
+    assert out1 == out2
+    
+    assert "rules 2h ago" in out1
+    assert "sessions ⚠️ never run" in out1
+    assert "code ⚠️ stale 3d" in out1
+
+def test_rag_index_freshness_line_fail_open(fake_agent_projects, monkeypatch):
+    def boom():
+        raise RuntimeError("boom")
+    monkeypatch.setattr(dashboards.rag_ingest, "rag_freshness", boom)
+    
+    out = dashboards.render_tasks()
+    assert "🧠 RAG: unknown" in out

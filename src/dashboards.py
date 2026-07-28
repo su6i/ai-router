@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import delegate as d
 import httpx
+import rag_ingest
 
 def _state_file() -> Path:
     """Resolved on every call (never cached at import time) so tests can
@@ -66,6 +67,30 @@ def _age_str(iso_timestamp: str) -> str:
             return f"{int(seconds // 86400)}d"
     except Exception:  # noqa: BLE001
         return "?"
+
+
+# NOTE: _rag_freshness_line is for the audit log ingest. Do not confuse it with
+# the newer RAG semantic index ingest (_rag_index_freshness_line).
+def _rag_index_freshness_line() -> str:
+    try:
+        fresh = rag_ingest.rag_freshness()
+        parts = []
+        for coll, label, key in (("rules", "docs", "docs"), ("sessions", "chunks", "chunks"), ("code", "chunks", "chunks")):
+            info = fresh.get(coll, {})
+            last_ingest = info.get("last_ingest")
+            stale = info.get("stale", True)
+            count = info.get(key, 0)
+            
+            if last_ingest is None:
+                token = "⚠️ never run"
+            else:
+                age = _age_str(last_ingest)
+                token = f"⚠️ stale {age}" if stale else f"{age} ago"
+                
+            parts.append(f"{coll} {token} · {count} {label}")
+        return "🧠 RAG: " + " | ".join(parts)
+    except Exception:  # noqa: BLE001
+        return "🧠 RAG: unknown"
 
 
 def _rag_freshness_line() -> str:
@@ -168,7 +193,7 @@ def render_tasks() -> str:
     queue_file = d.AGENT_PROJECTS / "_memory" / "QUEUE.md"
     now_str = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
     header = f"📋 <b>Open Tasks</b> ({now_str})\n"
-    footer = _rag_freshness_line()
+    footer = _rag_freshness_line() + "\n" + _rag_index_freshness_line()
     
     if not queue_file.exists():
         raw = f"📋 Open Tasks\n\nQUEUE.md not found.\n\n{footer}"

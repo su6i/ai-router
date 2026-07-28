@@ -169,6 +169,27 @@ A one-line stale-index warning is printed when the index commit differs from
 `HEAD`. The same retrieval is exposed to MCP hosts as the `code_lookup` tool
 ("use this instead of exploratory file reads").
 
+### RAG index & auto-ingest
+
+`src/rag_ingest.py` unifies semantic indexing for rules, sessions, and code into a single process. It is incremental by default (skipping unchanged content via fast hashing) and tracks freshness via a state file (`rag_state.json`). You can interact with the ingest CLI directly:
+
+```bash
+# Ingest all collections (incremental)
+uv run src/rag_ingest.py --collection all
+
+# Force a full rebuild for sessions, outputting JSON status
+uv run src/rag_ingest.py --collection sessions --force --json
+
+# Check current freshness status
+uv run src/rag_ingest.py --status
+```
+
+The system uses three event triggers to keep the index fresh automatically (installed via `hooks/install_rag_triggers.sh`):
+1. A git `post-merge` hook on the `agent-constitution` repo triggers `rules` ingest.
+2. A 30-minute cron sweep (`vault-sweep`) triggers `sessions` ingest for `SESSION.md` appends.
+3. Inbox notes trigger `sessions` ingest.
+The freshness of the RAG index is reported at the bottom of the 📋 open-tasks Telegram dashboard.
+
 ### Cache
 
 Identical one-shot calls (same model + system + prompt + max_output_tokens) hit the exact-hash
