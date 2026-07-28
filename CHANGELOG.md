@@ -47,6 +47,45 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Fixed
 
+- **`delegate_research` never performed live search — grok answered from
+  stale training memory for months.** `src/delegate.py` sent grok a plain
+  `chat/completions` call with no search tool at all, while `mcp/server.py`
+  advertised "default grok = live web/X search". The old live-search request
+  field (`search_parameters`) is now HTTP 410 Gone ("Live search is
+  deprecated. Please switch to the Agent Tools API"). Grok now routes
+  through xAI's `/v1/responses` endpoint with a server-side `web_search`
+  tool via the new `call_xai_responses()`; `--no-search` (CLI) / `search`
+  (MCP, default true) forces the old cheap plain-chat path when live data
+  isn't needed.
+  - **Real cost is $0.02–$0.05/call, not $0.003.** `usage.cost_in_usd_ticks`
+    (xAI's own billed cost; 1 tick = 1e-10 USD) proved each server-side
+    `web_search` call bills a flat **$0.005** on top of tokens, and a
+    research question typically triggers 3-6 calls — the token-table
+    estimate the router used to publish ($0.003) doesn't see this at all.
+    The ledger now records `cost_in_usd_ticks / 1e10` verbatim for xAI
+    `/v1/responses` calls (plus `web_search_calls` in the audit row) instead
+    of the token-table guess; the table is kept only for the pre-flight
+    `--estimate` path. A live 5-question benchmark measured **$0.034/call
+    average** for grok-4.3.
+  - **Runaway-cost guard: `max_tool_calls` (default 6, `XAI_MAX_TOOL_CALLS`),
+    overridable via `--max-tool-calls` / the MCP `max_tool_calls` arg.** A
+    live probe found ONE uncapped grok-4.5 research question made 15
+    `web_search` calls, pulled 209,956 input tokens, and cost **$0.389** —
+    100x a caller's expectation. A warning is logged whenever
+    `web_search_calls` hits the cap (the answer may be truncated research).
+  - **Added `grok-4.5` as an opt-in model** (`resolve_model("grok-4.5")` /
+    `grok45` / `grok4.5`); **`grok` (4.3) stays the default.** A live 5-
+    question A/B found grok-4.3 5/5 correct at $0.172 total vs grok-4.5's
+    4/5 (it contradicted 4.3 and dropped a requested detail) at $0.618
+    total — 3.6x the cost and 2.2x the latency for equal-or-worse quality.
+  - **Cost math previously ignored cached-input pricing for grok and any
+    long-context surcharge.** `grok`/`grok-4.5` now define `cin_cached`
+    (0.20 / 0.30 per 1M) and `cin_long`/`cout_long` + `long_ctx_threshold`
+    (200k tokens — the rate doubles above it); the shared
+    `compute_token_cost()` helper (used by both the chat and worker paths)
+    now applies both, where before a >200k-token grok call silently
+    under-reported cost.
+
 - **CI ruff now uses the project's pinned version, not a floating one.** The
   `Test` workflow ran `uvx ruff check`, which fetches the *latest* ruff each
   run, while local checks use `uv run ruff` (the locked `0.15.22`). When ruff

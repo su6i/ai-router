@@ -160,7 +160,7 @@ def test_tools_list_exposes_exactly_tools(server_proc):
 
     research = next(t for t in tools if t["name"] == "delegate_research")
     assert set(research["inputSchema"]["properties"]) == {
-        "question", "model", "max_output_tokens"}
+        "question", "model", "max_output_tokens", "search", "max_tool_calls"}
 
     worker = next(t for t in tools if t["name"] == "delegate_worker")
     assert set(worker["inputSchema"]["properties"]) == {

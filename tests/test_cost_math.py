@@ -17,20 +17,35 @@ def test_cost_arithmetic_with_cache():
     assert math.isclose(cost, 0.357, rel_tol=1e-9)
 
 def test_cost_arithmetic_no_cache_regression():
-    spec = MODELS["grok"]  # no cin_cached
-    assert "cin_cached" not in spec
+    # WO-ai-router-0024: grok now DOES have cin_cached (0.20) — the old
+    # "no cin_cached" assumption is stale. With cached=0 the cached slice is
+    # zero either way, so the old and new formulas must still agree.
+    spec = MODELS["grok"]
+    assert spec["cin_cached"] == 0.20
     pin, pout, cached = 1_000_000, 1_000_000, 0
-    
+
     # Old formula: pin * cin + pout * cout
     old_cost = (pin / 1e6 * spec["cin"]) + (pout / 1e6 * spec["cout"])
-    
-    # New formula should be the same
+
+    # New formula should be the same when cached == 0
     cached_clamped = min(cached, pin)
     cin_cached = spec.get("cin_cached", spec["cin"])
     new_cost = ((pin - cached_clamped) / 1e6 * spec["cin"]) + (cached_clamped / 1e6 * cin_cached) + (pout / 1e6 * spec["cout"])
-    
+
     import math
     assert math.isclose(old_cost, new_cost, rel_tol=1e-9)
+
+
+def test_grok_cin_cached_changes_cost_vs_uncached():
+    # WO-ai-router-0024: adding cin_cached=0.20 to grok changes the estimate
+    # for any call with a nonzero cache hit — this is a deliberate behavior
+    # change the WO calls out explicitly, so it gets its own positive test.
+    from delegate import compute_token_cost
+    spec = MODELS["grok"]
+    pin, pout, cached = 1_000_000, 100_000, 500_000
+    cost_with_cache = compute_token_cost(spec, pin, pout, cached)
+    cost_without_cache = compute_token_cost(spec, pin, pout, 0)
+    assert cost_with_cache < cost_without_cache
 
 def test_cost_arithmetic_clamp_and_agy():
     spec = MODELS["agy"]

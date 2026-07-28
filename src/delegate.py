@@ -56,6 +56,12 @@ GIT_TIMEOUT = 3
 SQLITE_TIMEOUT = 5
 CACHE_MAX_ROWS = 5000
 CACHE_MAX_AGE_DAYS = 90
+# xAI /v1/responses: default cap on server-side web_search calls per request.
+# A live A/B (2026-07-27) found an uncapped grok-4.5 question made 15 calls,
+# pulled 209,956 input tokens, and cost $0.389 in a single call (at
+# $0.005/call plus the search-result tokens, an unbounded question can cost
+# 100x what the caller expects). Overridable via --max-tool-calls / MCP arg.
+XAI_MAX_TOOL_CALLS = 6
 
 logger = logging.getLogger("ai_router")
 
@@ -101,6 +107,42 @@ class ProviderError(Exception):
         self.model = model
         self.status = status
         self.short_reason = short_reason
+
+# xAI's /v1/responses endpoint reports its OWN billed cost in
+# usage.cost_in_usd_ticks (1 tick = 1e-10 USD) — this is ground truth
+# (WO-ai-router-0024, live-verified 2026-07-27) and MUST override the
+# token-table estimate, because each server-side web_search call bills a
+# flat $0.005 that no token count can see. call_xai_responses stashes it
+# here (module-level, not a return value) so the existing 7-tuple
+# provider-call contract every caller relies on stays unchanged; the caller
+# pops it right after invoking the provider function.
+_LAST_TRUE_COST: dict | None = None
+
+
+def _pop_last_true_cost() -> dict | None:
+    global _LAST_TRUE_COST
+    val = _LAST_TRUE_COST
+    _LAST_TRUE_COST = None
+    return val
+
+
+def compute_token_cost(spec: dict, pin: int, pout: int, cached: int) -> float:
+    """Table-based fallback cost — used whenever a provider does not report
+    a true billed cost (every provider except xAI's /v1/responses). Honors
+    cin_cached for the cached slice of pin, and the long-context surcharge
+    some providers apply once pin exceeds long_ctx_threshold input tokens
+    (cin_long/cout_long) — unmodelled before WO-ai-router-0024, which
+    under-reported cost on any call whose prompt exceeded that threshold.
+    """
+    cached = min(cached, pin)
+    threshold = spec.get("long_ctx_threshold")
+    if threshold is not None and pin > threshold:
+        cin, cout = spec.get("cin_long", spec["cin"]), spec.get("cout_long", spec["cout"])
+    else:
+        cin, cout = spec["cin"], spec["cout"]
+    cin_cached = spec.get("cin_cached", cin)
+    return (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * cout
+
 
 def _post_with_retry(model, *args, **kwargs):
     kwargs["timeout"] = HTTP_TIMEOUT
@@ -169,8 +211,16 @@ MODELS = {
                     "cin": 0.14, "cin_cached": 0.014, "cout": 0.28, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
     "pro":     {"api": "deepseek-v4-pro",   "provider": "openai", "url": "https://api.deepseek.com/v1",
                     "cin": 0.435, "cin_cached": 0.0435, "cout": 0.87, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
-    "grok":    {"api": "grok-4.3",          "provider": "openai", "url": "https://api.x.ai/v1",
-                    "cin": 1.25, "cout": 2.50, "key": "GROK_API_KEY", "quota_channel": "grok-api"},
+    "grok":    {"api": "grok-4.3",          "provider": "xai", "url": "https://api.x.ai/v1",
+                    "cin": 1.25, "cin_cached": 0.20, "cout": 2.50,
+                    "cin_long": 2.50, "cout_long": 5.00, "long_ctx_threshold": 200_000,
+                    "search_call_usd": 0.005,
+                    "key": "GROK_API_KEY", "quota_channel": "grok-api"},
+    "grok-4.5": {"api": "grok-4.5",         "provider": "xai", "url": "https://api.x.ai/v1",
+                    "cin": 2.00, "cin_cached": 0.30, "cout": 6.00,
+                    "cin_long": 4.00, "cout_long": 12.00, "long_ctx_threshold": 200_000,
+                    "search_call_usd": 0.005,
+                    "key": "GROK_API_KEY", "quota_channel": "grok-api"},
     # $0 coding default (owner decree 2026-07-27). provider "agy_cli" is NOT an
     # HTTP provider — it is dispatched to call_agy_print() (subprocess to the
     # `agy` binary), never to call_openai/call_gemini. "key": "" is deliberate:
@@ -188,6 +238,7 @@ ALIASES = {
     "deepseek-flash": "flash", "deepseek-v4-flash": "flash",
     "pro": "pro", "reasoner": "pro", "deepseek-pro": "pro", "deepseek-v4-pro": "pro",
     "grok": "grok", "grok-4.3": "grok", "grok4": "grok",
+    "grok-4.5": "grok-4.5", "grok45": "grok-4.5", "grok4.5": "grok-4.5",
     "agy": "agy", "antigravity": "agy", "gemini-3-pro": "agy",
 }
 
@@ -723,7 +774,8 @@ def cache_prune():
 
 
 def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
-                  cache, cost, dt_s, cached=False, via=None, cache_miss=None):
+                  cache, cost, dt_s, cached=False, via=None, cache_miss=None,
+                  web_search_calls=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -737,11 +789,13 @@ def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
     q_channel = MODELS.get(model, {}).get("quota_channel") if model in MODELS else None
     if q_channel:
         rec["quota_channel"] = q_channel
-        
+
     if via is not None:
         rec["via"] = via
     if cache_miss is not None:
         rec["cache_miss"] = cache_miss
+    if web_search_calls is not None:
+        rec["web_search_calls"] = web_search_calls
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
 
@@ -864,6 +918,72 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     if not content:
         raise ProviderError("agy", "EMPTY", "empty stdout from agy print mode")
     return (content, model_name, None, 0, 0, 0, None)
+
+
+def call_xai_responses(spec: dict, key: str, history: list, system: str,
+                        max_output_tokens: int = 8192, web_search: bool = True,
+                        max_tool_calls: int = XAI_MAX_TOOL_CALLS):
+    """POST {url}/responses — xAI's Agent Tools API. The old chat/completions
+    live-search request field is 410 Gone ("Live search is deprecated.
+    Please switch to the Agent Tools API") as of 2026-07; this is the
+    replacement, live-verified by the architect on 2026-07-27
+    (WO-ai-router-0024).
+
+    `max_tool_calls` caps server-side web_search calls per request — see
+    XAI_MAX_TOOL_CALLS above for why this is mandatory, not cosmetic.
+
+    Response shape has NO `output_text` convenience field. Text lives at
+    output[] -> item.type=="message" -> item.content[] ->
+    c.type=="output_text" -> c.text (citations ride in c.annotations[] as
+    url_citation). output[] also carries `reasoning` and `web_search_call`
+    items, which are skipped. usage.cost_in_usd_ticks (1 tick = 1e-10 USD)
+    is xAI's own billed cost and is stashed via the module-level
+    _LAST_TRUE_COST for the caller to use verbatim instead of the
+    token-table estimate (the table cannot see per-search-call billing).
+    """
+    msgs = ([{"role": "system", "content": system}] if system else []) + history
+    body = {"model": spec["api"], "input": msgs, "max_output_tokens": max_output_tokens}
+    if web_search:
+        body["tools"] = [{"type": "web_search"}]
+        body["max_tool_calls"] = max_tool_calls
+
+    r = _post_with_retry(spec["api"], f"{spec['url']}/responses",
+                         headers={"Authorization": f"Bearer {key}"}, json=body)
+    d = r.json()
+
+    if d.get("status") != "completed":
+        raise ProviderError(spec["api"], 200,
+            f"incomplete response: status={d.get('status')!r} "
+            f"incomplete_details={d.get('incomplete_details')!r}")
+
+    text = None
+    for item in d.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for c in item.get("content") or []:
+            if c.get("type") == "output_text":
+                text = c.get("text")
+                break
+        if text is not None:
+            break
+    if text is None:
+        raise ProviderError(spec["api"], 200, "malformed response: no output_text in output[]")
+
+    u = d.get("usage", {})
+    cached = (u.get("input_tokens_details") or {}).get("cached_tokens", 0)
+    tool_usage = u.get("server_side_tool_usage_details") or {}
+    web_search_calls = tool_usage.get("web_search_calls", 0)
+    if web_search and web_search_calls >= max_tool_calls:
+        logger.warning(f"⚠️  xai web_search hit max_tool_calls={max_tool_calls} "
+                        f"— answer may be truncated research")
+
+    global _LAST_TRUE_COST
+    ticks = u.get("cost_in_usd_ticks")
+    _LAST_TRUE_COST = {"cost_usd": ticks / 1e10, "web_search_calls": web_search_calls} if ticks is not None else None
+
+    return (text, d.get("model"), d.get("id"),
+            u.get("input_tokens", 0), u.get("output_tokens", 0),
+            cached, None)
 
 
 # Sentinel-line protocol (not markdown fences: file content may itself contain
@@ -1277,12 +1397,9 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
     def call_once():
         nonlocal total_cost, echoed_model
         answer, echoed, _rid, pin, pout, cache, _cache_miss = caller(spec, key, history, WORKER_PROTOCOL_SYSTEM)
-        
-        cached = min(cache, pin)
-        cin = spec["cin"]
-        cin_cached = spec.get("cin_cached", cin)
-        total_cost += (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * spec["cout"]
-        
+
+        total_cost += compute_token_cost(spec, pin, pout, cache)
+
         echoed_model = echoed or echoed_model
         if pin > 0:
             hit_rates.append(f"{cache/pin*100:.1f}%")
@@ -1403,7 +1520,8 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
 
 def _delegate_inner(prompt: str, model: str, session: str = "", system: str = "",
              use_cache: bool = True, max_output_tokens: int = 8192,
-             via: str | None = None, estimate: bool = False) -> str:
+             via: str | None = None, estimate: bool = False,
+             web_search: bool = True, max_tool_calls: int = XAI_MAX_TOOL_CALLS) -> str:
     spec = MODELS[model]
     key = os.environ.get(spec["key"], "")
     if not key:
@@ -1442,16 +1560,26 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
     logger.debug(f"key: set (len={len(key)})")
 
     t0 = time.time()
-    caller = call_gemini if spec["provider"] == "gemini" else call_openai
+    if spec["provider"] == "gemini":
+        caller = call_gemini
+    elif spec["provider"] == "xai":
+        def caller(s, k, h, sy, max_output_tokens=8192):
+            return call_xai_responses(s, k, h, sy, max_output_tokens=max_output_tokens,
+                                       web_search=web_search, max_tool_calls=max_tool_calls)
+    else:
+        caller = call_openai
     answer, echoed, rid, pin, pout, cache, cache_miss = caller(
         spec, key, history, system, max_output_tokens=max_output_tokens)
-    
+
     dt_s = time.time() - t0
-    
-    cached = min(cache, pin)
-    cin = spec["cin"]
-    cin_cached = spec.get("cin_cached", cin)
-    cost = (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * spec["cout"]
+
+    true_cost = _pop_last_true_cost()
+    web_search_calls = None
+    if true_cost is not None:
+        cost = true_cost["cost_usd"]
+        web_search_calls = true_cost["web_search_calls"]
+    else:
+        cost = compute_token_cost(spec, pin, pout, cache)
 
     print(format_proof(echoed, rid, pin, pout, cache, cost, dt_s, spec["cin"] == 0))
 
@@ -1463,7 +1591,8 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
         cache_put(cache_key, model, prompt, answer)
 
     _write_audit(model, echoed, rid, session, project, commit, pin, pout,
-                 cache, cost, dt_s, cached=False, via=via, cache_miss=cache_miss)
+                 cache, cost, dt_s, cached=False, via=via, cache_miss=cache_miss,
+                 web_search_calls=web_search_calls)
     return answer
 
 
@@ -1494,7 +1623,8 @@ def get_last_cost() -> float:
 
 def delegate(prompt: str, model: str, session: str = "", system: str = "",
              use_cache: bool = True, max_output_tokens: int = 8192,
-             via: str | None = None, estimate: bool = False) -> str:
+             via: str | None = None, estimate: bool = False,
+             web_search: bool = True, max_tool_calls: int = XAI_MAX_TOOL_CALLS) -> str:
     ch = get_model_channel(model)
     if not is_channel_enabled(ch):
         msg = f"channel {ch} disabled in channels.json"
@@ -1503,7 +1633,7 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
         raise ValueError(f"All candidates disabled (last tried: {ch})")
 
     try:
-        return _delegate_inner(prompt, model, session, system, use_cache, max_output_tokens, via, estimate)
+        return _delegate_inner(prompt, model, session, system, use_cache, max_output_tokens, via, estimate, web_search, max_tool_calls)
     except ProviderError as e:
         # Owner decree 2026-07-27: no automatic fallback of any kind — see
         # the identical rationale in worker_delegate() above.
@@ -2156,6 +2286,14 @@ def main():
     ap.add_argument("--by", default="model", help="group cost report by (model|project|session|via|day)")
     ap.add_argument("--no-cache", action="store_true",
                     help="bypass the exact-hash cache (always call the provider)")
+    ap.add_argument("--no-search", action="store_true",
+                    help="xai models only: force the plain chat path, skip the "
+                         "server-side web_search tool ($0.005/call) — default is "
+                         "search ON for xai models")
+    ap.add_argument("--max-tool-calls", type=int, default=XAI_MAX_TOOL_CALLS,
+                    help=f"xai models only: cap server-side web_search calls per "
+                         f"request (default {XAI_MAX_TOOL_CALLS} — an uncapped live "
+                         f"question once made 15 calls and cost $0.389)")
     ap.add_argument("--files", default="",
                     help="worker mode: comma-separated files to read/rewrite")
     ap.add_argument("--allow-write", default="",
@@ -2289,7 +2427,8 @@ def main():
         return
 
     use_cache = not a.no_cache
-    answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache, estimate=a.estimate)
+    answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache, estimate=a.estimate,
+                       web_search=not a.no_search, max_tool_calls=a.max_tool_calls)
 
     if a.out:
         Path(a.out).write_text(answer)

@@ -39,20 +39,30 @@ SERVER_ERROR = -32000  # implementation-defined: the delegate call itself failed
 TOOLS = [
     {
         "name": "delegate_research",
-        "description": ("Ask a cheap/fast model a fact-lookup or live-data question "
-                         "(default grok = live web/X search). USE THIS INSTEAD of "
-                         "WebSearch/WebFetch or answering from memory whenever the "
-                         "question is: a current fact, a version/license/API check, "
-                         "or doc verification — a ~$0.003 call beats burning premium "
-                         "context. Answer is capped at max_output_tokens. Never for "
-                         "bulk chat."),
+        "description": ("Ask a cheap/fast model a fact-lookup or live-data question. "
+                         "Routes grok via xAI's /v1/responses endpoint with server-side "
+                         "web_search — each search call costs ~$0.005 and a question "
+                         "typically triggers 3-6, so a research call is ~$0.02-$0.05, "
+                         "NOT $0.003. USE THIS INSTEAD of WebSearch/WebFetch or "
+                         "answering from memory whenever the question is: a current "
+                         "fact, a version/license/API check, or doc verification. "
+                         "Answer is capped at max_output_tokens. Never for bulk chat."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "question": {"type": "string"},
-                "model": {"type": "string", "default": "grok",
-                          "description": "router alias; grok = live web/X search"},
+                "model": {"type": "string", "default": "grok", "enum": ["grok", "grok-4.5"],
+                          "description": "router alias; grok (4.3, default — cheaper "
+                                         "and equal-or-better on a live A/B) or grok-4.5"},
                 "max_output_tokens": {"type": "integer", "default": 500, "maximum": 2000},
+                "search": {"type": "boolean", "default": True,
+                           "description": "enable the server-side web_search tool "
+                                          "(true = live search, ~$0.005/call; false = "
+                                          "plain chat, no live data)"},
+                "max_tool_calls": {"type": "integer", "default": 6, "maximum": 20,
+                                   "description": "cap server-side web_search calls per "
+                                                  "request — an uncapped live question "
+                                                  "once made 15 calls and cost $0.389"},
             },
             "required": ["question"],
         },
@@ -239,10 +249,18 @@ def handle_delegate_research(args: dict) -> dict:
     if not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) \
             or not (0 < max_output_tokens <= 2000):
         raise ValueError("'max_output_tokens' must be an integer in (0, 2000]")
+    search = args.get("search", True)
+    if not isinstance(search, bool):
+        raise ValueError("'search' must be a boolean")
+    max_tool_calls = args.get("max_tool_calls", d.XAI_MAX_TOOL_CALLS)
+    if not isinstance(max_tool_calls, int) or isinstance(max_tool_calls, bool) \
+            or not (0 < max_tool_calls <= 20):
+        raise ValueError("'max_tool_calls' must be an integer in (0, 20]")
     model = d.resolve_model(args.get("model", "grok"))
 
     with contextlib.redirect_stdout(io.StringIO()):
-        answer = d.delegate(question, model, max_output_tokens=max_output_tokens, via="mcp")
+        answer = d.delegate(question, model, max_output_tokens=max_output_tokens, via="mcp",
+                             web_search=search, max_tool_calls=max_tool_calls)
     cost = d.get_last_cost()
     return _text_result(f"{answer}\n\ncost: ${cost:.6f}")
 
