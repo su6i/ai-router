@@ -217,6 +217,19 @@ TOOLS = [
             "required": ["files", "title"]
         }
     },
+    {
+        "name": "dashboard_push",
+        "description": ("Push/refresh the two pinned Telegram dashboards (inbox-notes "
+                         "digest and open-tasks digest) — edits the existing pinned "
+                         "messages in place rather than sending new ones. Returns only "
+                         "a short status line, never the dashboard body."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["inbox", "tasks", "both"], "default": "both"},
+            },
+        },
+    },
 ]
 
 
@@ -418,6 +431,18 @@ def handle_send_to_owner(args: dict) -> dict:
     return _text_result(res)
 
 
+def handle_dashboard_push(args: dict) -> dict:
+    kind = args.get("kind", "both")
+    if kind not in ("inbox", "tasks", "both"):
+        raise ValueError("'kind' must be one of: inbox, tasks, both")
+    import dashboards  # lazy: dashboards.py imports delegate at module level, avoid a cycle
+    kinds = ["inbox", "tasks"] if kind == "both" else [kind]
+    parts = []
+    for k in kinds:
+        parts.append(f"{k}: {dashboards.push_dashboard(k)}")
+    return _text_result(" · ".join(parts))
+
+
 TOOL_HANDLERS = {
     "delegate_research": handle_delegate_research,
     "delegate_worker": handle_delegate_worker,
@@ -428,6 +453,7 @@ TOOL_HANDLERS = {
     "list_notes": handle_list_notes,
     "route_task": handle_route_task,
     "send_to_owner": handle_send_to_owner,
+    "dashboard_push": handle_dashboard_push,
 }
 
 

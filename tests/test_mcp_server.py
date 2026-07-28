@@ -82,6 +82,22 @@ def _fake_agent_delegate(*args, **kwargs):
     return "agent summary"
 d.agent_delegate = _fake_agent_delegate
 
+class FakeResponse:
+    def __init__(self, json_data, status_code=200):
+        self._json = json_data
+        self.status_code = status_code
+    def json(self):
+        return self._json
+
+def _fake_httpx_post(url, *args, **kwargs):
+    if "sendMessage" in url:
+        return FakeResponse({{"ok": True, "result": {{"message_id": 999}}}})
+    if "pinChatMessage" in url:
+        return FakeResponse({{"ok": True, "result": {{}}}})
+    return FakeResponse({{"ok": False}})
+import httpx
+httpx.post = _fake_httpx_post
+
 import server
 server.main()
 """
@@ -99,6 +115,8 @@ def _spawn_server(tmp_path, responses, extra_env=None):
     # reaches the code path under test. On dev machines the vault overrides.
     env["DEEPSEEK_API_KEY"] = "fake-key-for-tests"
     env["MINIMAX_API_KEY"] = "fake-key-for-tests"
+    env["AI_ROUTER_BOT_TOKEN"] = "fake-bot-token"
+    env["TELEGRAM_OWNER_CHAT_ID"] = "fake-chat-id"
     env.pop("GROK_API_KEY", None)
     if extra_env:
         env.update(extra_env)
@@ -156,7 +174,7 @@ def test_tools_list_exposes_exactly_tools(server_proc):
     tools = resp["result"]["tools"]
     names = {t["name"] for t in tools}
     assert names == {"delegate_research", "delegate_worker", "delegate_agent", "rules_lookup", "code_lookup",
-                      "send_note", "list_notes", "route_task", "send_to_owner"}
+                      "send_note", "list_notes", "route_task", "send_to_owner", "dashboard_push"}
 
     research = next(t for t in tools if t["name"] == "delegate_research")
     assert set(research["inputSchema"]["properties"]) == {
@@ -341,3 +359,20 @@ def test_tools_call_malformed_params_returns_jsonrpc_error(server_proc):
     resp = _recv(server_proc)
     assert "result" not in resp
     assert resp["error"]["code"] == -32602
+
+
+def test_tools_call_dashboard_push_returns_summary(tmp_path):
+    proc = _spawn_server(tmp_path, [])
+    try:
+        _init(proc)
+        _send(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                     "params": {"name": "dashboard_push",
+                                "arguments": {"kind": "both"}}})
+        resp = _recv(proc)
+        assert "error" not in resp
+        text = resp["result"]["content"][0]["text"]
+        assert "inbox: created (message_id=999)" in text
+        assert "tasks: created (message_id=999)" in text
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=5)

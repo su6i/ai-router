@@ -12,6 +12,7 @@
 | مسیر | توضیح |
 | --- | --- |
 | `src/delegate.py` | درگاه واحد LLM برای خرکاری — اثباتِ echo‌شده از سمت provider، کشِ exact-hash، حافظه‌ی session، worker mode (`--files`)، دفترِ audit |
+| `src/dashboards.py` | دو داشبوردِ پین‌شده‌ی تلگرام که سرِ جا edit می‌شوند (یادداشت‌های نخوانده‌ی اینباکس، تسک‌های بازِ `QUEUE.md`) + یک پینگِ کوتاهِ تلگرام روی هر `send_note()` |
 | `mcp/server.py` | سرور MCP-lite — `delegate_research`/`delegate_worker` را به‌عنوان ابزارِ MCP روی stdio می‌گشاید، پس هر host ای که MCP می‌فهمد بدون CLI هم delegationِ ارزان را کشف می‌کند |
 | `tests/` | مجموعه‌ی تست pytest برای `src/delegate.py` و `mcp/server.py` |
 | `docs/ARCHITECTURE.md` | طراحی کامل: اسکیمای Postgres + pgvector، کش exact-hash پرامپت، مانیتورینگ Prometheus/Grafana |
@@ -61,7 +62,7 @@ python3 src/delegate.py --inbox --peek
 python3 src/delegate.py --route-task <path-to-note-file> --verify "uv run pytest -q"
 ```
 
-### ارسال فایل به تلگرام مالک (Telegram File Delivery)
+### ارسال فایل به تلگرام مالک و داشبوردها (Telegram Delivery & Dashboards)
 
 شما می‌توانید فایل‌ها را مستقیماً به عنوان سند (ضمیمه) به تلگرام مالک ارسال کنید. این قابلیت برای تحویل فایل‌های بزرگ بدون گم شدن در چت بسیار مفید است.
 
@@ -70,6 +71,20 @@ python3 src/delegate.py --send-to-owner --file /absolute/path/to/file.md --title
 ```
 
 این قابلیت از طریق ابزار MCP با نام `send_to_owner` نیز در دسترس است.
+
+**داشبوردهای پین‌شده.** به‌جای اسپم‌کردنِ چتِ مالک، `src/dashboards.py` دو پیامِ تلگرامی را نگه می‌دارد که **یک‌بار pin می‌شوند و بعدش سرِ جا edit می‌شوند** — یک دایجستِ یادداشت‌های نخوانده و یک دایجستِ تسک‌های بازِ `QUEUE.md`:
+
+```bash
+# رفرش‌کردنِ هر دو داشبورد (سرِ جا edit می‌شود؛ اگر محتوا عوض نشده صفر تماسِ API)
+python3 src/delegate.py --dashboard both        # یا: inbox | tasks
+
+# فقط پیش‌نمایشِ محتوای داشبورد روی stdout، بدونِ هیچ تماسی با تلگرام
+python3 src/delegate.py --dashboard-dry-run both
+```
+
+هر رندر یا یادداشت‌های نخوانده را به‌ازای هر پروژه گروه می‌کند (با `list_notes(..., peek=True)` که — نکته‌ی حیاتی — هرگز یادداشتی را صرفِ نگاه‌کردنِ داشبورد به آن، خوانده‌شده علامت نمی‌زند)، یا جدولِ `## 🎯 ترتیبِ اجرا` را از `~/.local/share/agent-projects/_memory/QUEUE.md` پارس می‌کند و ردیف‌های `✅`-شده را رد می‌کند. هر دو داشبورد با یک خطِ **تازگیِ ایندکسِ RAG** تمام می‌شوند (`RAG ingest: 4h ago (312 rows)`؛ با علامتِ `⚠️ stale` بعد از ۲۴ ساعت، یا `⚠️ never run` اگر `src/ingest.py` هرگز کامل اجرا نشده باشد) تا کسی به یک ایندکسِ کهنه اعتماد نکند. خروجی به سقفِ ۴۰۹۶ کاراکترِ تلگرام محدود می‌شود (موارد اضافه با یک علامتِ `… +N more` کوتاه می‌شوند) و هر مقدارِ داینامیک HTML-escape می‌شود (`parse_mode=HTML`، نه MarkdownV2 — چون متنِ فارسی و اسمِ ریپوها معمولاً `<`/`*` دارند).
+
+هر فراخوانیِ `send_note()` (چه از CLI با `--note`، چه از ابزارِ MCP با `send_note`) یک پینگِ کوتاهِ best-effort به تلگرام هم می‌فرستد (`🔔 note → <project> · from <project> · <priority>`) و داشبوردِ پین‌شده‌ی اینباکس را رفرش می‌کند — قطعیِ تلگرام هرگز جلوی ثبتِ خودِ یادداشت را نمی‌گیرد یا آن را گم نمی‌کند (برای غیرفعال‌کردنش در تست‌ها، `notify=False` را در API پایتون پاس بده). ابزارِ MCP با نامِ `dashboard_push` (`{"kind": "inbox"|"tasks"|"both"}`) همین قابلیتِ push را برای هر MCP host ای باز می‌کند؛ مثلِ بقیه‌ی ابزارهای این‌جا فقط یک خطِ وضعیتِ کوتاه برمی‌گرداند (`"inbox: edited (id=...) · tasks: unchanged"`)، هرگز بدنه‌ی داشبورد را.
 
 نیازمند `AI_ROUTER_BOT_TOKEN` (بات اختصاصی خودِ پروژه، `@su6i_ai_router_bot`) و `TELEGRAM_OWNER_CHAT_ID` در vault ِ rule-035 است (`ai-router/secrets/.env`) — باتی جدا از بات تلگرام هر پروژه‌ی دیگر.
 
