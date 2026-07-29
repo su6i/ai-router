@@ -32,6 +32,37 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **The `agy` channel now reaches every model the subscription exposes — including
+  free Claude.** `MODELS["agy"]` was a single hardcoded entry pinned to Gemini 3.1
+  Pro, so `claude-sonnet-4-6` and `claude-opus-4-6-thinking` — both available at $0
+  on the same Google AI Pro subscription — had **no route at all**. The subscription's
+  Claude pool sat ~90% unused for a week while paid Claude Code quota was spent on
+  work those models could have done. The single entry is replaced by all 11 ids that
+  `agy models` actually reports: `gemini-3.6-flash-{high,medium,low}`,
+  `gemini-3.5-flash-{high,medium,low}`, `gemini-3.1-pro-{high,low}`,
+  `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`. `agy`
+  stays an alias for `gemini-3.1-pro-high`, so existing callers are unaffected, and
+  an unknown id still raises `ValueError` rather than silently remapping.
+- Each entry records the `quota_channel` it draws from (`google-ai-pro-gemini`,
+  `google-ai-pro-claude`, `google-ai-pro-gpt`). These are **independent** $0 pools
+  inside one subscription, so routing can spread load instead of draining one. The
+  $0-first policy is unchanged: no automatic fallback to a paid model, ever.
+
+### Fixed
+
+- **`--effort` must never be sent alongside an agy model id.** The effort level is
+  already part of the id (`-high`/`-medium`/`-low`); sending it separately is not
+  merely redundant — agy hard-errors on it for the Claude models
+  (`--effort is not supported for model "claude-sonnet-4-6"`). Verified against the
+  live CLI, not assumed: full id with no `--effort` is the one rule that works for
+  all 11 models.
+- **The chat/route path could not reach agy models at all.** `_delegate_inner()`
+  had neither the `agy_cli` key-check exemption nor an `agy_cli` dispatch branch, so
+  every agy model died on an empty-named env var (`❌  not set in vault .env`) and
+  would otherwise have fallen through to the OpenAI caller with no key. Only the
+  worker path had been wired. Both are now handled, and a live call to
+  `claude-sonnet-4-6` returns in ~7s at $0.00.
+
 - **Large-file write guard (owner decree 2026-07-27) — the reason this release
   exists.** On 2026-07-27 a three-line fix delegated to a cheap model came back
   as a *full-file rewrite* that shrank a 50KB source file to 245 lines; only

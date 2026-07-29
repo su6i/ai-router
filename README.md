@@ -98,6 +98,13 @@ or a full model name — see `ALIASES` in
 `src/delegate.py`). `--plan <file>` reads the prompt from a file instead of
 `-p`; `--out <file>` writes the answer to a file instead of stdout.
 
+Every id `agy models` reports is routable by that exact name, at $0 on the Google
+AI Pro subscription — including `claude-sonnet-4-6` and `claude-opus-4-6-thinking`,
+which draw on a **different** quota pool from the Gemini ids and so can absorb work
+without competing with the default worker. Pass the id exactly as printed and never
+add `--effort`: the effort level is already part of the id, and agy rejects the pair
+outright for the Claude models. `agy` remains an alias for `gemini-3.1-pro-high`.
+
 ### Sessions
 
 ```bash

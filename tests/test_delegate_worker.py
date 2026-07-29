@@ -508,10 +508,9 @@ def test_call_agy_print_success(monkeypatch, tmp_path):
     monkeypatch.setattr(d.subprocess, "run", fake_run)
 
     content, echoed, rid, pin, pout, cache, cache_miss = d.call_agy_print(
-        "do the task", "Gemini 3.1 Pro (High)", tmp_path, timeout_s=60)
-
+        "do the task", "gemini-3.1-pro", "high", tmp_path, timeout_s=60)
     assert content == "===FILE: src/foo.py===\nx = 1\n===END FILE==="
-    assert echoed == "Gemini 3.1 Pro (High)"
+    assert echoed == "gemini-3.1-pro"
     assert pin == 0 and pout == 0 and cache == 0
     # Deliberate design: NO --add-dir on the worker path (the router's own
     # parse-and-write is the only writer; --mode plan is the other guard).
@@ -532,7 +531,7 @@ def test_call_agy_print_nonzero_exit_raises(monkeypatch, tmp_path):
                         lambda *a, **k: FakeCompleted())
 
     with pytest.raises(d.ProviderError):
-        d.call_agy_print("task", "Gemini 3.1 Pro (High)", tmp_path, timeout_s=60)
+        d.call_agy_print("task", "gemini-3.1-pro", "high", tmp_path, timeout_s=60)
 
 
 def test_call_agy_print_empty_stdout_raises(monkeypatch, tmp_path):
@@ -545,7 +544,7 @@ def test_call_agy_print_empty_stdout_raises(monkeypatch, tmp_path):
                         lambda *a, **k: FakeCompleted())
 
     with pytest.raises(d.ProviderError):
-        d.call_agy_print("task", "Gemini 3.1 Pro (High)", tmp_path, timeout_s=60)
+        d.call_agy_print("task", "gemini-3.1-pro", "high", tmp_path, timeout_s=60)
 
 
 def test_call_agy_print_timeout_raises(monkeypatch, tmp_path):
@@ -555,7 +554,7 @@ def test_call_agy_print_timeout_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(d.subprocess, "run", fake_run)
 
     with pytest.raises(d.ProviderError):
-        d.call_agy_print("task", "Gemini 3.1 Pro (High)", tmp_path, timeout_s=60)
+        d.call_agy_print("task", "gemini-3.1-pro", "high", tmp_path, timeout_s=60)
 
 
 def test_worker_delegate_agy_model_needs_no_env_key(tmp_path, monkeypatch):
@@ -571,12 +570,12 @@ def test_worker_delegate_agy_model_needs_no_env_key(tmp_path, monkeypatch):
         "===END SUMMARY===\n"
     )
     monkeypatch.setattr(d, "call_agy_print",
-                        lambda prompt, model_name, project_root, timeout_s: (
+                        lambda prompt, model_name, effort, project_root, timeout_s: (
                             response, model_name, None, 0, 0, 0, None))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     out = d.worker_delegate(
-        "add foo()", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
+        "add foo()", "gemini-3.1-pro-high", files_arg="src/foo.py", allow_write_arg="src/**",
         verify_cmd="", retries=1, project_root=tmp_path)
 
     assert (tmp_path / "src" / "foo.py").read_text() == "def foo():\n    return 1\n"
@@ -586,17 +585,17 @@ def test_worker_delegate_agy_model_needs_no_env_key(tmp_path, monkeypatch):
 def test_worker_delegate_agy_records_cost_unknown(tmp_path, monkeypatch):
     response = "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n"
     monkeypatch.setattr(d, "call_agy_print",
-                        lambda prompt, model_name, project_root, timeout_s: (
+                        lambda prompt, model_name, effort, project_root, timeout_s: (
                             response, model_name, None, 0, 0, 0, None))
 
     d.worker_delegate(
-        "add foo()", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
+        "add foo()", "gemini-3.1-pro-high", files_arg="src/foo.py", allow_write_arg="src/**",
         verify_cmd="", retries=1, project_root=tmp_path)
 
     lines = d.AUDIT.read_text().strip().splitlines()
     rec = json.loads(lines[0])
     assert rec["cost_unknown"] is True
-    assert rec["quota_channel"] == "google-ai-pro"
+    assert rec["quota_channel"] == "google-ai-pro-gemini"
 
 
 def test_worker_delegate_no_fallback_on_provider_error(tmp_path, monkeypatch):

@@ -407,7 +407,15 @@ HTTP/SSE، بدون auth (خارج از scope نسخه‌ی ۱).
 | `pro` | `deepseek-v4-pro` | DeepSeek | $0.435 / $0.87 | Reasoner — هدفِ escalation وقتی `flash` شکست بخورد یا استدلالِ عمیق‌تر لازم باشد |
 | `grok` | `grok-4.3` | xAI | $1.25 / $2.50 (+ $0.20 برای ورودیِ cached) | نظرِ دوم / دانشِ روز — پیش‌فرضِ `delegate_research`، نه برای کارِ روتین |
 | `grok-4.5` | `grok-4.5` | xAI | $2.00 / $6.00 (+ $0.30 برای ورودیِ cached) | فقط اختیاری — یک A/B زنده نشان داد ۳.۶ برابرِ هزینه‌ی `grok` با کیفیتِ برابر یا بدتر در research |
-| `agy` | `Gemini 3.1 Pro (High)` | اشتراکِ Google AI Pro (‏`agy` ِ محلی) | $0 / $0 | کارگرِ پیش‌فرضِ کدنویسی — تغییراتِ مکانیکی، تست‌ها، boilerplate |
+| `gemini-3.1-pro-high` | `gemini-3.1-pro-high` | اشتراکِ Google AI Pro (از طریق `agy`) | $0 / $0 | کارگرِ پیش‌فرضِ کدنویسی (نام مستعار `agy`) — تغییراتِ مکانیکی، تست‌ها، boilerplate |
+| `claude-sonnet-4-6` | `claude-sonnet-4-6` | اشتراکِ Google AI Pro (از طریق `agy`) | $0 / $0 | استخرِ سهمیه‌ی **جدا** از جمینی — بازبینی و کارِ سنگین‌تر بدون رقابت با کارگرِ پیش‌فرض |
+| `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` | اشتراکِ Google AI Pro (از طریق `agy`) | $0 / $0 | بالاترین پله‌ی $0 — همان استخرِ Claude |
+
+هر ۱۱ شناسه‌ای که `agy models` چاپ می‌کند با همان نامِ دقیق قابلِ مسیریابی است
+(`gemini-3.6-flash-*`، `gemini-3.5-flash-*`، `gemini-3.1-pro-*`، دو مدلِ Claude،
+و `gpt-oss-120b-medium`). **هرگز `--effort` را کنارِ این نام‌ها نفرست:** سطحِ
+effort از قبل بخشی از خودِ نام است و agy برای مدل‌های Claude این جفت را صریحاً رد
+می‌کند (`--effort is not supported for model "claude-sonnet-4-6"`).
 
 هر دو `grok` و `grok-4.5` از طریقِ endpoint ِ `/v1/responses` ِ xAI
 (`call_xai_responses()`، نه `chat/completions`) با ابزارِ سمت-سرورِ

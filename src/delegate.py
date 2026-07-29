@@ -227,8 +227,23 @@ MODELS = {
     # agy authenticates via its own CLI session (Google AI Pro subscription),
     # not an env-var API key — see the provider=="agy_cli" special case in
     # _worker_delegate_inner.
-    "agy": {"api": "Gemini 3.1 Pro (High)", "provider": "agy_cli", "url": "",
-            "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro"},
+    # `api` is the model id EXACTLY as `agy models` prints it, and `effort` is
+    # always None. Verified empirically 2026-07-29 against the live CLI: the
+    # effort level is already baked into the model id (`-high`/`-medium`/`-low`),
+    # and passing it separately is not merely redundant — for the Claude models
+    # agy hard-errors with `--effort is not supported for model "..."`. One
+    # uniform rule (full id, no --effort) is what actually works for all 11.
+    "gemini-3.6-flash-high": {"api": "gemini-3.6-flash-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.6-flash-medium": {"api": "gemini-3.6-flash-medium", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.6-flash-low": {"api": "gemini-3.6-flash-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.5-flash-high": {"api": "gemini-3.5-flash-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.5-flash-medium": {"api": "gemini-3.5-flash-medium", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.5-flash-low": {"api": "gemini-3.5-flash-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.1-pro-high": {"api": "gemini-3.1-pro-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.1-pro-low": {"api": "gemini-3.1-pro-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "claude-sonnet-4-6": {"api": "claude-sonnet-4-6", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-claude"},
+    "claude-opus-4-6-thinking": {"api": "claude-opus-4-6-thinking", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-claude"},
+    "gpt-oss-120b-medium": {"api": "gpt-oss-120b-medium", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gpt"},
 }
 
 # Friendly aliases -> canonical key.
@@ -239,7 +254,7 @@ ALIASES = {
     "pro": "pro", "reasoner": "pro", "deepseek-pro": "pro", "deepseek-v4-pro": "pro",
     "grok": "grok", "grok-4.3": "grok", "grok4": "grok",
     "grok-4.5": "grok-4.5", "grok45": "grok-4.5", "grok4.5": "grok-4.5",
-    "agy": "agy", "antigravity": "agy", "gemini-3-pro": "agy",
+    "agy": "gemini-3.1-pro-high", "antigravity": "gemini-3.1-pro-high", "gemini-3-pro": "gemini-3.1-pro-high",
 }
 
 # Owner decree 2026-07-27: the free-quota Gemini API channel ("gemini",
@@ -327,9 +342,12 @@ def resolve_model(name: str) -> str:
             f"2026-07-27: free-quota Gemini flash truncates files and "
             f"silently overrode the agy default). Use '{suggestion}'."
         )
+    if key in MODELS:
+        return key
     resolved = ALIASES.get(key)
     if resolved is None:
-        raise ValueError(f"unknown model '{name}'. Known: {', '.join(sorted(ALIASES))}")
+        known = sorted(set(MODELS.keys()) | set(ALIASES.keys()))
+        raise ValueError(f"unknown model '{name}'. Known: {', '.join(known)}")
     return resolved
 
 
@@ -872,7 +890,7 @@ AGY_NO_TOOLS_ADDENDUM = (
 )
 
 
-def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: int = AGY_WORKER_TIMEOUT_S):
+def call_agy_print(prompt: str, model_name: str, effort: str | None, project_root: Path, timeout_s: int = AGY_WORKER_TIMEOUT_S):
     """Invoke `agy` in headless print mode as a pure TEXT GENERATOR for the
     worker protocol (SPEC v1 / PATCH protocol). The router — not agy — is
     the only writer: parse_worker_response() + _write_files()/_apply_patches()
@@ -903,6 +921,8 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     """
     cmd = ["agy", "-p", prompt, "--model", model_name, "--mode", "plan",
            "--dangerously-skip-permissions", "--print-timeout", f"{timeout_s}s"]
+    if effort:
+        cmd.extend(["--effort", effort])
     try:
         r = subprocess.run(cmd, cwd=str(project_root), capture_output=True,  # noqa: PLW1510
                            text=True, timeout=timeout_s + 30)
@@ -1241,7 +1261,7 @@ def _get_channel_system_prompt(model: str) -> str:
         channel = "deepseek"
     elif model in ("minimax", "m3"):
         channel = "minimax"
-    elif model in ("agy", "antigravity", "Gemini 3.1 Pro (High)"):
+    elif model.startswith("gemini-") or model in ("agy", "antigravity"):
         # agy IS Gemini 3.1 Pro under the hood — same vendor, same template
         # file (templates/system-prompts/gemini.md). Keep the template file
         # name as "gemini"; only the MODELS registration changed.
@@ -1384,7 +1404,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                 f"[{'ASSISTANT' if m['role'] == 'assistant' else 'USER'}]\n{m['content']}"
                 for m in history
             )
-            return call_agy_print("\n\n".join(parts), spec["api"], _root, AGY_WORKER_TIMEOUT_S)
+            return call_agy_print("\n\n".join(parts), spec["api"], spec.get("effort"), _root, AGY_WORKER_TIMEOUT_S)
     else:
         caller = call_openai
     # Prefix discipline: system prompt (WORKER_PROTOCOL_SYSTEM) is the constant head;
@@ -1523,9 +1543,17 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
              via: str | None = None, estimate: bool = False,
              web_search: bool = True, max_tool_calls: int = XAI_MAX_TOOL_CALLS) -> str:
     spec = MODELS[model]
-    key = os.environ.get(spec["key"], "")
-    if not key:
-        sys.exit(f"❌ {spec['key']} not set in vault .env")
+    if spec["provider"] == "agy_cli":
+        # Same reason as the worker path: agy authenticates through its own CLI
+        # session against the Google AI Pro subscription, so there is no env-var
+        # API key. Without this branch every agy model failed here with an empty
+        # key name ("❌  not set in vault .env"), which made the free Claude pool
+        # unreachable from the chat/route path even after the catalog was opened.
+        key = ""
+    else:
+        key = os.environ.get(spec["key"], "")
+        if not key:
+            sys.exit(f"❌ {spec['key']} not set in vault .env")
 
     project, commit = project_info()
 
@@ -1566,6 +1594,19 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
         def caller(s, k, h, sy, max_output_tokens=8192):
             return call_xai_responses(s, k, h, sy, max_output_tokens=max_output_tokens,
                                        web_search=web_search, max_tool_calls=max_tool_calls)
+    elif spec["provider"] == "agy_cli":
+        def caller(s, k, h, sy, max_output_tokens=8192):
+            # agy -p takes ONE flat text prompt, not a chat-turn array. Flatten
+            # system + history into a single ordered block, oldest turn first —
+            # same shape the worker path uses. No AGY_NO_TOOLS_ADDENDUM here:
+            # that addendum exists to keep the worker protocol's file-writing
+            # discipline, and this is a plain chat call with no such protocol.
+            parts = [sy] if sy else []
+            parts.extend(
+                f"[{'ASSISTANT' if m['role'] == 'assistant' else 'USER'}]\n{m['content']}"
+                for m in h
+            )
+            return call_agy_print("\n\n".join(parts), s["api"], s.get("effort"), Path.cwd())
     else:
         caller = call_openai
     answer, echoed, rid, pin, pout, cache, cache_miss = caller(
@@ -1691,9 +1732,12 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         raise ValueError("Claude models are banned inside delegate (subscription-billed; routing them here double-bills)")
 
     if runner == "agy":
-        model_name = model or "Gemini 3.1 Pro (High)"
-        quota_channel = "google-ai-pro"
-        spec = {"api": model_name, "quota_channel": quota_channel, "cin": 0, "cout": 0}
+        model_name = model or "gemini-3.1-pro-high"
+        provider_model = MODELS.get(model_name)
+        if not provider_model:
+            raise ValueError(f"Unknown agy model: {model_name}")
+        quota_channel = provider_model.get("quota_channel", "google-ai-pro")
+        spec = provider_model
     elif runner == "codewhale":
         model_name = model or "flash"
         if model_name not in ["flash", "minimax"]:
@@ -1789,9 +1833,11 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         # changed / fabricated hash" signal (verified 2026-07-21: file landed
         # in scratch, not cwd). Binding the workdir into agy's workspace makes
         # it write there; probed git + non-git workdirs, 3/3 landed in cwd.
-        cmd = ["agy", "-p", task, "--model", model_name, "--mode", "accept-edits",
+        cmd = ["agy", "-p", task, "--model", provider_model["api"], "--mode", "accept-edits",
                "--dangerously-skip-permissions", "--add-dir", str(project_root),
                "--print-timeout", f"{timeout_s}s"]
+        if provider_model.get("effort"):
+            cmd.extend(["--effort", provider_model["effort"]])
     elif runner == "codewhale":
         # Flags verified against `codewhale exec --auto --help` (2026-07-14):
         # plain exec is a one-shot text reply; --auto enables tool-backed agent

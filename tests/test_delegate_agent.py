@@ -120,7 +120,11 @@ open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
     argv = json.loads(argv_log.read_text())
     assert "--print-timeout" in argv
     assert argv[argv.index("--print-timeout") + 1] == "120s"
-    assert argv[argv.index("--model") + 1] == "Gemini 3.1 Pro (High)"
+    # The model id carries its own effort level, and `--effort` must NOT be sent
+    # alongside it: verified against the live CLI 2026-07-29, agy rejects the
+    # pair outright for the Claude models. One rule for all 11 models.
+    assert argv[argv.index("--model") + 1] == "gemini-3.1-pro-high"
+    assert "--effort" not in argv
 
 
 def test_agent_agy_skips_permission_prompts(isolated_paths, tmp_path):
@@ -227,7 +231,7 @@ def test_agent_daily_call_cap_aborts(isolated_paths, tmp_path):
     create_fake_bin(isolated_paths, "agy", """#!/usr/bin/env python3
 print("ok")
 """)
-    d.BUDGETS.write_text(json.dumps({"daily_calls": {"google-ai-pro": 1}}))
+    d.BUDGETS.write_text(json.dumps({"daily_calls": {"google-ai-pro-gemini": 1}}))
     out = d.agent_delegate("first", runner="agy", workdir=tmp_path)
     assert "COMPLETED" in out
     with pytest.raises(SystemExit) as e:

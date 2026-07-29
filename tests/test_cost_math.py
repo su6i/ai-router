@@ -48,7 +48,7 @@ def test_grok_cin_cached_changes_cost_vs_uncached():
     assert cost_with_cache < cost_without_cache
 
 def test_cost_arithmetic_clamp_and_agy():
-    spec = MODELS["agy"]
+    spec = MODELS["gemini-3.1-pro-high"]
     # $0 subscription channel, should cost 0
     assert spec["cin"] == 0.0
     assert spec["cout"] == 0.0

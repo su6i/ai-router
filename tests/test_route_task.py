@@ -61,7 +61,7 @@ def test_route_task_success_never_calls_paid_fallback(monkeypatch):
     def fake_agent_delegate(task, runner, **kwargs):
         calls.append(runner)
         assert runner == "agy"
-        return "runner        : agy (Gemini 3.1 Pro (High))\nstatus        : COMPLETED (1.0s)"
+        return "runner        : agy (gemini-3.1-pro-high)\nstatus        : COMPLETED (1.0s)"
 
     monkeypatch.setattr(d, "agent_delegate", fake_agent_delegate)
 
