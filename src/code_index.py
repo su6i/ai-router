@@ -47,6 +47,15 @@ def init_db(conn):
                 PRIMARY KEY (caller_id, callee_symbol)
             );
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ingested_files (
+                collection text,
+                file_path text,
+                content_hash text,
+                updated_at timestamp DEFAULT current_timestamp,
+                PRIMARY KEY (collection, file_path)
+            );
+        """)
     conn.commit()
 
 # Tree-sitter parsers
@@ -222,7 +231,7 @@ def extract_python_calls(source):
     Visitor().visit(tree)
     return calls
 
-def cmd_reindex(args):
+def ingest(force: bool = False) -> dict:
     load_env()
     repo_name, commit = project_info()
     if not repo_name:
@@ -232,16 +241,16 @@ def cmd_reindex(args):
 
     dsn = os.environ.get("POSTGRES_DSN")
     if not dsn:
-        print("Error: POSTGRES_DSN not set.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError("POSTGRES_DSN not set")
         
     repo_path = Path.cwd()
+    stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0}
     
     with psycopg.connect(dsn) as conn:
         init_db(conn)
         
         indexed_commit = None
-        if not args.rebuild:
+        if not force:
             with conn.cursor() as cur:
                 cur.execute("SELECT repo_commit FROM code_chunks WHERE repo = %s LIMIT 1", (repo_name,))
                 row = cur.fetchone()
@@ -259,12 +268,14 @@ def cmd_reindex(args):
                 vanished = [f for f in changed_files if not Path(f).exists()]
                 if vanished:
                     with conn.cursor() as cur:
-                        cur.execute("DELETE FROM code_chunks WHERE repo = %s AND path = ANY(%s)", (repo_name, vanished))
+                        cur.execute("DELETE FROM code_chunks WHERE repo = %s AND path = ANY(%s) RETURNING id", (repo_name, vanished))
+                        stats["chunks_deleted"] += len(cur.fetchall())
+                        cur.execute("DELETE FROM ingested_files WHERE collection = 'code' AND file_path = ANY(%s)", (vanished,))
             except subprocess.CalledProcessError:
                 # fallback to all
                 pass
         
-        if not target_files and not (indexed_commit and not args.rebuild):
+        if not target_files and not (indexed_commit and not force):
             # full rebuild / fallback
             target_files = []
             try:
@@ -273,13 +284,17 @@ def cmd_reindex(args):
             except subprocess.CalledProcessError:
                 pass
                 
-        if not target_files and not args.rebuild:
+        if not target_files and not force:
             # nothing changed
             # just update commit hash maybe?
             with conn.cursor() as cur:
                 cur.execute("UPDATE code_chunks SET repo_commit = %s WHERE repo = %s", (commit, repo_name))
+                cur.execute("SELECT count(*) FROM code_chunks WHERE repo = %s", (repo_name,))
+                stats["total_chunks"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'code'")
+                stats["total_docs"] = cur.fetchone()[0]
             conn.commit()
-            return
+            return stats
             
         chunk_map = _chunk_files_subprocess([f.resolve() for f in target_files])
         model = E5Model()
@@ -292,14 +307,26 @@ def cmd_reindex(args):
 
             lang = 'python' if rel_path.endswith('.py') else 'bash'
             source = filepath.read_text('utf-8')
+            file_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+            if not force:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT content_hash FROM ingested_files WHERE collection = 'code' AND file_path = %s", (rel_path,))
+                    row = cur.fetchone()
+                    if row and row[0] == file_hash:
+                        stats["skipped"] += 1
+                        continue
+
+            stats["files_seen"] += 1
+
             chunks = chunk_map.get(str(filepath.resolve()))
             if chunks is None:
                 continue
 
             current_shas = []
             
-            print(f"File {filepath}: generated {len(chunks)} chunks", file=sys.stderr)
-            sys.stderr.flush()
+            # print(f"File {filepath}: generated {len(chunks)} chunks", file=sys.stderr)
+            # sys.stderr.flush()
             
             chunk_records = []
             for c in chunks:
@@ -333,12 +360,21 @@ def cmd_reindex(args):
                     )
                     chunk_id = cur.fetchone()[0]
                     chunk_records.append((chunk_id, c['symbol']))
+                    stats["chunks_written"] += 1
 
             # GC chunks no longer in this file
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM code_chunks WHERE repo = %s AND path = %s AND NOT (chunk_hash = ANY(%s))",
+                    "DELETE FROM code_chunks WHERE repo = %s AND path = %s AND NOT (chunk_hash = ANY(%s)) RETURNING id",
                     (repo_name, rel_path, current_shas)
+                )
+                stats["chunks_deleted"] += len(cur.fetchall())
+                
+                cur.execute(
+                    "INSERT INTO ingested_files (collection, file_path, content_hash, updated_at) "
+                    "VALUES ('code', %s, %s, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (collection, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash, updated_at = CURRENT_TIMESTAMP",
+                    (rel_path, file_hash)
                 )
 
             # Update call graph for Python
@@ -360,13 +396,28 @@ def cmd_reindex(args):
                 WHERE ce.callee_symbol = cc.symbol AND cc.repo = %s
             """, (repo_name,))
             # GC vanished paths entirely when rebuild
-            if args.rebuild:
+            if force:
                 indexed_paths = [str(f.resolve().relative_to(repo_path.resolve())) for f in target_files]
-                cur.execute("DELETE FROM code_chunks WHERE repo = %s AND NOT (path = ANY(%s))", (repo_name, indexed_paths))
+                cur.execute("DELETE FROM code_chunks WHERE repo = %s AND NOT (path = ANY(%s)) RETURNING id", (repo_name, indexed_paths))
+                stats["chunks_deleted"] += len(cur.fetchall())
+                cur.execute("DELETE FROM ingested_files WHERE collection = 'code' AND NOT (file_path = ANY(%s))", (indexed_paths,))
             
             cur.execute("UPDATE code_chunks SET repo_commit = %s WHERE repo = %s", (commit, repo_name))
+            cur.execute("SELECT count(*) FROM code_chunks WHERE repo = %s", (repo_name,))
+            stats["total_chunks"] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'code'")
+            stats["total_docs"] = cur.fetchone()[0]
 
         conn.commit()
+    return stats
+
+def cmd_reindex(args):
+    try:
+        force = getattr(args, "rebuild", False) or getattr(args, "force", False)
+        ingest(force=force)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def cmd_search(args):
     load_env()
@@ -454,6 +505,7 @@ def main():
     
     p_reindex = subparsers.add_parser("reindex")
     p_reindex.add_argument("--rebuild", action="store_true")
+    p_reindex.add_argument("--force", action="store_true")
     
     p_search = subparsers.add_parser("search")
     p_search.add_argument("query")

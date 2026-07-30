@@ -32,15 +32,25 @@ def init_db(conn):
             CREATE INDEX IF NOT EXISTS session_chunks_embedding_idx 
             ON session_chunks USING hnsw (embedding vector_cosine_ops);
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ingested_files (
+                collection text,
+                file_path text,
+                content_hash text,
+                updated_at timestamp DEFAULT current_timestamp,
+                PRIMARY KEY (collection, file_path)
+            );
+        """)
     conn.commit()
 
-def cmd_reindex(args):
+def ingest(force: bool = False) -> dict:
     load_env()
     
     dsn = os.environ.get("POSTGRES_DSN")
     if not dsn:
-        print("Error: POSTGRES_DSN not set.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError("POSTGRES_DSN not set")
+        
+    stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0}
         
     agent_projects = _agent_projects_root()
     
@@ -62,9 +72,21 @@ def cmd_reindex(args):
             repo_name = filepath.parent.parent.name
             indexed_repos.add(repo_name)
             
-            rel_path = "workspace/SESSION.md"
+            rel_path = f"{repo_name}/workspace/SESSION.md"
 
             text = filepath.read_text()
+            file_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+            if not force:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT content_hash FROM ingested_files WHERE collection = 'sessions' AND file_path = %s", (rel_path,))
+                    row = cur.fetchone()
+                    if row and row[0] == file_hash:
+                        stats["skipped"] += 1
+                        continue
+                        
+            stats["files_seen"] += 1
+
             chunks = chunk_markdown(text)
             current_shas = []
 
@@ -95,25 +117,63 @@ def cmd_reindex(args):
                         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                         (repo_name, rel_path, heading, chunk["start_line"], chunk_text, chunk_sha, date_val, str(emb))
                     )
+                    stats["chunks_written"] += 1
 
             # GC: drop chunks this file no longer contains
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM session_chunks WHERE repo = %s AND path = %s AND NOT (chunk_sha = ANY(%s))",
+                    "DELETE FROM session_chunks WHERE repo = %s AND path = %s AND NOT (chunk_sha = ANY(%s)) RETURNING id",
                     (repo_name, rel_path, current_shas)
+                )
+                stats["chunks_deleted"] += len(cur.fetchall())
+                
+                cur.execute(
+                    "INSERT INTO ingested_files (collection, file_path, content_hash, updated_at) "
+                    "VALUES ('sessions', %s, %s, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (collection, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash, updated_at = CURRENT_TIMESTAMP",
+                    (rel_path, file_hash)
                 )
 
         # GC: drop paths that vanished from the corpus entirely.
         if indexed_repos:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM session_chunks WHERE NOT (repo = ANY(%s))",
+                    "DELETE FROM session_chunks WHERE NOT (repo = ANY(%s)) RETURNING id",
                     (list(indexed_repos),)
+                )
+                stats["chunks_deleted"] += len(cur.fetchall())
+                
+                cur.execute(
+                    # NB: must be NOT (x = ANY(...)), never "x NOT LIKE ANY(...)" —
+                    # the latter is a classic Postgres quantifier-inversion trap:
+                    # for an array with >1 element, "x NOT LIKE ANY(array)" means
+                    # "x fails to match AT LEAST ONE element", which is true for
+                    # almost every row and deletes the whole table.
+                    "DELETE FROM ingested_files WHERE collection = 'sessions' AND NOT (file_path = ANY(%s))",
+                    ([f"{r}/workspace/SESSION.md" for r in indexed_repos],)
                 )
         else:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM session_chunks")
+                cur.execute("DELETE FROM session_chunks RETURNING id")
+                stats["chunks_deleted"] += len(cur.fetchall())
+                cur.execute("DELETE FROM ingested_files WHERE collection = 'sessions'")
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM session_chunks")
+            stats["total_chunks"] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'sessions'")
+            stats["total_docs"] = cur.fetchone()[0]
+
         conn.commit()
+    return stats
+
+def cmd_reindex(args):
+    try:
+        force = getattr(args, "rebuild", False) or getattr(args, "force", False)
+        ingest(force=force)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def cmd_search(args):
     load_env()
@@ -160,7 +220,9 @@ def main():
     parser = argparse.ArgumentParser(description="Sessions index and search")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
     
-    subparsers.add_parser("reindex")
+    parser_reindex = subparsers.add_parser("reindex")
+    parser_reindex.add_argument("--rebuild", action="store_true", help="Force rebuild")
+    parser_reindex.add_argument("--force", action="store_true", help="Force rebuild")
     
     parser_search = subparsers.add_parser("search")
     parser_search.add_argument("query", help="Search query")

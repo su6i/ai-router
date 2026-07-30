@@ -91,6 +91,8 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 
 **Worker Context Discipline**: To prevent worker/agent models from wasting tokens on large files, a context discipline pack now ships. It includes a strict reading-rules template (`AGENTS-context-discipline.md`) injected as a cache-friendly constant preamble in all prompts, and an auto-generated compact repo map (`src/repo_map.py`) to guide initial symbol discovery.
 
+**RAG Index & Auto-Ingest**: The RAG index is exclusively owned and managed by the `ai-router` architect (nobody ingests by hand). Incremental auto-ingestion is orchestrated by event triggers: a git `post-merge` hook updates `rules`, while a 30-minute cron sweep and inbox-note delivery update `sessions`. The index freshness state is durably tracked in `<vault>/data/rag_state.json` (schema: per-collection dict containing `last_ingest`, `status`, `docs`, `chunks`, `stale`). A collection is strictly considered `stale` if its last ingest is more than 24h old or if the last run failed.
+
 ## 4. Data model
 
 ```sql

@@ -7,6 +7,10 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+
+- **Unified RAG auto-ingest and dashboard freshness reporting** — Shipped `src/rag_ingest.py` to unify semantic indexing (rules, sessions, code) with incremental content-hash skipping. Ingestion is now fully event-driven (via git post-merge hooks and a 30-minute vault-sweep cron, installed via `hooks/install_rag_triggers.sh`). Real-time index freshness (including staleness warnings for failures or >24h age) is now continuously reported on the 📋 open-tasks Telegram dashboard.
+
 ### Changed
 
 - **The free-quota Gemini API channel is removed (owner decree 2026-07-27).**

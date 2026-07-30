@@ -82,6 +82,15 @@ def init_db(conn):
             CREATE INDEX IF NOT EXISTS rules_chunks_embedding_idx 
             ON rules_chunks USING hnsw (embedding vector_cosine_ops);
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ingested_files (
+                collection text,
+                file_path text,
+                content_hash text,
+                updated_at timestamp DEFAULT current_timestamp,
+                PRIMARY KEY (collection, file_path)
+            );
+        """)
     conn.commit()
 
 def chunk_markdown(text, max_tokens=300):
@@ -143,7 +152,7 @@ def chunk_markdown(text, max_tokens=300):
     emit_chunk(len(lines))
     return chunks
 
-def cmd_reindex(args):
+def ingest(force: bool = False) -> dict:
     load_env()
     repo_name, commit = project_info()
     
@@ -156,9 +165,10 @@ def cmd_reindex(args):
 
     dsn = os.environ.get("POSTGRES_DSN")
     if not dsn:
-        print("Error: POSTGRES_DSN not set.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError("POSTGRES_DSN not set")
         
+    stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0}
+
     with psycopg.connect(dsn) as conn:
         init_db(conn)
         
@@ -201,6 +211,17 @@ def cmd_reindex(args):
             indexed_paths.append(rel_path)
 
             text = filepath.read_text()
+            file_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+            if not force:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT content_hash FROM ingested_files WHERE collection = 'rules' AND file_path = %s", (rel_path,))
+                    row = cur.fetchone()
+                    if row and row[0] == file_hash:
+                        stats["skipped"] += 1
+                        continue
+                        
+            stats["files_seen"] += 1
             chunks = chunk_markdown(text)
             current_shas = []
 
@@ -232,22 +253,53 @@ def cmd_reindex(args):
                         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                         (repo_name, rel_path, chunk["heading"], chunk["start_line"], chunk_text, chunk_sha, commit, str(emb))
                     )
+                    stats["chunks_written"] += 1
 
             # GC: drop chunks this file no longer contains (edited/deleted
             # paragraphs would otherwise stay and pollute retrieval forever).
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM rules_chunks WHERE repo = %s AND path = %s AND NOT (chunk_sha = ANY(%s))",
+                    "DELETE FROM rules_chunks WHERE repo = %s AND path = %s AND NOT (chunk_sha = ANY(%s)) RETURNING id",
                     (repo_name, rel_path, current_shas)
+                )
+                stats["chunks_deleted"] += len(cur.fetchall())
+                
+                cur.execute(
+                    "INSERT INTO ingested_files (collection, file_path, content_hash, updated_at) "
+                    "VALUES ('rules', %s, %s, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (collection, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash, updated_at = CURRENT_TIMESTAMP",
+                    (rel_path, file_hash)
                 )
 
         # GC: drop paths that vanished from the corpus entirely.
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM rules_chunks WHERE repo = %s AND NOT (path = ANY(%s))",
+                "DELETE FROM rules_chunks WHERE repo = %s AND NOT (path = ANY(%s)) RETURNING id",
                 (repo_name, indexed_paths)
             )
+            stats["chunks_deleted"] += len(cur.fetchall())
+            
+            cur.execute(
+                "DELETE FROM ingested_files WHERE collection = 'rules' AND NOT (file_path = ANY(%s))",
+                (indexed_paths,)
+            )
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM rules_chunks WHERE repo = %s", (repo_name,))
+            stats["total_chunks"] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'rules'")
+            stats["total_docs"] = cur.fetchone()[0]
+
         conn.commit()
+    return stats
+
+def cmd_reindex(args):
+    try:
+        force = getattr(args, "rebuild", False) or getattr(args, "force", False)
+        ingest(force=force)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def cmd_search(args):
     load_env()
@@ -304,7 +356,9 @@ def main():
     parser = argparse.ArgumentParser(description="Rules index and search")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
     
-    subparsers.add_parser("reindex")
+    parser_reindex = subparsers.add_parser("reindex")
+    parser_reindex.add_argument("--rebuild", action="store_true", help="Force rebuild")
+    parser_reindex.add_argument("--force", action="store_true", help="Force rebuild")
     
     parser_search = subparsers.add_parser("search")
     parser_search.add_argument("query", help="Search query")
