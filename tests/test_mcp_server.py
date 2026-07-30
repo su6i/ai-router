@@ -60,7 +60,7 @@ def _fake_call_gemini(spec, key, history, system, max_output_tokens=8192):
     return (text.format(max_output_tokens=max_output_tokens), spec["api"],
             "resp-%d" % _calls["n"], 10, 5, 0, None)
 
-def _fake_call_agy_print(prompt, model, effort, root, to):
+def _fake_call_agy_print(prompt, model, root, to, conversation_id=None):
     text = _RESPONSES[min(_calls["n"], len(_RESPONSES) - 1)]
     _calls["n"] += 1
     if text == "__RAISE__":

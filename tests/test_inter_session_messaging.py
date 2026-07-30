@@ -33,6 +33,15 @@ def test_send_note_path_traversal(fake_agent_projects):
     with pytest.raises(ValueError, match="invalid project name: escaping/path"):
         d.send_note("escaping/path", "hello")
 
+def test_send_note_persian_subject_ascii_filename(fake_agent_projects):
+    d.send_note("arix", "test message", subject="سوال مهم")
+    inbox = fake_agent_projects / "arix" / "workspace" / "inbox"
+    files = list(inbox.glob("NOTE-*.md"))
+    assert len(files) == 1
+    # "سوال مهم" contains non-ASCII characters, which should be stripped,
+    # falling back to "note" or producing an ASCII-only slug.
+    assert files[0].name.isascii()
+
 def test_send_note_writes_file_and_redacts(fake_agent_projects, monkeypatch):
     # setup fake secret
     monkeypatch.setenv("FAKE_SECRET_KEY", "super_secret_value_12345")

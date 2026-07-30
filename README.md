@@ -246,6 +246,13 @@ python3 src/delegate.py --model flash \
   guessed).
 - `--retries` — verify-failure retries (default 1, max 2); the worker gets
   the verify output back and one more attempt per retry.
+- `--session-key <key>` — `agy` channel only: resume the SAME `agy`
+  conversation across separate `delegate.py` invocations instead of cold
+  starting every call. See "Warm agy sessions & self-fix loop" below.
+- `--worker-sessions` / `--worker-sessions-clear [key]` — list, or clear
+  (one key or everything), the warm-session state file.
+- `--no-self-fix` — disable the one-round agy self-fix retry on verify
+  failure (default: enabled).
 
 Output — the only thing that reaches the caller's context:
 
@@ -258,6 +265,37 @@ cost          : $0.000421 · model echoed: deepseek-v4-flash
 ```
 
 Full wire protocol: the private `DELEGATE-TOOL-DESIGN.md` (vault).
+
+### Warm agy sessions & self-fix loop
+
+`call_agy_print()` invokes `agy` with `--output-format json`, which returns a
+stable `conversation_id` plus REAL `usage.input_tokens` /
+`usage.output_tokens` / `usage.cache_read_tokens`. The router used to record
+zeros here and mark the cost "unknown" — that was a bug in how the router
+called `agy`, not a real limitation of the `agy` CLI. Cost stays $0 (Google
+AI Pro subscription — never billed) but the ledger now carries true token
+counts, and `cost_unknown` is no longer set for the `agy` channel.
+
+Pass `--session-key <name>` to resume the SAME `agy` conversation across
+separate CLI invocations instead of cold-starting every call — agy reuses
+its own server-side context for that conversation, which shows up as
+non-zero `usage.cache_read_tokens` on the resumed call. State is a small
+JSON file in the vault data dir
+(`~/.local/share/agent-projects/ai-router/data/worker_sessions.json`, never
+the repo), keyed by the session key, pruned after 24h. If the stored
+conversation id has expired or gone stale, the router drops it and retries
+once, cold — a dead id never hard-fails a delegation.
+
+On a verify FAILURE (`--verify`), the `agy` channel gets ONE self-fix round
+before giving up: the verify command, its exit code, and the last ~4000
+(redacted) chars of its output are sent back into the SAME warm
+conversation — not the whole task re-flattened from scratch — so the model
+pays for the delta, not a full context re-read. Exactly one round (owner
+decree: "only after the second failure does the reviewer step in"); a
+second failure returns to the caller with a structured report, never a
+silent extra retry. Disable with `--no-self-fix`. The audit ledger records
+`self_fix_rounds` (`0` or `1`) and `self_fix_outcome` (`fixed` / `failed` /
+`skipped`).
 
 ### Large File Guard
 

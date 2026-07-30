@@ -71,7 +71,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 
 | Component | Tech | Responsibility |
 |---|---|---|
-| **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, worker mode (`--files`: cheap model reads/writes files on disk directly, verified via a caller-supplied command, only a short summary returns to the caller — see private `DELEGATE-TOOL-DESIGN.md`), agent mode (`--agent`: an agentic CLI — `agy`/`codewhale` — performs its own tool-calls in the workdir; the launch binds `--add-dir <workdir>` so `agy` writes to the target rather than its sandbox scratch, and change detection falls back to a filesystem snapshot outside a git repo — a 0-change/verify-fail run is surfaced as `UNVERIFIED`, never a silent `COMPLETED`), audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). |
+| **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, worker mode (`--files`: cheap model reads/writes files on disk directly, verified via a caller-supplied command, only a short summary returns to the caller — see private `DELEGATE-TOOL-DESIGN.md`), agent mode (`--agent`: an agentic CLI — `agy`/`codewhale` — performs its own tool-calls in the workdir; the launch binds `--add-dir <workdir>` so `agy` writes to the target rather than its sandbox scratch, and change detection falls back to a filesystem snapshot outside a git repo — a 0-change/verify-fail run is surfaced as `UNVERIFIED`, never a silent `COMPLETED`), audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). The `agy` worker channel invokes `agy` with `--output-format json`, which exposes a stable `conversation_id` and REAL `usage.input_tokens`/`output_tokens`/`cache_read_tokens` — the router previously recorded zeros and marked cost "unknown" here; that was a router bug, not a limitation of the `agy` CLI, and is now fixed (cost stays $0-by-subscription, but the token counts are real). `--session-key` resumes that same `conversation_id` across separate invocations, persisted in `<DATA_DIR>/worker_sessions.json` (never git), pruned after 24h, self-healing on a stale/unknown id (one silent cold retry, never a hard failure). On a verify failure the `agy` channel gets exactly ONE self-fix round: the verify command, exit code, and a truncated+redacted tail of its output are sent back into the SAME warm conversation (not a full context replay) so the model pays for the delta, not a re-read — opt out with `--no-self-fix`; the ledger records `self_fix_rounds`/`self_fix_outcome`. |
 | **Channel Registry** | JSON file | Controls access to the available channels (`agy`, `codewhale`, `codex`, `copilot`). Checked at runtime before delegating via `delegate_agent`. Enforced by `channels.json` and the `AI_ROUTER_DISABLE_CHANNELS` env var. |
 | **mcp/server.py** | Python, stdlib-only | Hand-rolled stdio JSON-RPC MCP server (protocol revision 2025-11-25) exposing the same `delegate.py` as two capped MCP tools (`delegate_research`, `delegate_worker`) — see private `MCP-SERVER-DESIGN.md`. Registered once at user scope so every MCP host (Claude Code first) can discover cheap delegation without a CLI call. No uncapped chat tool; ledger rows tag `via: "mcp"`. |
 | **Postgres + pgvector** | `pgvector/pgvector:pg17` | System of record. `usage` (ledger) + `prompt_cache` (RAG). |
@@ -115,6 +115,13 @@ prompt_cache(
 
 `repo_commit` on the cache is the safety valve: for coding, the same prompt against
 a changed codebase needs a different answer, so a hit requires matching code state.
+
+`worker_sessions.json` (vault `<DATA_DIR>/worker_sessions.json`, plain JSON, not
+Postgres) is separate, process-local CLI state: `{session_key: {conversation_id, ts}}`,
+mapping a caller-supplied `session_key` to the live `agy` `conversation_id` for
+`--session-key` resume (see §3). It is pruned on write (24h TTL) and never committed —
+this is resumable-session bookkeeping, not billing data, so it deliberately does not
+live in the `usage` ledger table.
 
 ## 5. Model fleet & task-division policy
 
