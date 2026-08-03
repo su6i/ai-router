@@ -7,6 +7,19 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+
+- **`scripts/wo_guard.sh` — a delegation guard that runs inside `--verify`.**
+  Prompt rules are advice a model can ignore, so three failure modes kept
+  reaching the review gate as reported successes: work done on whatever branch
+  was checked out, a patch re-applied by a retry, and file/test counts the run
+  never measured. The guard fails the delegation when HEAD is not the named
+  branch, when the branch does not descend from the declared base (a stale cut
+  silently reverts whatever landed in between), when conflict markers or
+  unresolved paths remain, or when a `--once file:regex:n` pattern does not
+  occur exactly `n` times. It ends by printing a `===WO-GUARD-RECEIPT===` block
+  of measured facts, which is the only numeric claim the architect accepts.
+
 ### Changed
 
 - **`delegate_research` now defaults to `agy` ($0) instead of the paid `grok`.**

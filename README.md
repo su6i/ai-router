@@ -301,6 +301,27 @@ silent extra retry. Disable with `--no-self-fix`. The audit ledger records
 
 A full-file rewrite of an existing file >= 12KB (`LARGE_FILE_BYTES`) is rejected, as is any rewrite shrinking a file below 50% (`MAX_SHRINK_RATIO`) of its current size. Such edits must use the `===PATCH:` / `===OLD===` / `===NEW===` protocol, applied by literal exact match where the old text must occur exactly once. CLI escape hatch `--allow-full-rewrite`; not exposed on MCP.
 
+### Work-order guard: `scripts/wo_guard.sh`
+
+Prompt rules are advice a model can ignore; this runs inside `--verify`, so
+breaking one fails the delegation instead of being reported as success. Put it
+first in the verify chain:
+
+```bash
+scripts/wo_guard.sh --repo /abs/path/to/repo --branch fix/the-task --base <sha> \
+  --once 'src/mod.py:^SENTINEL =:1' \
+  --then 'uv run --directory /abs/path/to/repo pytest -q'
+```
+
+It refuses to pass when HEAD is not the branch the task named, when that branch
+does not descend from `--base` (a stale cut silently reverts whatever landed in
+between), when conflict markers or unresolved paths remain, or when a `--once`
+pattern does not occur exactly the stated number of times — the cheap check for
+a patch applied twice. On success it prints a `===WO-GUARD-RECEIPT===` block of
+measured facts (branch, base, head, commit count, files changed, verify exit).
+Treat the receipt as the numbers, and anything the model narrates that
+contradicts it as fabrication.
+
 ### Worker context discipline
 
 To prevent workers from churning through unnecessary tokens or getting lost in huge files, `delegate.py` strictly enforces context hygiene:
