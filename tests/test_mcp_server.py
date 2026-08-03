@@ -302,8 +302,9 @@ def test_tools_call_budget_abort_returns_jsonrpc_error(tmp_path):
     vault = tmp_path / "vault" / "data"
     vault.mkdir(parents=True, exist_ok=True)
     (vault / "budgets.json").write_text('{"monthly_usd": 1.0}')
+    from datetime import datetime, timezone
     (vault / "audit.log").write_text(json.dumps({
-        "ts": "2026-07-14T00:00:00+00:00",
+        "ts": datetime.now(timezone.utc).isoformat(),
         "cost_usd": 1.5,
     }) + "\n")
 

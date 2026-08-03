@@ -9,6 +9,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **RAG session collection coverage extension & mechanically provable receipts (`TASK T-025`)** — Extended `src/sessions_index.py` to index historical session digests (`_memory/sessions/*.md`), handoffs (`_memory/handoffs/*`), and archived per-repo session files (`<repo>/workspace/archive*`), with metadata provenance and automatic chunk deletion on file removals. Fixed incremental re-run content hashing and lazy model loading so no-op sweeps complete in ~0.1s. Added `--receipt <path>` entrypoint to `src/rag_ingest.py` to produce deterministic content-SHA receipts verified directly against stored DB rows.
+
 - **Unified RAG auto-ingest and dashboard freshness reporting** — Shipped `src/rag_ingest.py` to unify semantic indexing (rules, sessions, code) with incremental content-hash skipping. Ingestion is now fully event-driven (via git post-merge hooks and a 30-minute vault-sweep cron, installed via `hooks/install_rag_triggers.sh`). Real-time index freshness (including staleness warnings for failures or >24h age) is now continuously reported on the 📋 open-tasks Telegram dashboard.
 
 ### Changed

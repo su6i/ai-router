@@ -187,14 +187,14 @@ uv run src/rag_ingest.py --collection all
 # Force a full rebuild for sessions, outputting JSON status
 uv run src/rag_ingest.py --collection sessions --force --json
 
+# Ingest a single file and print a mechanically provable receipt derived from stored DB rows
+uv run src/rag_ingest.py --receipt ~/.local/share/agent-projects/ai-router/workspace/SESSION.md
+
 # Check current freshness status
 uv run src/rag_ingest.py --status
 ```
 
-The system uses three event triggers to keep the index fresh automatically (installed via `hooks/install_rag_triggers.sh`):
-1. A git `post-merge` hook on the `agent-constitution` repo triggers `rules` ingest.
-2. A 30-minute cron sweep (`vault-sweep`) triggers `sessions` ingest for `SESSION.md` appends.
-3. Inbox notes trigger `sessions` ingest.
+The `sessions` collection covers per-repo `SESSION.md`, `_memory/sessions/*.md`, `_memory/handoffs/*` (markdown/text notes), and per-repo archived session digests under `<repo>/workspace/archive*`. Incremental hashing ensures unchanged files are skipped in ~0.1s, and deleted files have their chunks removed automatically.
 The freshness of the RAG index is reported at the bottom of the 📋 open-tasks Telegram dashboard.
 
 ### Cache
