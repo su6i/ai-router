@@ -17,7 +17,7 @@ need **cost-per-task as a SQL query** instead of a guess. Full design:
 | `tests/` | pytest suite for `src/delegate.py` and `mcp/server.py` |
 | `docs/ARCHITECTURE.md` | Full design: Postgres + pgvector schema, exact-hash prompt cache, Prometheus/Grafana observability |
 | `docker-compose.yml` | pgvector Postgres + monitoring stack |
-| `.env.example` | Required environment variables (copy, fill, keep out of git) |
+| `.env.example` | Reference list of the variables the vault `.env` must define (rule 035 — the repo never holds one) |
 | `CHANGELOG.md` | Notable changes, newest first |
 
 `delegate.py` keeps no state in the repo: cache, audit log and session memory
@@ -529,16 +529,29 @@ See `docs/ARCHITECTURE.md` for the phased plan.
 
 ## Setup (Data Plane)
 
-1. Start Postgres:
+1. Put the Postgres credentials in your vault secrets
+   (`~/.local/share/agent-projects/ai-router/secrets/.env`) — **not** in the repo.
+   `docker-compose.yml` reads that file directly (override the location with
+   `AI_ROUTER_ENV_FILE`), so there is deliberately no `cp .env.example .env` step:
+   a repo-local `.env` is what rule 035 forbids, and demanding one is what kept the
+   data plane down — and every RAG collection stale — from 2026-07-28 to 2026-08-04.
+   ```ini
+   POSTGRES_USER=airouter
+   POSTGRES_PASSWORD=change-me
+   POSTGRES_DB=airouter
+   POSTGRES_DSN=postgresql://airouter:change-me@localhost:5432/airouter
+   ```
+
+2. Start Postgres:
    ```bash
-   cp .env.example .env
    docker compose up -d
    ```
-   Requires Docker (tested with Colima on macOS). The `usage` schema will be applied automatically on first run.
-
-2. Set the database connection in your vault secrets (`~/.local/share/agent-projects/ai-router/secrets/.env`):
-   ```ini
-   POSTGRES_DSN=postgresql://airouter:change-me@localhost:5432/airouter
+   Requires Docker (tested with Colima on macOS — `colima start` first if the
+   daemon is down). The `usage` schema is applied automatically on first run.
+   Confirm it actually came up before moving on; a failed start here is the
+   single most common cause of a silently stale index:
+   ```bash
+   docker ps --filter name=ai-router-db --format "{{.Names}}  {{.Status}}"
    ```
 
 3. Ingest your existing audit log into Postgres:
