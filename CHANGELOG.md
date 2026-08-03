@@ -24,6 +24,13 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Fixed
 
+- **The generated RAG-sweep launchd plist could never have run.** It listed a
+  bare `uv` as its program, but launchd does not inherit the login shell's
+  `PATH`, so the 30-minute sweep would have failed silently forever — which
+  looks exactly like "the index is up to date". `--cron` now resolves `uv` to an
+  absolute path at generation time (override with `UV_BIN`) and refuses to emit
+  a plist it knows is broken. Installed and verified: `launchctl kickstart`
+  returns exit 0 and the sweep ingests incrementally.
 - **The Postgres data plane could not start, which is why every RAG collection
   had been stale since 2026-07-28.** `docker-compose.yml` demanded a repo-local
   `.env`, but rule 035 keeps credentials in the vault, so `docker compose up`

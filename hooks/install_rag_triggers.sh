@@ -7,6 +7,15 @@ AI_ROUTER_REPO="${AI_ROUTER_REPO:-$DEFAULT_REPO}"
 
 if [ "${1:-}" = "--cron" ]; then
     PLIST_NAME="com.ai-router.rag-sweep"
+    # launchd does NOT inherit the login shell's PATH, so a bare "uv" here
+    # resolves to nothing and the sweep fails silently every 30 minutes —
+    # which is indistinguishable from "RAG is up to date". Resolve it now and
+    # bake in the absolute path.
+    UV_BIN="${UV_BIN:-$(command -v uv || true)}"
+    if [ -z "$UV_BIN" ]; then
+        echo "uv not found in PATH; set UV_BIN=/abs/path/to/uv and re-run" >&2
+        exit 1
+    fi
     echo '<?xml version="1.0" encoding="UTF-8"?>'
     echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
     echo '<plist version="1.0">'
@@ -15,7 +24,7 @@ if [ "${1:-}" = "--cron" ]; then
     echo "    <string>${PLIST_NAME}</string>"
     echo '    <key>ProgramArguments</key>'
     echo '    <array>'
-    echo '        <string>uv</string>'
+    echo "        <string>${UV_BIN}</string>"
     echo '        <string>run</string>'
     echo '        <string>--directory</string>'
     echo "        <string>${AI_ROUTER_REPO}</string>"
