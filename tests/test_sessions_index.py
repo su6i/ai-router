@@ -268,3 +268,29 @@ def test_receipt_success(monkeypatch, tmp_path, capsys):
     assert "RECEIPT col:sessions sha:" in captured.out
     assert "path:receipt_repo/workspace/SESSION.md" in captured.out
 
+
+@pytest.mark.skipif(not (has_pg and has_model), reason="Missing Postgres or e5 model")
+def test_sessions_modification_reingests(monkeypatch, tmp_path):
+    agent_root = tmp_path / "agent-projects"
+    agent_root.mkdir()
+    
+    r1 = agent_root / "modrepo" / "workspace"
+    r1.mkdir(parents=True)
+    f1 = r1 / "SESSION.md"
+    f1.write_text("## Original Heading\nOriginal text content.\n")
+    
+    monkeypatch.setattr(si, "_agent_projects_root", lambda: agent_root)
+    
+    res1 = si.ingest(force=False)
+    assert res1["files_seen"] == 1
+    assert res1["chunks_written"] == 1
+    
+    # Modify f1 content
+    f1.write_text("## Modified Heading\nModified text content.\n")
+    
+    res2 = si.ingest(force=False)
+    assert res2["skipped"] == 0
+    assert res2["files_seen"] == 1
+    assert res2["chunks_written"] == 1
+
+

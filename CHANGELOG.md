@@ -7,6 +7,10 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Fixed
+
+- **Incremental skip path stability fix (`TASK T-025` round 2)** — Updated `src/sessions_index.py` to resolve absolute and symlinked root paths when computing relative document paths and repository names, ensuring `ingested_files` content hashes match deterministically on subsequent runs.
+
 ### Added
 
 - **RAG session collection coverage extension & mechanically provable receipts (`TASK T-025`)** — Extended `src/sessions_index.py` to index historical session digests (`_memory/sessions/*.md`), handoffs (`_memory/handoffs/*`), and archived per-repo session files (`<repo>/workspace/archive*`), with metadata provenance and automatic chunk deletion on file removals. Fixed incremental re-run content hashing and lazy model loading so no-op sweeps complete in ~0.1s. Added `--receipt <path>` entrypoint to `src/rag_ingest.py` to produce deterministic content-SHA receipts verified directly against stored DB rows.

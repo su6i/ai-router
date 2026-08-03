@@ -122,10 +122,11 @@ def ingest(force: bool = False, target_file: Path | None = None) -> dict:
         model = None
         all_indexed_paths = []
         
+        agent_projects_resolved = agent_projects.resolve()
         for filepath in target_files:
             try:
-                rel_path = filepath.relative_to(agent_projects).as_posix()
-                repo_name = filepath.relative_to(agent_projects).parts[0]
+                rel_path = filepath.resolve().relative_to(agent_projects_resolved).as_posix()
+                repo_name = filepath.resolve().relative_to(agent_projects_resolved).parts[0]
             except ValueError:
                 rel_path = str(filepath)
                 repo_name = filepath.parent.name
