@@ -417,9 +417,8 @@ Three tools only, all capped — no uncapped chat tool, ever:
 
 - **`delegate_research`** — fact lookup / live-data checks / doc
   verification. **The default is `agy` (Gemini 3.1 Pro on the Google AI Pro
-  subscription): $0, using agy's own grounded web search** (owner decree
-  2026-08-04 — the weekly subscription quota was going unused while every
-  research call billed xAI). Note the implementation constraint: the agy branch
+  subscription): $0, using agy's own grounded web search**. Note the
+  implementation constraint: the agy branch
   routes through `agent_delegate()`, *not* `delegate()`, because the latter
   appends `AGY_NO_TOOLS_ADDENDUM` and would leave agy answering live-fact
   questions from memory with no signal that it never searched. `max_output_tokens`
