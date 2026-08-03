@@ -39,30 +39,36 @@ SERVER_ERROR = -32000  # implementation-defined: the delegate call itself failed
 TOOLS = [
     {
         "name": "delegate_research",
-        "description": ("Ask a cheap/fast model a fact-lookup or live-data question. "
-                         "Routes grok via xAI's /v1/responses endpoint with server-side "
-                         "web_search — each search call costs ~$0.005 and a question "
-                         "typically triggers 3-6, so a research call is ~$0.02-$0.05, "
-                         "NOT $0.003. USE THIS INSTEAD of WebSearch/WebFetch or "
-                         "answering from memory whenever the question is: a current "
-                         "fact, a version/license/API check, or doc verification. "
-                         "Answer is capped at max_output_tokens. Never for bulk chat."),
+        "description": ("Ask a fact-lookup or live-data question with real web search. "
+                         "DEFAULT is agy (Gemini 3.1 Pro on the Google AI Pro "
+                         "subscription) using its own grounded web-search tool: $0, and "
+                         "the weekly subscription quota is otherwise going unused (owner "
+                         "decree 2026-08-04). grok stays reachable but is PAID and must "
+                         "be named explicitly — it routes via xAI's /v1/responses "
+                         "server-side web_search at ~$0.005/search, 3-6 searches per "
+                         "question, so ~$0.02-$0.05 a call. USE THIS INSTEAD of "
+                         "WebSearch/WebFetch or answering from memory whenever the "
+                         "question is: a current fact, a version/license/API check, or "
+                         "doc verification. Never for bulk chat."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "question": {"type": "string"},
-                "model": {"type": "string", "default": "grok", "enum": ["grok", "grok-4.5"],
-                          "description": "router alias; grok (4.3, default — cheaper "
-                                         "and equal-or-better on a live A/B) or grok-4.5"},
-                "max_output_tokens": {"type": "integer", "default": 500, "maximum": 2000},
+                "model": {"type": "string", "default": "agy",
+                          "enum": ["agy", "grok", "grok-4.5"],
+                          "description": "router alias; agy (default, $0, subscription "
+                                         "quota) or the PAID grok (4.3) / grok-4.5"},
+                "max_output_tokens": {"type": "integer", "default": 500, "maximum": 2000,
+                                      "description": "grok only; agy is not token-capped"},
                 "search": {"type": "boolean", "default": True,
-                           "description": "enable the server-side web_search tool "
-                                          "(true = live search, ~$0.005/call; false = "
-                                          "plain chat, no live data)"},
+                           "description": "enable live web search (true = live data). "
+                                          "grok: server-side web_search, ~$0.005/call. "
+                                          "agy: its own grounded search tool, $0"},
                 "max_tool_calls": {"type": "integer", "default": 6, "maximum": 20,
-                                   "description": "cap server-side web_search calls per "
-                                                  "request — an uncapped live question "
-                                                  "once made 15 calls and cost $0.389"},
+                                   "description": "grok only — cap server-side "
+                                                  "web_search calls per request; an "
+                                                  "uncapped live question once made 15 "
+                                                  "calls and cost $0.389"},
             },
             "required": ["question"],
         },
@@ -269,7 +275,49 @@ def handle_delegate_research(args: dict) -> dict:
     if not isinstance(max_tool_calls, int) or isinstance(max_tool_calls, bool) \
             or not (0 < max_tool_calls <= 20):
         raise ValueError("'max_tool_calls' must be an integer in (0, 20]")
-    model = d.resolve_model(args.get("model", "grok"))
+    model = d.resolve_model(args.get("model", "agy"))
+
+    if d.MODELS[model]["provider"] == "agy_cli":
+        # agy searches the web only when it is allowed to use its own tools, so
+        # research CANNOT go through delegate()/worker_delegate — that path sends
+        # AGY_NO_TOOLS_ADDENDUM and would silently answer from memory, which is the
+        # exact failure this tool exists to prevent. Route it through the agent
+        # path instead, which leaves the tools on. The workdir is a throwaway
+        # scratch dir with no repo in it: agent mode CAN write, and research must
+        # never touch a real checkout.
+        scratch = d.DATA_DIR / "research-scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        task = (
+            f"{question}\n\n"
+            "---\n"
+            "Answer using your web search tool — do NOT answer from memory. Cite a "
+            "source URL for every factual claim. If a claim has no source, mark it "
+            "explicitly as an estimate. If you could not search, say so plainly "
+            "instead of guessing. Answer only; do not create, modify or delete any "
+            "file, and do not run git."
+            if search else
+            f"{question}\n\n---\nAnswer directly. Do not create, modify or delete any "
+            "file, and do not run git."
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            envelope = d.agent_delegate(task, runner="agy", model=model,
+                                        workdir=scratch, via="mcp")
+        # agent_delegate returns a run-status envelope and parks the model's actual
+        # text in a log file. A research caller wants the ANSWER, so unwrap it —
+        # falling back to the envelope if the log is unreadable, never returning a
+        # bare "COMPLETED" that reads like an answer but contains nothing.
+        answer = envelope
+        for line in envelope.splitlines():
+            if line.startswith("output saved"):
+                log_path = Path(line.split(":", 1)[1].strip())
+                try:
+                    text = log_path.read_text(errors="ignore").strip()
+                    if text:
+                        answer = text
+                except OSError:
+                    pass
+                break
+        return _text_result(f"{answer}\n\ncost: $0.000000 (agy — subscription quota)")
 
     with contextlib.redirect_stdout(io.StringIO()):
         answer = d.delegate(question, model, max_output_tokens=max_output_tokens, via="mcp",
@@ -488,7 +536,7 @@ def handle_request(msg: dict):
         m = args.get("model")
         if not m:
             if tool == "delegate_research":
-                m = "grok"
+                m = "agy"
             elif tool == "delegate_worker":
                 m = "agy"
             elif tool == "delegate_agent":

@@ -7,6 +7,35 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Changed
+
+- **`delegate_research` now defaults to `agy` ($0) instead of the paid `grok`
+  (owner decree 2026-08-04).** The weekly Google AI Pro subscription quota was
+  going unused while every research call billed xAI ~$0.02–$0.05. `grok` and
+  `grok-4.5` stay reachable but must now be named explicitly.
+  Research on `agy` **cannot** go through `delegate()`/`worker_delegate()`: that
+  path appends `AGY_NO_TOOLS_ADDENDUM`, which disables agy's tools, so agy would
+  have answered live-fact questions from memory — silently, and precisely the
+  failure this tool exists to prevent. The agy branch therefore routes through
+  `agent_delegate()` (tools on) against a throwaway `data/research-scratch`
+  workdir, and unwraps the model's answer out of the run-status envelope that
+  `agent_delegate` returns. Verified live: agy returned a gallery-dl version
+  released three days prior, which it could not have known from training.
+
+### Fixed
+
+- **The Postgres data plane could not start, which is why every RAG collection
+  had been stale since 2026-07-28.** `docker-compose.yml` demanded a repo-local
+  `.env`, but rule 035 keeps credentials in the vault, so `docker compose up`
+  aborted with `env file .../ai-router/.env not found` and the ingest failed at
+  `Postgres unavailable`. `env_file` now defaults to the vault path
+  (overridable via `AI_ROUTER_ENV_FILE`), and the healthcheck resolves
+  `POSTGRES_USER`/`POSTGRES_DB` inside the container instead of relying on
+  host-side interpolation that no longer had a file to read.
+- `test_tools_call_budget_abort_returns_jsonrpc_error` wrote a hardcoded past
+  timestamp into its fixture `audit.log`, so the monthly budget window silently
+  stopped matching and the test failed on time drift rather than on behaviour.
+
 ### Added
 
 - **Unified RAG auto-ingest and dashboard freshness reporting** — Shipped `src/rag_ingest.py` to unify semantic indexing (rules, sessions, code) with incremental content-hash skipping. Ingestion is now fully event-driven (via git post-merge hooks and a 30-minute vault-sweep cron, installed via `hooks/install_rag_triggers.sh`). Real-time index freshness (including staleness warnings for failures or >24h age) is now continuously reported on the 📋 open-tasks Telegram dashboard.

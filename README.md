@@ -401,7 +401,7 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 
 | Door | Best For | Default Model | Notes |
 | --- | --- | --- | --- |
-| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `grok` (4.3, `/v1/responses` + web_search) | ~$0.02–$0.05/call (3–6 web_search at $0.005 each), not $0.003. Answer is capped by `max_output_tokens`. |
+| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `agy` (Gemini 3.1 Pro, grounded search, **$0**) | Paid `grok` must now be named explicitly (~$0.02–$0.05/call). |
 | **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `agy` (free, Google AI Pro sub) | Pass known file paths. Generated code never crosses the wire. |
 | **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
 | **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
@@ -416,7 +416,17 @@ claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/
 Three tools only, all capped — no uncapped chat tool, ever:
 
 - **`delegate_research`** — fact lookup / live-data checks / doc
-  verification (default model `grok` = 4.3, via xAI's `/v1/responses`
+  verification. **The default is `agy` (Gemini 3.1 Pro on the Google AI Pro
+  subscription): $0, using agy's own grounded web search** (owner decree
+  2026-08-04 — the weekly subscription quota was going unused while every
+  research call billed xAI). Note the implementation constraint: the agy branch
+  routes through `agent_delegate()`, *not* `delegate()`, because the latter
+  appends `AGY_NO_TOOLS_ADDENDUM` and would leave agy answering live-fact
+  questions from memory with no signal that it never searched. `max_output_tokens`
+  and `max_tool_calls` apply to `grok` only.
+
+  The paid path below must now be requested explicitly with `model="grok"`
+  (4.3, via xAI's `/v1/responses`
   endpoint with the server-side `web_search` tool — the old
   `chat/completions` live-search field is HTTP 410 Gone as of 2026-07). Each
   `web_search` call adds a flat **$0.005** on top of tokens and a question
@@ -426,8 +436,8 @@ Three tools only, all capped — no uncapped chat tool, ever:
   per-search-call billing. `search` (default true) turns the tool off for
   the cheap plain-chat path; `max_tool_calls` (default 6) caps `web_search`
   calls per request — one uncapped live question made 15 calls and cost
-  $0.389. `grok-4.5` is available as an opt-in, but the default stays `grok`
-  (4.3): a live 5-question A/B had 4.3 5/5 correct at $0.172 vs 4.5's 4/5 at
+  $0.389. `grok-4.5` is available as an opt-in, but when you do pay for grok
+  the version to ask for stays 4.3: a live 5-question A/B had 4.3 5/5 correct at $0.172 vs 4.5's 4/5 at
   $0.618 (3.6x the cost, equal-or-worse quality). Answer is capped by
   `max_output_tokens` (default 500, max 2000) — a low default, not a promise.
 - **`delegate_worker`** — grunt coding work (default model `agy`). Same
@@ -492,7 +502,7 @@ From `MODELS` in `src/delegate.py` (cost per 1M tokens):
 | `minimax` | `MiniMax-M3` | MiniMax | $0.30 / $1.20 | Default — one-time prepaid credit, spend first |
 | `flash` | `deepseek-v4-flash` | DeepSeek | $0.14 / $0.28 | General grunt work — implementation, refactor, tests, boilerplate |
 | `pro` | `deepseek-v4-pro` | DeepSeek | $0.435 / $0.87 | Reasoner — escalation target when `flash` fails or needs deeper reasoning |
-| `grok` | `grok-4.3` | xAI | $1.25 / $2.50 (+ $0.20 cached in) | Second opinion / current-events knowledge — `delegate_research` default, not for routine work |
+| `grok` | `grok-4.3` | xAI | $1.25 / $2.50 (+ $0.20 cached in) | Second opinion / current-events knowledge — PAID `delegate_research` escape hatch, explicit only (default is `agy`), not for routine work |
 | `grok-4.5` | `grok-4.5` | xAI | $2.00 / $6.00 (+ $0.30 cached in) | Opt-in only — a live A/B found 3.6x the cost of `grok` for equal-or-worse research quality |
 | `agy` | `Gemini 3.1 Pro (High)` | Google AI Pro sub (local `agy`) | $0 / $0 | Default coding worker — mechanical changes, tests, boilerplate |
 

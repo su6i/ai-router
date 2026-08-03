@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -299,11 +300,12 @@ def test_tools_call_delegate_failure_returns_jsonrpc_error(tmp_path):
 
 def test_tools_call_budget_abort_returns_jsonrpc_error(tmp_path):
     # Create budget file and audit log that exceeds it
+    now_iso = datetime.now(timezone.utc).isoformat()
     vault = tmp_path / "vault" / "data"
     vault.mkdir(parents=True, exist_ok=True)
     (vault / "budgets.json").write_text('{"monthly_usd": 1.0}')
     (vault / "audit.log").write_text(json.dumps({
-        "ts": "2026-07-14T00:00:00+00:00",
+        "ts": now_iso,
         "cost_usd": 1.5,
     }) + "\n")
 
@@ -376,3 +378,47 @@ def test_tools_call_dashboard_push_returns_summary(tmp_path):
     finally:
         proc.stdin.close()
         proc.wait(timeout=5)
+
+
+def test_delegate_research_agy_unwrap_log_and_fallback(tmp_path, monkeypatch):
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import delegate as d
+    import server
+
+    log_file = tmp_path / "agent_123.log"
+    log_file.write_text("the answer is 42\n")
+
+    envelope_with_file = (
+        "status        : COMPLETED\n"
+        f"output saved  : {log_file}\n"
+    )
+
+    def fake_agent_delegate(task, runner="agy", model="agy", workdir=None, via=None, **kwargs):
+        return envelope_with_file
+
+    monkeypatch.setattr(d, "agent_delegate", fake_agent_delegate)
+
+    res = server.handle_delegate_research({"question": "what is 6x7?"})
+    text = res["content"][0]["text"]
+    assert "the answer is 42" in text
+    assert "status        :" not in text
+    assert "cost: $0.000000" in text
+
+    missing_log = tmp_path / "non_existent.log"
+    envelope_missing_file = (
+        "status        : COMPLETED\n"
+        f"output saved  : {missing_log}\n"
+    )
+
+    def fake_agent_delegate_missing(task, runner="agy", model="agy", workdir=None, via=None, **kwargs):
+        return envelope_missing_file
+
+    monkeypatch.setattr(d, "agent_delegate", fake_agent_delegate_missing)
+
+    res_fallback = server.handle_delegate_research({"question": "what is 6x7?"})
+    text_fallback = res_fallback["content"][0]["text"]
+    assert "status        : COMPLETED" in text_fallback
+    assert "cost: $0.000000" in text_fallback

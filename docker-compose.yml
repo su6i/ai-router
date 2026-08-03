@@ -3,16 +3,19 @@
 #   Phase 2 (profile: monitoring): prometheus + grafana + exporter (observability)
 #
 # Quickstart:
-#   cp .env.example .env      # then edit the password
 #   docker compose up -d      # start Postgres only
 #   docker compose --profile monitoring up -d   # Phase 2, once the exporter exists
+#
+# Credentials come from the rule-035 vault, not from a repo-local file. Override
+# the location with AI_ROUTER_ENV_FILE if the vault lives somewhere else.
 
 services:
   db:
     image: pgvector/pgvector:pg17
     container_name: ai-router-db
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - ${AI_ROUTER_ENV_FILE:-${HOME}/.local/share/agent-projects/ai-router/secrets/.env}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -20,7 +23,9 @@ services:
       # SQL files here run once, in order, on first cluster init.
       - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # $$ escapes to a literal $, so these resolve inside the container from
+      # env_file above — not on the host, which no longer has a repo-local .env.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 3s
       retries: 10
