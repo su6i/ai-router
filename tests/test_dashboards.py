@@ -292,3 +292,84 @@ def test_rag_index_freshness_line_fail_open(fake_agent_projects, monkeypatch):
     
     out = dashboards.render_tasks()
     assert "🧠 RAG: unknown" in out
+
+def test_send_note_ping_deduped_coalesces(fake_agent_projects, monkeypatch):
+    monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", "fake_token")
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "123")
+
+    mock_post = MagicMock()
+    def side_effect(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "sendMessage" in url:
+            resp.json.return_value = {"ok": True, "result": {"message_id": 100}}
+        elif "editMessageText" in url:
+            resp.json.return_value = {"ok": True, "result": {}}
+        return resp
+    mock_post.side_effect = side_effect
+    monkeypatch.setattr("httpx.post", mock_post)
+
+    res1 = dashboards.send_note_ping_deduped("ping text", "key1")
+    assert res1 == "message_id=100"
+
+    res2 = dashboards.send_note_ping_deduped("ping text", "key1")
+    assert res2 == "coalesced (message_id=100, count=2)"
+
+    state = json.loads((d.DATA_DIR / "telegram_dashboards.json").read_text())
+    assert state["note_pings"]["key1"]["count"] == 2
+
+def test_send_note_ping_deduped_stale_message_fallback(fake_agent_projects, monkeypatch):
+    monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", "fake_token")
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "123")
+
+    mock_post = MagicMock()
+    def side_effect(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "sendMessage" in url:
+            resp.json.return_value = {"ok": True, "result": {"message_id": 200}}
+        elif "editMessageText" in url:
+            resp.json.return_value = {"ok": False, "description": "message to edit not found"}
+        return resp
+    mock_post.side_effect = side_effect
+    monkeypatch.setattr("httpx.post", mock_post)
+
+    dashboards.send_note_ping_deduped("ping text", "key2")
+
+    mock_post.reset_mock()
+    def side_effect2(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "editMessageText" in url:
+            resp.json.return_value = {"ok": False, "description": "message to edit not found"}
+        elif "sendMessage" in url:
+            resp.json.return_value = {"ok": True, "result": {"message_id": 201}}
+        return resp
+    mock_post.side_effect = side_effect2
+
+    res = dashboards.send_note_ping_deduped("ping text", "key2")
+    assert res == "message_id=201"
+
+def test_send_note_ping_deduped_prunes_old_entries(fake_agent_projects, monkeypatch):
+    monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", "fake_token")
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "123")
+
+    mock_post = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"ok": True, "result": {"message_id": 300}}
+    mock_post.return_value = resp
+    monkeypatch.setattr("httpx.post", mock_post)
+
+    state = {
+        "note_pings": {
+            "old_key": {"message_id": 50, "ts": "2020-01-01T00:00:00+00:00", "count": 1, "text": "old"}
+        }
+    }
+    (d.DATA_DIR / "telegram_dashboards.json").write_text(json.dumps(state))
+
+    dashboards.send_note_ping_deduped("new ping", "new_key")
+
+    final_state = json.loads((d.DATA_DIR / "telegram_dashboards.json").read_text())
+    assert "old_key" not in final_state["note_pings"]
+    assert "new_key" in final_state["note_pings"]

@@ -7,6 +7,44 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Fixed
+
+- **The test suite no longer sends its fixture messages to the owner's real
+  Telegram chat.** `send_note()` pings whenever `AI_ROUTER_BOT_TOKEN` and
+  `TELEGRAM_OWNER_CHAT_ID` are both set, and a developer shell has both, so
+  every `pytest` run delivered the messages
+  `tests/test_inter_session_messaging.py` uses as fixtures — "test message",
+  "Subject 1", "hello audit", and the redaction test's fake key — and wrote to
+  the live dashboard state file. That test module patched only
+  `AGENT_PROJECTS` and `AUDIT`, never the notification path. The credentials
+  are now stripped by an autouse fixture in `tests/conftest.py`, which no
+  future test can forget; modules that exercise the Telegram paths still set
+  their own fake values, because autouse fixtures run before test-requested
+  ones.
+- **A broadcast note no longer sends one near-identical Telegram ping per
+  recipient.** `send_note()` fired an independent ping for every project it was
+  addressed to; a single announcement sent to seven projects arrived as seven
+  messages differing only in the recipient name. Pings are now coalesced by
+  `dashboards.send_note_ping_deduped()`: notes sharing a sender and subject
+  within a 15-minute window edit the first message in place and append
+  `… and N more` instead of posting again. State lives beside the dashboard
+  state and is pruned after 24h; Telegram failures stay best-effort and never
+  block or lose the note itself.
+- **The Hugging Face "unauthenticated requests" notice no longer prints on
+  every RAG run.** Isolated to its actual cause: once `tokenizers` is imported
+  into the process, *any* Hub request emits it from a Rust extension straight
+  to stderr — not through Python `logging` or `warnings`, so no Python-side
+  filter reaches it, and `HF_HUB_DISABLE_XET` does not help either. Since the
+  ONNX weights and tokenizer never change, `src/rules_index.py` now resolves
+  both from the local cache with `try_to_load_from_cache` and only calls
+  `hf_hub_download` on a miss, which also drops a Hub round-trip from every
+  query. The line therefore appears at most once, on the first download.
+  `Tokenizer.from_pretrained` was replaced by `Tokenizer.from_file` because it
+  runs its own downloader and cannot use the cached path; token ids were
+  verified identical between the two. Setting `HF_TOKEN` or
+  `HUGGING_FACE_HUB_TOKEN` still authenticates the download when one is
+  present.
+
 ### Added
 
 - **`scripts/wo_guard.sh` — a delegation guard that runs inside `--verify`.**

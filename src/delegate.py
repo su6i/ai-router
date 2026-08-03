@@ -2275,7 +2275,9 @@ read: false"""
                 if subject:
                     ping_text += f"{subject}\n"
                 ping_text += redacted_message[:200]
-                dashboards.send_note_ping(ping_text)
+                key_base = f"{from_project}:{subject if subject else redacted_message[:200]}"
+                dedupe_key = hashlib.sha256(key_base.encode("utf-8")).hexdigest()
+                dashboards.send_note_ping_deduped(ping_text, dedupe_key)
                 dashboards.push_dashboard("inbox")
             except Exception as e:
                 logger.warning(f"Telegram notification failed: {e}")

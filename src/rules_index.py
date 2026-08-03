@@ -3,11 +3,12 @@ import sys
 import os
 import hashlib
 from pathlib import Path
+
 import psycopg
 from tokenizers import Tokenizer
 import onnxruntime as ort
 import numpy as np
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, try_to_load_from_cache
 
 # Import delegate under ONE module identity ("delegate"), whether we run as
 # `python -m src.rules_index` (r.sh) or get imported by mcp/server.py, whose
@@ -17,11 +18,48 @@ from delegate import load_env, project_info  # noqa: E402
 
 _TOKENIZER = None
 
+E5_REPO = "intfloat/multilingual-e5-small"
+
+
+def _hf_token_kwargs() -> dict:
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    return {"token": token} if token else {}
+
+
+def _hf_file(filename: str) -> str:
+    """Resolve a model file, preferring the local cache over a Hub round-trip.
+
+    Two reasons. The obvious one: these files never change, so contacting the
+    Hub on every single query is pure latency. The other: once `tokenizers` is
+    imported into the process, any Hub request prints
+
+        Warning: You are sending unauthenticated requests to the HF Hub…
+
+    from a Rust extension straight to stderr — not through Python logging or
+    `warnings`, so it cannot be filtered on the Python side, and it is
+    unactionable anyway for two small public files. Resolving from cache skips
+    the request entirely, so the line appears at most once, on the very first
+    download. Setting HF_TOKEN keeps the fast path and authenticates for real.
+    """
+    cached = try_to_load_from_cache(repo_id=E5_REPO, filename=filename)
+    if isinstance(cached, str) and Path(cached).is_file():
+        return cached
+    return hf_hub_download(repo_id=E5_REPO, filename=filename, **_hf_token_kwargs())
+
+
+def _load_tokenizer() -> Tokenizer:
+    """Load the tokenizer from tokenizer.json instead of from_pretrained.
+
+    from_pretrained runs its own downloader, which cannot use the cache-first
+    path above. Token ids were verified identical between the two.
+    """
+    return Tokenizer.from_file(_hf_file("tokenizer.json"))
+
 
 def _get_tokenizer():
     global _TOKENIZER
     if _TOKENIZER is None:
-        _TOKENIZER = Tokenizer.from_pretrained("intfloat/multilingual-e5-small")
+        _TOKENIZER = _load_tokenizer()
     return _TOKENIZER
 
 def mean_pooling(last_hidden_states, attention_mask):
@@ -33,9 +71,8 @@ def mean_pooling(last_hidden_states, attention_mask):
 class E5Model:
     def __init__(self):
         # We only download once (the only allowed network access). huggingface_hub caches it.
-        # Ensure we suppress HF warnings or keep them visible.
-        self.model_path = hf_hub_download(repo_id="intfloat/multilingual-e5-small", filename="onnx/model.onnx")
-        self.tokenizer = Tokenizer.from_pretrained("intfloat/multilingual-e5-small")
+        self.model_path = _hf_file("onnx/model.onnx")
+        self.tokenizer = _load_tokenizer()
         self.tokenizer.enable_truncation(max_length=512)
         self.tokenizer.enable_padding(pad_id=self.tokenizer.token_to_id("<pad>"), pad_token="<pad>")
         self.session = ort.InferenceSession(self.model_path, providers=['CPUExecutionProvider'])

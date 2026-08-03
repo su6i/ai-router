@@ -395,3 +395,94 @@ def send_note_ping(text: str) -> str:
         _raise_api_err("Telegram refused sendMessage", data.get("description", "no description"))
         
     return f"message_id={msg_id}"
+
+
+def send_note_ping_deduped(text: str, dedupe_key: str, window_seconds: int = 900) -> str:
+    state = _load_state()
+    pings = state.get("note_pings", {})
+    now = dt.datetime.now().astimezone()
+
+    to_delete = []
+    for k, v in pings.items():
+        try:
+            ts = dt.datetime.fromisoformat(v.get("ts", ""))
+            if (now - ts).total_seconds() > 86400:
+                to_delete.append(k)
+        except Exception:  # noqa: BLE001
+            to_delete.append(k)
+    for k in to_delete:
+        pings.pop(k, None)
+
+    entry = pings.get(dedupe_key)
+    if entry:
+        try:
+            entry_ts = dt.datetime.fromisoformat(entry.get("ts", ""))
+            age = (now - entry_ts).total_seconds()
+        except Exception:  # noqa: BLE001
+            age = window_seconds + 1
+
+        if age <= window_seconds:
+            msg_id = entry.get("message_id")
+            base_text = entry.get("text", text)
+            count = entry.get("count", 1) + 1
+            new_text = f"{base_text}\n… and {count} more (see the pinned inbox dashboard)"
+
+            token = os.environ.get("AI_ROUTER_BOT_TOKEN")
+            chat_id = os.environ.get("TELEGRAM_OWNER_CHAT_ID")
+            if not token or not chat_id:
+                raise ValueError("AI_ROUTER_BOT_TOKEN or TELEGRAM_OWNER_CHAT_ID not in env")
+
+            def _raise_api_err(prefix, desc):
+                desc_redacted = d._redact(str(desc)).replace(token, "<redacted>")
+                raise RuntimeError(f"{prefix}: {desc_redacted}")
+
+            url = f"https://api.telegram.org/bot{token}/editMessageText"
+            payload = {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "text": d._redact(new_text)
+            }
+
+            try:
+                resp = httpx.post(url, json=payload, timeout=30.0)
+            except Exception as e:  # noqa: BLE001
+                _raise_api_err("editMessageText network error", str(e))
+
+            try:
+                data = resp.json()
+            except Exception:  # noqa: BLE001
+                _raise_api_err("editMessageText failed", f"HTTP {resp.status_code} (non-JSON response)")
+
+            if data.get("ok"):
+                entry["count"] = count
+                entry["ts"] = now.isoformat()
+                state["note_pings"] = pings
+                _save_state(state)
+                return f"coalesced (message_id={msg_id}, count={count})"
+
+            desc = data.get("description", "").lower()
+            if "message to edit not found" in desc or "message can't be edited" in desc:
+                pings.pop(dedupe_key, None)
+                state["note_pings"] = pings
+                _save_state(state)
+            else:
+                _raise_api_err("Telegram refused editMessageText", data.get("description", "no description"))
+
+    ping_res = send_note_ping(text)
+    msg_id = None
+    if ping_res.startswith("message_id="):
+        try:
+            msg_id = int(ping_res.split("=", 1)[1])
+        except ValueError:
+            pass
+
+    pings[dedupe_key] = {
+        "message_id": msg_id,
+        "ts": now.isoformat(),
+        "count": 1,
+        "text": text
+    }
+    state["note_pings"] = pings
+    _save_state(state)
+    return ping_res
+
