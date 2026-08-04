@@ -91,8 +91,11 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 - `test_tools_call_budget_abort_returns_jsonrpc_error` wrote a hardcoded past
   timestamp into its fixture `audit.log`, so the monthly budget window silently
   stopped matching and the test failed on time drift rather than on behaviour.
+- **Incremental skip path stability fix (`TASK T-025` round 2)** — Updated `src/sessions_index.py` to resolve absolute and symlinked root paths when computing relative document paths and repository names, ensuring `ingested_files` content hashes match deterministically on subsequent runs.
 
 ### Added
+
+- **RAG session collection coverage extension & mechanically provable receipts (`TASK T-025`)** — Extended `src/sessions_index.py` to index historical session digests (`_memory/sessions/*.md`), handoffs (`_memory/handoffs/*`), and archived per-repo session files (`<repo>/workspace/archive*`), with metadata provenance and automatic chunk deletion on file removals. Fixed incremental re-run content hashing and lazy model loading so no-op sweeps complete in ~0.1s. Added `--receipt <path>` entrypoint to `src/rag_ingest.py` to produce deterministic content-SHA receipts verified directly against stored DB rows.
 
 - **Unified RAG auto-ingest and dashboard freshness reporting** — Shipped `src/rag_ingest.py` to unify semantic indexing (rules, sessions, code) with incremental content-hash skipping. Ingestion is now fully event-driven (via git post-merge hooks and a 30-minute vault-sweep cron, installed via `hooks/install_rag_triggers.sh`). Real-time index freshness (including staleness warnings for failures or >24h age) is now continuously reported on the 📋 open-tasks Telegram dashboard.
 

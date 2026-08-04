@@ -1,7 +1,9 @@
 import argparse
-import sys
+import hashlib
 import json
+import os
 import psycopg
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -98,15 +100,87 @@ def _update_state(collection: str, stats: dict, error_msg: str = None):
     d.DATA_DIR.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(state, indent=2), "utf-8")
 
+def handle_receipt(file_path_str: str, collection_arg: str | None = None):
+    d.load_env()
+    path = Path(file_path_str).resolve()
+    if not path.exists():
+        print(f"Error: File not found: {file_path_str}", file=sys.stderr)
+        sys.exit(1)
+        
+    dsn = os.environ.get("POSTGRES_DSN")
+    if not dsn:
+        print("Postgres unavailable — start it first: colima start", file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        conn = psycopg.connect(dsn)
+        conn.close()
+    except psycopg.OperationalError:
+        print("Postgres unavailable — start it first: colima start", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:
+        print(f"Error connecting to Postgres: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    col = collection_arg if collection_arg and collection_arg != "all" else None
+    if not col:
+        s_path = str(path)
+        if "rules" in s_path or path.suffix == ".mdc":
+            col = "rules"
+        elif path.suffix in (".py", ".js", ".ts", ".go", ".rs"):
+            col = "code"
+        else:
+            col = "sessions"
+
+    if col == "sessions":
+        sessions_index.ingest(force=True, target_file=path)
+    elif col == "rules":
+        rules_index.ingest(force=True)
+    elif col == "code":
+        code_index.ingest(force=True)
+
+    agent_projects = d._agent_projects_root()
+    try:
+        rel_path = path.relative_to(agent_projects).as_posix()
+    except ValueError:
+        rel_path = str(path)
+
+    table_name = "session_chunks" if col == "sessions" else f"{col}_chunks"
+    
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, chunk FROM {table_name} WHERE path = %s ORDER BY id",
+                (rel_path,)
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        print(f"Error: No chunks found in database for {rel_path}", file=sys.stderr)
+        sys.exit(1)
+
+    db_text = "".join(r[1] for r in rows)
+    db_sha = hashlib.sha256(db_text.encode("utf-8")).hexdigest()[:12]
+    chunk_count = len(rows)
+    ids = [r[0] for r in rows]
+    id_str = f"id:{ids[0]}" if len(ids) == 1 else f"ids:{ids[0]}-{ids[-1]}"
+
+    print(f"RECEIPT col:{col} sha:{db_sha} chunks:{chunk_count} {id_str} path:{rel_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Unified RAG Ingest")
     parser.add_argument("--collection", choices=["rules", "sessions", "code", "all"])
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_out")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--receipt", type=str, help="Ingest single file and print receipt")
     
     args = parser.parse_args()
     
+    if getattr(args, "receipt", None):
+        handle_receipt(args.receipt, getattr(args, "collection", None))
+        return
+
     if args.status:
         state = rag_freshness()
         if args.json_out:
@@ -119,7 +193,7 @@ def main():
         return
 
     if not args.collection:
-        parser.error("Either --collection or --status is required")
+        parser.error("Either --collection, --receipt, or --status is required")
         
     collections = ["rules", "sessions", "code"] if args.collection == "all" else [args.collection]
     
