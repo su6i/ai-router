@@ -83,7 +83,7 @@ python3 src/delegate.py --dashboard-dry-run both
 
 Each render groups unread notes by project (via `list_notes(..., peek=True)`, which — critically — never marks a note read just because a dashboard glanced at it) or parses the `## 🎯 ترتیبِ اجرا` table out of `~/.local/share/agent-projects/_memory/QUEUE.md`, skipping rows already marked `✅`. Both dashboards end with an **RAG ingest freshness** line (`RAG ingest: 4h ago (312 rows)`, with a `⚠️ stale` marker past 24h or `⚠️ never run` if `src/ingest.py` has never completed) so nobody trusts a stale semantic index. Output is capped at Telegram's 4096-char limit (oldest/lowest-priority items get truncated with a `… +N more` marker) and every dynamic value is HTML-escaped (`parse_mode=HTML`, not MarkdownV2 — Persian prose and repo names routinely contain `<`/`*`).
 
-Every `send_note()` call (CLI `--note`, MCP `send_note`) also fires a short, best-effort Telegram ping (`🔔 note → <project> · from <project> · <priority>`) and refreshes the pinned inbox dashboard — a Telegram outage never blocks or loses the note itself (pass `notify=False` to the Python API to suppress this, e.g. in tests). The MCP tool `dashboard_push` (`{"kind": "inbox"|"tasks"|"both"}`) exposes the push side to any MCP host; like every other tool here it returns only a short status line (`"inbox: edited (id=...) · tasks: unchanged"`), never the dashboard body.
+Every `send_note()` call (CLI `--note`, MCP `send_note`) also fires a short, best-effort Telegram ping (`🔔 note → <project> · from <project> · <priority>`) and refreshes the pinned inbox dashboard. Pings are **coalesced**: notes that share a sender and subject within 15 minutes edit the first ping in place and append `… and N more` rather than posting again, so one announcement broadcast to seven projects is one message, not seven — a Telegram outage never blocks or loses the note itself (pass `notify=False` to the Python API to suppress this, e.g. in tests). The MCP tool `dashboard_push` (`{"kind": "inbox"|"tasks"|"both"}`) exposes the push side to any MCP host; like every other tool here it returns only a short status line (`"inbox: edited (id=...) · tasks: unchanged"`), never the dashboard body.
 
 Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_router_bot`) and `TELEGRAM_OWNER_CHAT_ID` in the rule-035 vault (`ai-router/secrets/.env`). This is a distinct bot from any other project's Telegram bot.
 
@@ -301,6 +301,27 @@ silent extra retry. Disable with `--no-self-fix`. The audit ledger records
 
 A full-file rewrite of an existing file >= 12KB (`LARGE_FILE_BYTES`) is rejected, as is any rewrite shrinking a file below 50% (`MAX_SHRINK_RATIO`) of its current size. Such edits must use the `===PATCH:` / `===OLD===` / `===NEW===` protocol, applied by literal exact match where the old text must occur exactly once. CLI escape hatch `--allow-full-rewrite`; not exposed on MCP.
 
+### Work-order guard: `scripts/wo_guard.sh`
+
+Prompt rules are advice a model can ignore; this runs inside `--verify`, so
+breaking one fails the delegation instead of being reported as success. Put it
+first in the verify chain:
+
+```bash
+scripts/wo_guard.sh --repo /abs/path/to/repo --branch fix/the-task --base <sha> \
+  --once 'src/mod.py:^SENTINEL =:1' \
+  --then 'uv run --directory /abs/path/to/repo pytest -q'
+```
+
+It refuses to pass when HEAD is not the branch the task named, when that branch
+does not descend from `--base` (a stale cut silently reverts whatever landed in
+between), when conflict markers or unresolved paths remain, or when a `--once`
+pattern does not occur exactly the stated number of times — the cheap check for
+a patch applied twice. On success it prints a `===WO-GUARD-RECEIPT===` block of
+measured facts (branch, base, head, commit count, files changed, verify exit).
+Treat the receipt as the numbers, and anything the model narrates that
+contradicts it as fabrication.
+
 ### Worker context discipline
 
 To prevent workers from churning through unnecessary tokens or getting lost in huge files, `delegate.py` strictly enforces context hygiene:
@@ -417,9 +438,8 @@ Three tools only, all capped — no uncapped chat tool, ever:
 
 - **`delegate_research`** — fact lookup / live-data checks / doc
   verification. **The default is `agy` (Gemini 3.1 Pro on the Google AI Pro
-  subscription): $0, using agy's own grounded web search** (owner decree
-  2026-08-04 — the weekly subscription quota was going unused while every
-  research call billed xAI). Note the implementation constraint: the agy branch
+  subscription): $0, using agy's own grounded web search**. Note the
+  implementation constraint: the agy branch
   routes through `agent_delegate()`, *not* `delegate()`, because the latter
   appends `AGY_NO_TOOLS_ADDENDUM` and would leave agy answering live-fact
   questions from memory with no signal that it never searched. `max_output_tokens`

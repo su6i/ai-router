@@ -7,12 +7,61 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Fixed
+
+- **The test suite no longer sends its fixture messages to the owner's real
+  Telegram chat.** `send_note()` pings whenever `AI_ROUTER_BOT_TOKEN` and
+  `TELEGRAM_OWNER_CHAT_ID` are both set, and a developer shell has both, so
+  every `pytest` run delivered the messages
+  `tests/test_inter_session_messaging.py` uses as fixtures — "test message",
+  "Subject 1", "hello audit", and the redaction test's fake key — and wrote to
+  the live dashboard state file. That test module patched only
+  `AGENT_PROJECTS` and `AUDIT`, never the notification path. The credentials
+  are now stripped by an autouse fixture in `tests/conftest.py`, which no
+  future test can forget; modules that exercise the Telegram paths still set
+  their own fake values, because autouse fixtures run before test-requested
+  ones.
+- **A broadcast note no longer sends one near-identical Telegram ping per
+  recipient.** `send_note()` fired an independent ping for every project it was
+  addressed to; a single announcement sent to seven projects arrived as seven
+  messages differing only in the recipient name. Pings are now coalesced by
+  `dashboards.send_note_ping_deduped()`: notes sharing a sender and subject
+  within a 15-minute window edit the first message in place and append
+  `… and N more` instead of posting again. State lives beside the dashboard
+  state and is pruned after 24h; Telegram failures stay best-effort and never
+  block or lose the note itself.
+- **The Hugging Face "unauthenticated requests" notice no longer prints on
+  every RAG run.** Isolated to its actual cause: once `tokenizers` is imported
+  into the process, *any* Hub request emits it from a Rust extension straight
+  to stderr — not through Python `logging` or `warnings`, so no Python-side
+  filter reaches it, and `HF_HUB_DISABLE_XET` does not help either. Since the
+  ONNX weights and tokenizer never change, `src/rules_index.py` now resolves
+  both from the local cache with `try_to_load_from_cache` and only calls
+  `hf_hub_download` on a miss, which also drops a Hub round-trip from every
+  query. The line therefore appears at most once, on the first download.
+  `Tokenizer.from_pretrained` was replaced by `Tokenizer.from_file` because it
+  runs its own downloader and cannot use the cached path; token ids were
+  verified identical between the two. Setting `HF_TOKEN` or
+  `HUGGING_FACE_HUB_TOKEN` still authenticates the download when one is
+  present.
+
+### Added
+
+- **`scripts/wo_guard.sh` — a delegation guard that runs inside `--verify`.**
+  Prompt rules are advice a model can ignore, so three failure modes kept
+  reaching the review gate as reported successes: work done on whatever branch
+  was checked out, a patch re-applied by a retry, and file/test counts the run
+  never measured. The guard fails the delegation when HEAD is not the named
+  branch, when the branch does not descend from the declared base (a stale cut
+  silently reverts whatever landed in between), when conflict markers or
+  unresolved paths remain, or when a `--once file:regex:n` pattern does not
+  occur exactly `n` times. It ends by printing a `===WO-GUARD-RECEIPT===` block
+  of measured facts, which is the only numeric claim the architect accepts.
+
 ### Changed
 
-- **`delegate_research` now defaults to `agy` ($0) instead of the paid `grok`
-  (owner decree 2026-08-04).** The weekly Google AI Pro subscription quota was
-  going unused while every research call billed xAI ~$0.02–$0.05. `grok` and
-  `grok-4.5` stay reachable but must now be named explicitly.
+- **`delegate_research` now defaults to `agy` ($0) instead of the paid `grok`.**
+  `grok` and `grok-4.5` stay reachable but must now be named explicitly.
   Research on `agy` **cannot** go through `delegate()`/`worker_delegate()`: that
   path appends `AGY_NO_TOOLS_ADDENDUM`, which disables agy's tools, so agy would
   have answered live-fact questions from memory — silently, and precisely the
@@ -49,7 +98,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Changed
 
-- **The free-quota Gemini API channel is removed (owner decree 2026-07-27).**
+- **The free-quota Gemini API channel is removed.**
   `gemini`, `gemini-lite` and `gemma` no longer exist as models. Asking for one
   of those names does **not** silently remap: `resolve_model()` raises a
   `ValueError` naming `agy` as the replacement, because a silent remap would
@@ -57,7 +106,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   free-quota channel repeatedly defeated the `$0-first` ladder:
   `delegate_worker` could not accept `agy` at all (agy was a runner, not an
   HTTP backend), so its default fell through to free-quota `gemini-2.5-flash`
-  and the owner's "coding default = agy" ruling never actually took effect.
+  and the configured "coding default = agy" never actually took effect.
 
 - **`agy` is now a `delegate_worker` backend** via `call_agy_print()`, closing
   that gap, and is the default coding model. Determinism is preserved exactly
@@ -75,9 +124,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 - **The `agy` channel now reaches every model the subscription exposes — including
   free Claude.** `MODELS["agy"]` was a single hardcoded entry pinned to Gemini 3.1
   Pro, so `claude-sonnet-4-6` and `claude-opus-4-6-thinking` — both available at $0
-  on the same Google AI Pro subscription — had **no route at all**. The subscription's
-  Claude pool sat ~90% unused for a week while paid Claude Code quota was spent on
-  work those models could have done. The single entry is replaced by all 11 ids that
+  on the same Google AI Pro subscription — had **no route at all**. The single entry
+  is replaced by all 11 ids that
   `agy models` actually reports: `gemini-3.6-flash-{high,medium,low}`,
   `gemini-3.5-flash-{high,medium,low}`, `gemini-3.1-pro-{high,low}`,
   `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`. `agy`
@@ -87,8 +135,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   `google-ai-pro-claude`, `google-ai-pro-gpt`). These are **independent** $0 pools
   inside one subscription, so routing can spread load instead of draining one. The
   $0-first policy is unchanged: no automatic fallback to a paid model, ever.
-- **Warm `agy` worker sessions, one-round self-fix, and real token accounting
-  (owner decree 2026-07-24).** `call_agy_print()` now calls `agy` with
+- **Warm `agy` worker sessions, one-round self-fix, and real token accounting.** `call_agy_print()` now calls `agy` with
   `--output-format json`, fixing a real bug: the router recorded zero
   `pin`/`pout`/`cache` and `cost_unknown=True` for every `agy` call, even
   though `agy` genuinely exposes real token usage — cost stays $0 (Google AI
@@ -122,8 +169,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
-- **Large-file write guard (owner decree 2026-07-27) — the reason this release
-  exists.** On 2026-07-27 a three-line fix delegated to a cheap model came back
+- **Large-file write guard — the reason this release exists.**
+  A three-line fix delegated to a cheap model came back
   as a *full-file rewrite* that shrank a 50KB source file to 245 lines; only
   git saved it. Full-file replacement is now refused where it is dangerous:
   a `===FILE:` block targeting an existing file ≥ `LARGE_FILE_BYTES` (12 KB) is

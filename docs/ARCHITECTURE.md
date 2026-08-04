@@ -103,7 +103,7 @@ usage(
   cost_usd numeric(12,6), latency_s numeric)
 
 -- semantic cache / RAG store
--- NOTE: prompt_cache and RAG phase 3 are REJECTED by owner decision (per CLAUDE.md: "exact-hash only").
+-- NOTE: prompt_cache and RAG phase 3 are out of scope by design (exact-hash caching only).
 -- Kept here for historical context only.
 prompt_cache(
   id, created, project,
