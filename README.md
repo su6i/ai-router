@@ -290,8 +290,7 @@ On a verify FAILURE (`--verify`), the `agy` channel gets ONE self-fix round
 before giving up: the verify command, its exit code, and the last ~4000
 (redacted) chars of its output are sent back into the SAME warm
 conversation — not the whole task re-flattened from scratch — so the model
-pays for the delta, not a full context re-read. Exactly one round (owner
-decree: "only after the second failure does the reviewer step in"); a
+pays for the delta, not a full context re-read. Exactly one round — the reviewer steps in only after a second failure; a
 second failure returns to the caller with a structured report, never a
 silent extra retry. Disable with `--no-self-fix`. The audit ledger records
 `self_fix_rounds` (`0` or `1`) and `self_fix_outcome` (`fixed` / `failed` /

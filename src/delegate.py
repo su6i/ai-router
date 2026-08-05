@@ -221,7 +221,7 @@ MODELS = {
                     "cin_long": 4.00, "cout_long": 12.00, "long_ctx_threshold": 200_000,
                     "search_call_usd": 0.005,
                     "key": "GROK_API_KEY", "quota_channel": "grok-api"},
-    # $0 coding default (owner decree 2026-07-27). provider "agy_cli" is NOT an
+    # $0 coding default. provider "agy_cli" is NOT an
     # HTTP provider — it is dispatched to call_agy_print() (subprocess to the
     # `agy` binary), never to call_openai/call_gemini. "key": "" is deliberate:
     # agy authenticates via its own CLI session (Google AI Pro subscription),
@@ -338,8 +338,8 @@ def resolve_model(name: str) -> str:
     if key in REMOVED_MODELS:
         suggestion = REMOVED_MODELS[key]
         raise ValueError(
-            f"model '{key}' was removed from the router (owner decree "
-            f"2026-07-27: free-quota Gemini flash truncates files and "
+            f"model '{key}' was removed from the router: "
+            f"free-quota Gemini flash truncates files and "
             f"silently overrode the agy default). Use '{suggestion}'."
         )
     if key in MODELS:
@@ -884,7 +884,7 @@ def call_openai(spec, key, history, system, max_output_tokens: int = 8192):
 
 def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
     # Deliberately kept even though no MODELS entry registers provider
-    # "gemini" today (owner decree 2026-07-27 removed the free-quota
+    # "gemini" today (the free-quota entry was removed;
     # gemini/gemini-lite/gemma entries). A future PAID Gemini API model can
     # still register with provider "gemini" and reuse this function — do not
     # "clean up" this plumbing.
@@ -1144,7 +1144,7 @@ def parse_worker_response(text: str):
     Regex on line starts per SPEC v1 — content between markers is written verbatim
     (a trailing newline is added by the caller if missing, never here).
 
-    PATCH blocks (owner decree 2026-07-27, the large-file guard) are the
+    PATCH blocks (the large-file guard) are the
     mandatory alternative to a full ===FILE=== rewrite for files at/above
     LARGE_FILE_BYTES: ===PATCH: path=== / ===OLD=== / ===NEW=== /
     ===END PATCH===. `old`/`new` are joined verbatim from their line ranges,
@@ -1242,7 +1242,7 @@ def _apply_patches(patches: list, project_root: Path, allow_patterns: list):
     appear in the current file content EXACTLY ONCE, byte for byte. No
     regex, no whitespace normalisation, no "closest match" fallback — a
     fuzzy match here would silently corrupt the file, which is exactly the
-    failure mode this protocol exists to prevent (owner decree 2026-07-27).
+    failure mode this protocol exists to prevent.
     """
     applied, rejected = [], []
     for rel, old, new in patches:
@@ -1272,7 +1272,7 @@ def _apply_patches(patches: list, project_root: Path, allow_patterns: list):
 
 def _write_files(files: list, project_root: Path, allow_patterns: list, allow_full_rewrite: bool = False):
     """Write ===FILE: blocks. Guards a full rewrite of an existing file per
-    the owner decree 2026-07-27 large-file protocol:
+    the large-file protocol:
       - existing size >= LARGE_FILE_BYTES: reject, the model must use
         ===PATCH: instead.
       - new size < MAX_SHRINK_RATIO * existing size: reject as a suspicious
@@ -1292,7 +1292,7 @@ def _write_files(files: list, project_root: Path, allow_patterns: list, allow_fu
             existing_size = path.stat().st_size
             if existing_size >= LARGE_FILE_BYTES:
                 rejected.append((rel, f"large file ({_human_size(existing_size)}): full rewrite "
-                                       f"forbidden — use ===PATCH: (owner decree 2026-07-27)"))
+                                       f"forbidden — use ===PATCH:"))
                 continue
             if existing_size > 0 and new_size < MAX_SHRINK_RATIO * existing_size:
                 rejected.append((rel, f"suspicious shrink {_human_size(existing_size)} -> "
@@ -1365,7 +1365,7 @@ def build_worker_prompt(task: str, file_specs: list, model: str | None = None) -
             parts.append(
                 f"NOTE: file {path} is large ({_human_size(size)}) — you MUST answer "
                 f"with ===PATCH: blocks for it, never a full ===FILE: rewrite "
-                f"(owner decree 2026-07-27).\n"
+                f"(large-file protocol).\n"
             )
     parts.append(f"Task:\n{task}\n")
     return "\n".join(parts)

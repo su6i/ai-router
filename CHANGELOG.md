@@ -9,6 +9,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Fixed
 
+- **Documentation and code comments now state each rule technically, without internal attribution.** This is a public repository: comments and tool descriptions that recorded *who* mandated a rule and *when* exposed private project governance to every reader, with no benefit to users of the router. Every such reference across `src/`, `tests/`, `mcp/` and both READMEs was rewritten to state the rule itself — what the constraint is and why it exists technically. No behaviour, model id, price, or cap changed.
+
 - **The test suite no longer sends its fixture messages to the owner's real
   Telegram chat.** `send_note()` pings whenever `AI_ROUTER_BOT_TOKEN` and
   `TELEGRAM_OWNER_CHAT_ID` are both set, and a developer shell has both, so
