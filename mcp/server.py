@@ -127,7 +127,7 @@ TOOLS = [
     {
         "name": "rules_lookup",
         "description": ("Retrieve only the most relevant rule/doc chunks "
-                         "(constitution rules, project docs) for a query — "
+                         "(constitution rules, project docs, skills) for a query — "
                          "USE THIS instead of reading whole rule files; "
                          "output is capped at ~2k tokens."),
         "inputSchema": {
@@ -135,7 +135,7 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string"},
                 "k": {"type": "integer", "default": 5},
-                "collection": {"type": "string", "default": "rules", "enum": ["rules", "sessions"]},
+                "collection": {"type": "string", "default": "rules", "enum": ["rules", "skills", "sessions"]},
             },
             "required": ["query"],
         },
@@ -374,13 +374,15 @@ def handle_rules_lookup(args: dict) -> dict:
     if not isinstance(k, int) or isinstance(k, bool) or not (0 < k <= 20):
         raise ValueError("'k' must be an integer in (0, 20]")
     collection = args.get("collection", "rules")
-    if collection not in ("rules", "sessions"):
-        raise ValueError("'collection' must be 'rules' or 'sessions'")
+    if collection not in ("rules", "skills", "sessions"):
+        raise ValueError("'collection' must be 'rules', 'skills', or 'sessions'")
 
     # src/ is already on sys.path (top of this file) — importing as
     # "rules_index" keeps delegate a single module identity in this process.
     if collection == "sessions":
         import sessions_index as index_mod
+    elif collection == "skills":
+        import skills_index as index_mod
     else:
         import rules_index as index_mod
 
