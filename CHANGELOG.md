@@ -10,6 +10,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ### Fixed
 
 - **Documentation and code comments now state each rule technically, without internal attribution.** This is a public repository: comments and tool descriptions that recorded *who* mandated a rule and *when* exposed private project governance to every reader, with no benefit to users of the router. Every such reference across `src/`, `tests/`, `mcp/` and both READMEs was rewritten to state the rule itself — what the constraint is and why it exists technically. No behaviour, model id, price, or cap changed.
+- **A partial skills ingest no longer deletes the rest of the index.** The prune step removes every row the current file list did not cover, which is only correct for a full-tree ingest of the canonical directory. A single-file ingest, or any caller pointed at a different tree, wiped the whole collection as a side effect — a two-file fixture run replaced all 370 indexed skills. Pruning is now skipped for single-file ingests and can be disabled with `prune=False`, and `ingest()` takes an explicit `root` instead of reading process-wide CWD. Both paths have regression tests.
 
 - **The test suite no longer sends its fixture messages to the owner's real
   Telegram chat.** `send_note()` pings whenever `AI_ROUTER_BOT_TOKEN` and
@@ -48,6 +49,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   present.
 
 ### Added
+
+- **Skills are now retrievable: a fourth RAG collection, `skills`, indexes the 371 skill files under `.agent/constitution/skills/`.** Only `rules`, `sessions` and `code` were ingested, so a query could never reach a skill even though skills carry most of the procedural knowledge. `src/skills_index.py` mirrors `rules_index.py` into a `skill_chunks` table; `--collection skills` and `--collection all` cover it, and the `rules_lookup` MCP tool accepts it. First full ingest: 370 files, 6,976 chunks.
 
 - **`scripts/wo_guard.sh` — a delegation guard that runs inside `--verify`.**
   Prompt rules are advice a model can ignore, so three failure modes kept

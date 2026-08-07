@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import delegate as d
 import rules_index
+import skills_index
 import sessions_index
 import code_index
 
@@ -30,7 +31,7 @@ def rag_freshness() -> dict:
 
     now = datetime.now(timezone.utc)
     
-    for collection in ["rules", "sessions", "code"]:
+    for collection in ["rules", "skills", "sessions", "code"]:
         if collection not in state:
             state[collection] = {
                 "last_ingest": None,
@@ -125,7 +126,9 @@ def handle_receipt(file_path_str: str, collection_arg: str | None = None):
     col = collection_arg if collection_arg and collection_arg != "all" else None
     if not col:
         s_path = str(path)
-        if "rules" in s_path or path.suffix == ".mdc":
+        if "skills" in s_path:
+            col = "skills"
+        elif "rules" in s_path or path.suffix == ".mdc":
             col = "rules"
         elif path.suffix in (".py", ".js", ".ts", ".go", ".rs"):
             col = "code"
@@ -134,6 +137,8 @@ def handle_receipt(file_path_str: str, collection_arg: str | None = None):
 
     if col == "sessions":
         sessions_index.ingest(force=True, target_file=path)
+    elif col == "skills":
+        skills_index.ingest(force=True, target_file=path)
     elif col == "rules":
         rules_index.ingest(force=True)
     elif col == "code":
@@ -145,7 +150,7 @@ def handle_receipt(file_path_str: str, collection_arg: str | None = None):
     except ValueError:
         rel_path = str(path)
 
-    table_name = "session_chunks" if col == "sessions" else f"{col}_chunks"
+    table_name = "skill_chunks" if col == "skills" else ("session_chunks" if col == "sessions" else f"{col}_chunks")
     
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
@@ -169,7 +174,7 @@ def handle_receipt(file_path_str: str, collection_arg: str | None = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Unified RAG Ingest")
-    parser.add_argument("--collection", choices=["rules", "sessions", "code", "all"])
+    parser.add_argument("--collection", choices=["rules", "skills", "sessions", "code", "all"])
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_out")
     parser.add_argument("--status", action="store_true")
@@ -195,12 +200,13 @@ def main():
     if not args.collection:
         parser.error("Either --collection, --receipt, or --status is required")
         
-    collections = ["rules", "sessions", "code"] if args.collection == "all" else [args.collection]
+    collections = ["rules", "skills", "sessions", "code"] if args.collection == "all" else [args.collection]
     
     import time
     
     modules = {
         "rules": rules_index,
+        "skills": skills_index,
         "sessions": sessions_index,
         "code": code_index
     }
