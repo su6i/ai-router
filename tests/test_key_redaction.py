@@ -32,7 +32,7 @@ def test_gemini_key_in_header_not_url(monkeypatch):
 
     monkeypatch.setattr(d, "_post_with_retry", fake_post)
     # call_gemini() is deliberately kept in delegate.py even though no
-    # MODELS entry uses provider "gemini" today (owner decree 2026-07-27) —
+    # MODELS entry uses provider "gemini" today —
     # test it directly against an inline spec, with no MODELS dependency.
     spec = {"api": "gemini-2.5-flash", "provider": "gemini",
             "url": "https://generativelanguage.googleapis.com/v1beta",

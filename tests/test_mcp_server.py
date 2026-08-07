@@ -7,7 +7,7 @@ revision 2025-11-25 (see comment at the top of mcp/server.py).
 No network calls, no real `agy` subprocess: the server subprocess is booted
 through a tiny bootstrap script that monkeypatches delegate.call_gemini
 (canned stub — kept in delegate.py for research-tool tests via a throwaway
-"test-gemini" MODELS entry, owner decree 2026-07-27 removed the real
+"test-gemini" MODELS entry; the real
 free-quota "gemini" entry but not the plumbing), delegate.call_agy_print
 (canned stub for the new agy worker-backend default), and delegate.call_openai
 (hard-fails if ever invoked) before running server.main(). This is required,

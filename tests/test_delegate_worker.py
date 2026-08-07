@@ -23,7 +23,7 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "WORKER_SESSIONS", tmp_path / "worker_sessions.json")
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-tests")
     # call_gemini()/provider=="gemini" is deliberately kept in delegate.py
-    # (owner decree 2026-07-27 removed the free-quota "gemini" MODELS entry,
+    # (the free-quota "gemini" MODELS entry was removed,
     # not the plumbing) — register a throwaway MODELS entry so these
     # protocol/write tests can keep exercising it via a fake call_gemini.
     monkeypatch.setitem(d.MODELS, "test-gemini", {
