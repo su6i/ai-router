@@ -50,6 +50,8 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Added
 
+- **`hooks/layer_guard.py` — the delegation tools are now closed to top-level premium sessions.** `delegate_worker` and `delegate_agent` were reachable from any session, so the most expensive model in the chain routinely talked to the worker itself. That defeats the point of delegating twice over: the worker's full output lands in the expensive context, and no independent reviewer ever sees the diff before it is accepted. The new PreToolUse hook denies both tools unless the caller is the intermediate dispatch/review layer (`SU6I_LAYER2=1`, or a subagent marker in the hook payload). There is deliberately **no second-attempt escape hatch** — unlike `delegate_nudge.py`, this boundary is not a per-call judgement. Decisions are appended to `layer-guard.jsonl` in the vault log directory, payload keys included, so the subagent marker list can be confirmed from real traffic rather than assumed. Fail-open on any error.
+
 - **Skills are now retrievable: a fourth RAG collection, `skills`, indexes the 371 skill files under `.agent/constitution/skills/`.** Only `rules`, `sessions` and `code` were ingested, so a query could never reach a skill even though skills carry most of the procedural knowledge. `src/skills_index.py` mirrors `rules_index.py` into a `skill_chunks` table; `--collection skills` and `--collection all` cover it, and the `rules_lookup` MCP tool accepts it. First full ingest: 370 files, 6,976 chunks.
 
 - **`scripts/wo_guard.sh` — a delegation guard that runs inside `--verify`.**
