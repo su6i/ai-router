@@ -7,6 +7,10 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+
+- **`scripts/wo_guard.sh` now fails a delegation that lost Persian half-spaces (ZWNJ, U+200C) while editing a file.** A worker model editing Persian text can silently drop ZWNJ characters or replace them with a plain space, corrupting the spelling of every affected word — the pipeline itself (sentinel-line parsing, `===FILE===`/`===PATCH===` writing in `src/delegate.py`) round-trips ZWNJ byte-for-byte, proven by a new regression suite (`tests/test_zwnj_preservation.py`), so the loss happens in the model's own text generation and cannot be fixed at this layer. `scripts/zwnj_guard.py` counts U+200C occurrences per changed file between the WO's base commit and HEAD and fails the guard if any file's count decreased, printing a `===ZWNJ-GUARD-RECEIPT===` block of per-file before/after counts. It runs automatically inside `wo_guard.sh` — no extra flag needed. `tests/test_zwnj_guard_script.py` exercises it against real throwaway git repos (regression detected, non-regression passed, ZWNJ-free diffs passed, new files exempted).
+
 ### Fixed
 
 - **Documentation and code comments now state each rule technically, without internal attribution.** This is a public repository: comments and tool descriptions that recorded *who* mandated a rule and *when* exposed private project governance to every reader, with no benefit to users of the router. Every such reference across `src/`, `tests/`, `mcp/` and both READMEs was rewritten to state the rule itself — what the constraint is and why it exists technically. No behaviour, model id, price, or cap changed.
