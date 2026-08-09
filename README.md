@@ -314,12 +314,17 @@ scripts/wo_guard.sh --repo /abs/path/to/repo --branch fix/the-task --base <sha> 
 
 It refuses to pass when HEAD is not the branch the task named, when that branch
 does not descend from `--base` (a stale cut silently reverts whatever landed in
-between), when conflict markers or unresolved paths remain, or when a `--once`
+between), when conflict markers or unresolved paths remain, when a `--once`
 pattern does not occur exactly the stated number of times — the cheap check for
-a patch applied twice. On success it prints a `===WO-GUARD-RECEIPT===` block of
-measured facts (branch, base, head, commit count, files changed, verify exit).
-Treat the receipt as the numbers, and anything the model narrates that
-contradicts it as fabrication.
+a patch applied twice — or when any changed file lost ZWNJ (U+200C, نیم‌فاصله)
+characters versus `--base` (`scripts/zwnj_guard.py`, run automatically, no flag
+needed) — the cheap check for a worker silently mangling Persian half-spaces
+while editing a file (real incident: `fix/du-naming-and-interim-track`,
+ApplyForge, restored by hand). On success it prints a `===WO-GUARD-RECEIPT===`
+block of measured facts (branch, base, head, commit count, files changed,
+verify exit), preceded by a `===ZWNJ-GUARD-RECEIPT===` block of per-file ZWNJ
+counts. Treat the receipts as the numbers, and anything the model narrates that
+contradicts them as fabrication.
 
 ### Worker context discipline
 

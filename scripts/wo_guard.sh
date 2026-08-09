@@ -81,7 +81,22 @@ for spec in "${ONCE[@]:-}"; do
     $( [ "$got" -gt "$want" ] && echo 'That is a patch applied more than once.' || echo 'The edit did not land.')"
 done
 
-# 5. Receipt. Measured facts only. Anything the model says that contradicts
+# 5. ZWNJ (U+200C, نیم‌فاصله) regression. A delegated Persian-text edit has
+#    silently dropped or replaced half-spaces before (fix/du-naming-and-
+#    interim-track, ApplyForge, 2026-08 — restored by hand). This is a
+#    worker-model text-generation loss, not a bug in this pipeline (proven
+#    by tests/test_zwnj_preservation.py), so the only defence available here
+#    is mechanical detection: fail the delegation instead of reporting a
+#    silent PASS. See scripts/zwnj_guard.py for the full receipt format.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if command -v python3 >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/zwnj_guard.py" ]; then
+  ZWNJ_OUTPUT="$(python3 "$SCRIPT_DIR/zwnj_guard.py" --repo "$REPO" --base "$BASE" 2>&1)" || \
+    die "ZWNJ half-spaces were lost by this delegation — see the receipt above:
+$(printf '%s\n' "$ZWNJ_OUTPUT" | sed 's/^/    /')"
+  printf '%s\n' "$ZWNJ_OUTPUT"
+fi
+
+# 6. Receipt. Measured facts only. Anything the model says that contradicts
 #    this block is a fabrication, and the architect trusts this block.
 FILES_CHANGED="$(git diff --name-only "$BASE"..HEAD | wc -l | tr -d ' ')"
 UNCOMMITTED="$(git status --porcelain | wc -l | tr -d ' ')"
