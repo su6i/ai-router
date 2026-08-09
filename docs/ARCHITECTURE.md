@@ -93,6 +93,8 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 
 **RAG Index & Auto-Ingest**: The RAG index is exclusively owned and managed by the `ai-router` architect (nobody ingests by hand). Incremental auto-ingestion is orchestrated by event triggers: a git `post-merge` hook updates `rules`, while a 30-minute cron sweep and inbox-note delivery update `sessions`. The index freshness state is durably tracked in `<vault>/data/rag_state.json` (schema: per-collection dict containing `last_ingest`, `status`, `docs`, `chunks`, `stale`). A collection is strictly considered `stale` if its last ingest is more than 24h old or if the last run failed.
 
+**Bootstrap vs. content**: `install.sh` + `scripts/rag_bootstrap.py` (repo root / `scripts/`) create the four collections listed above as empty Postgres tables by calling each indexer's `init_db(conn)` — the schema is public and reproducible from a clean clone. Populating them (`rag_ingest.py --collection all`) is a separate, per-machine step whose output — the ingested rows themselves, plus `<vault>/data/` (cache, audit log, session memory) — never lives inside this repo's tracked tree, so there is nothing to `.gitignore`: the boundary is structural (vault directory vs. repo directory), not a filter applied after the fact.
+
 ## 4. Data model
 
 ```sql

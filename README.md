@@ -563,6 +563,27 @@ See `docs/ARCHITECTURE.md` for the phased plan.
 
 ## Setup (Data Plane)
 
+**Fast path:** `./install.sh` brings up Postgres (starting `colima`/Docker if
+needed) and creates the four RAG collections — `rules`, `skills`, `sessions`,
+`code` — as **empty** tables. `./install.sh --dry-run` prints every step
+without touching anything (no Docker call, no Postgres connection), so it is
+safe to run on a machine that has neither installed yet. It requires the
+vault secrets file from step 1 below to already exist; the rest of this
+section is what `install.sh` automates, spelled out for manual/CI use.
+
+**Public schema vs. private data.** This repository publishes the RAG
+**schema only** — the table definitions in `src/rules_index.py`,
+`src/skills_index.py`, `src/sessions_index.py`, `src/code_index.py`
+(`init_db()` in each) and what `install.sh`/`scripts/rag_bootstrap.py` create
+from them. The **data** that fills those tables — a machine's actual rules,
+skills, session history and code — is generated locally by
+`uv run src/rag_ingest.py --collection all` and lives only in the local
+Postgres volume plus `<vault>/data/` (`~/.local/share/agent-projects/ai-router/`
+by default); neither is inside this repo's working tree, neither is tracked
+by git, and no path here ever writes RAG content into a committed file.
+Cloning this repo and running `install.sh` gets you the collections; it
+never gets you anyone else's data.
+
 1. Put the Postgres credentials in your vault secrets
    (`~/.local/share/agent-projects/ai-router/secrets/.env`) — **not** in the repo.
    `docker-compose.yml` reads that file directly (override the location with
