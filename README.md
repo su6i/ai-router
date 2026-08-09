@@ -511,6 +511,16 @@ defaults to writing code itself. Two layers push it toward the worker:
   that blocks direct bash execution of headless workers (`agy print`, `codewhale`),
   redirecting to `delegate_agent` to enforce budget constraints and accounting. A
   deliberate second attempt acts as an escape hatch.
+- **`hooks/layer_guard.py`** — a PreToolUse hook (matcher
+  `mcp__ai-router__delegate_worker|mcp__ai-router__delegate_agent`) that denies
+  the delegation tools to a top-level premium session. Implementation is
+  dispatched and reviewed by an intermediate agent, so the worker's output never
+  enters the expensive session's context and a neutral reviewer sees the diff
+  before the architect does. Unlike the two nudges above there is **no
+  second-attempt escape hatch** — the layer boundary is a topology invariant, not
+  a per-call judgement. The intermediate layer passes with `SU6I_LAYER2=1` in its
+  environment. Every decision is appended to `layer-guard.jsonl` in the vault log
+  directory. Fail-open: any hook error allows the call.
 
 ## Models
 
