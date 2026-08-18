@@ -9,7 +9,7 @@ import re
 # Import delegate under ONE module identity ("delegate")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, _agent_projects_root  # noqa: E402
-from rules_index import E5Model, chunk_markdown, get_model  # noqa: E402
+from rules_index import chunk_markdown, get_model  # noqa: E402
 
 def init_db(conn):
     with conn.cursor() as cur:

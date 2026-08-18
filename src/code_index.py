@@ -14,7 +14,7 @@ from tree_sitter import Language, Parser
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, project_info
-from rules_index import E5Model, get_model
+from rules_index import get_model
 
 def init_db(conn):
     with conn.cursor() as cur:

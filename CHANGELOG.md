@@ -7,6 +7,10 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Changed
+
+- **One embedding model class instead of two.** `src/skills_index.py` carried a byte-for-byte duplicate of `E5Model` that nothing instantiated once every entry point moved to the shared `rules_index.get_model()` singleton. Keeping it was not merely dead weight: session-level settings such as `enable_cpu_mem_arena` had to be written into both copies, so any future fix applied to one would silently diverge from the other. The duplicate and its now-unused helpers (`mean_pooling`, the local `_hf_file`/`_hf_token_kwargs`, `E5_REPO`) are removed, `_hf_file` is imported from `rules_index`, and the orphaned `E5Model` imports left behind in `src/code_index.py` and `src/sessions_index.py` are dropped.
+
 ### Fixed
 
 - **Memory leak in RAG lookups.** `E5Model` is now a process-wide singleton with an idle unload thread (defaults to 900s via `RAG_MODEL_IDLE_TTL`) to prevent `onnxruntime` from holding unused memory indefinitely.
@@ -79,6 +83,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Changed
 
+- **`src/skills_index.py` no longer duplicates `E5Model` / `mean_pooling` / `_hf_file`.** It now imports the shared singleton path from `rules_index.py`.
 - **`delegate_research` now defaults to `agy` ($0) instead of the paid `grok`.**
   `grok` and `grok-4.5` stay reachable but must now be named explicitly.
   Research on `agy` **cannot** go through `delegate()`/`worker_delegate()`: that

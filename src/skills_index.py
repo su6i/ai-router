@@ -13,9 +13,6 @@ if "HF_HOME" not in os.environ:
         pass
     os.environ["HF_HOME"] = str(rag_hf)
 
-from huggingface_hub import hf_hub_download, try_to_load_from_cache
-import numpy as np
-import onnxruntime as ort
 import psycopg
 from tokenizers import Tokenizer
 
@@ -24,28 +21,9 @@ from tokenizers import Tokenizer
 # sys.path already carries src/.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, project_info  # noqa: E402
-from rules_index import get_model  # noqa: E402
+from rules_index import get_model, _hf_file  # noqa: E402
 
 _TOKENIZER = None
-
-E5_REPO = "intfloat/multilingual-e5-small"
-
-
-def _hf_token_kwargs() -> dict:
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    return {"token": token} if token else {}
-
-
-def _hf_file(filename: str) -> str:
-    """Resolve a model file, preferring the local cache over a Hub round-trip."""
-    try:
-        cached = try_to_load_from_cache(repo_id=E5_REPO, filename=filename)
-        if isinstance(cached, str) and Path(cached).is_file():
-            return cached
-        return hf_hub_download(repo_id=E5_REPO, filename=filename, **_hf_token_kwargs())
-    except (OSError, PermissionError) as e:
-        path = getattr(e, "filename", None) or os.environ.get("HF_HOME", "hf-cache")
-        raise RuntimeError(f"RAG unavailable: {path} (index/model not reachable)") from None
 
 
 def _load_tokenizer() -> Tokenizer:
@@ -58,44 +36,6 @@ def _get_tokenizer():
     if _TOKENIZER is None:
         _TOKENIZER = _load_tokenizer()
     return _TOKENIZER
-
-
-def mean_pooling(last_hidden_states, attention_mask):
-    input_mask_expanded = np.expand_dims(attention_mask, -1)
-    sum_embeddings = np.sum(last_hidden_states * input_mask_expanded, axis=1)
-    sum_mask = np.clip(np.sum(input_mask_expanded, axis=1), a_min=1e-9, a_max=None)
-    return sum_embeddings / sum_mask
-
-
-class E5Model:
-    def __init__(self):
-        self.model_path = _hf_file("onnx/model.onnx")
-        self.tokenizer = _load_tokenizer()
-        self.tokenizer.enable_truncation(max_length=512)
-        self.tokenizer.enable_padding(pad_id=self.tokenizer.token_to_id("<pad>"), pad_token="<pad>")
-        so = ort.SessionOptions()
-        so.enable_cpu_mem_arena = False
-        self.session = ort.InferenceSession(self.model_path, so, providers=['CPUExecutionProvider'])
-
-    def embed(self, texts, prefix="passage: "):
-        formatted_texts = [prefix + t for t in texts]
-        encoded = self.tokenizer.encode_batch(formatted_texts)
-
-        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
-        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-
-        inputs = {'input_ids': input_ids, 'attention_mask': attention_mask}
-        input_names = [i.name for i in self.session.get_inputs()]
-        if 'token_type_ids' in input_names:
-            inputs['token_type_ids'] = np.zeros_like(input_ids)
-
-        outputs = self.session.run(None, inputs)
-        last_hidden_states = outputs[0]
-
-        embeddings = mean_pooling(last_hidden_states, attention_mask)
-        norm = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        embeddings = embeddings / np.clip(norm, a_min=1e-9, a_max=None)
-        return embeddings
 
 
 def init_db(conn):
