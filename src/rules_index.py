@@ -3,6 +3,8 @@ import sys
 import os
 import hashlib
 from pathlib import Path
+import threading
+import time
 
 import psycopg
 from tokenizers import Tokenizer
@@ -29,6 +31,42 @@ from delegate import load_env, project_info  # noqa: E402
 _TOKENIZER = None
 
 E5_REPO = "intfloat/multilingual-e5-small"
+
+_MODEL = None
+_MODEL_LAST_USED = 0.0
+_MODEL_LOCK = threading.Lock()
+_MODEL_UNLOAD_THREAD_STARTED = False
+
+RAG_MODEL_IDLE_TTL = int(os.environ.get("RAG_MODEL_IDLE_TTL", "900"))
+
+def _idle_unloader() -> None:
+    global _MODEL
+    if RAG_MODEL_IDLE_TTL <= 0:
+        return  # disabled, e.g. for long reindex runs
+    # Check at most every 60s in production (TTL defaults to 900s, no need to
+    # poll faster), but never coarser than the TTL itself -- otherwise a short
+    # TTL (e.g. RAG_MODEL_IDLE_TTL=3 in scripts/bench_rag_memory.py) would
+    # never be observed inside one 60s sleep.
+    check_interval = min(60, RAG_MODEL_IDLE_TTL)
+    while True:
+        time.sleep(check_interval)
+        with _MODEL_LOCK:
+            if _MODEL is not None and (time.monotonic() - _MODEL_LAST_USED) > RAG_MODEL_IDLE_TTL:
+                _MODEL = None
+
+def get_model() -> "E5Model":
+    """Process-wide singleton. Building an InferenceSession per call ratchets
+    RSS by ~200MB and never returns it to the OS (T-132)."""
+    global _MODEL, _MODEL_LAST_USED, _MODEL_UNLOAD_THREAD_STARTED
+    with _MODEL_LOCK:
+        if _MODEL is None:
+            _MODEL = E5Model()
+        _MODEL_LAST_USED = time.monotonic()
+        if not _MODEL_UNLOAD_THREAD_STARTED:
+            _MODEL_UNLOAD_THREAD_STARTED = True
+            t = threading.Thread(target=_idle_unloader, daemon=True)
+            t.start()
+    return _MODEL
 
 
 def _hf_token_kwargs() -> dict:
@@ -89,9 +127,13 @@ class E5Model:
         self.tokenizer = _load_tokenizer()
         self.tokenizer.enable_truncation(max_length=512)
         self.tokenizer.enable_padding(pad_id=self.tokenizer.token_to_id("<pad>"), pad_token="<pad>")
-        self.session = ort.InferenceSession(self.model_path, providers=['CPUExecutionProvider'])
+        so = ort.SessionOptions()
+        so.enable_cpu_mem_arena = False
+        self.session = ort.InferenceSession(self.model_path, so, providers=['CPUExecutionProvider'])
         
     def embed(self, texts, prefix="passage: "):
+        global _MODEL_LAST_USED
+        _MODEL_LAST_USED = time.monotonic()
         formatted_texts = [prefix + t for t in texts]
         encoded = self.tokenizer.encode_batch(formatted_texts)
         
@@ -251,7 +293,7 @@ def ingest(force: bool = False) -> dict:
         if claude_md.exists():
             target_files.append(claude_md)
             
-        model = E5Model()
+        model = get_model()
 
         indexed_paths = []
         for filepath in target_files:
@@ -366,7 +408,7 @@ def cmd_search(args):
     query = args.query
     k = args.k
     
-    model = E5Model()
+    model = get_model()
     q_emb = model.embed([query], prefix="query: ")[0].tolist()
     
     with psycopg.connect(dsn) as conn:

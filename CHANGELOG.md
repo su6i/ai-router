@@ -9,6 +9,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ### Fixed
 
+- **Memory leak in RAG lookups.** `E5Model` is now a process-wide singleton with an idle unload thread (defaults to 900s via `RAG_MODEL_IDLE_TTL`) to prevent `onnxruntime` from holding unused memory indefinitely.
 - **RAG lookups no longer depend on the default `~/.cache/huggingface` path, and an unreachable model cache now says so.** All four indexer entry points resolved the embedding model through HuggingFace's default cache location; when that path pointed at storage that no longer existed, every `rules_lookup` / `code_lookup` call failed with a bare `PermissionError: [Errno 13] Permission denied: '<path>'`, which names the symptom but not the subsystem — the RAG layer was silently unusable for a full day before anyone connected the two. `src/rules_index.py`, `src/skills_index.py` and `src/delegate.py` now set `HF_HOME` to `<agent-projects>/_memory/rag/hf_cache` when it is not already set in the environment, resolved through `XDG_DATA_HOME` rather than hardcoded, and deliberately **before** `huggingface_hub` is imported, because that library reads the variable once at import time. `_hf_file()` additionally converts `OSError`/`PermissionError` into `RuntimeError("RAG unavailable: <path> (index/model not reachable)")`, so the failing path is reported together with the subsystem that failed. Setting `HF_HOME` explicitly still overrides all of this.
 
 ### Added

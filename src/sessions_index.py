@@ -9,7 +9,7 @@ import re
 # Import delegate under ONE module identity ("delegate")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, _agent_projects_root  # noqa: E402
-from rules_index import E5Model, chunk_markdown  # noqa: E402
+from rules_index import E5Model, chunk_markdown, get_model  # noqa: E402
 
 def init_db(conn):
     with conn.cursor() as cur:
@@ -171,7 +171,7 @@ def ingest(force: bool = False, target_file: Path | None = None) -> dict:
                         continue
                     
                     if model is None:
-                        model = E5Model()
+                        model = get_model()
                     
                     # Compute embedding
                     emb = model.embed([chunk_text], prefix="passage: ")[0].tolist()
@@ -246,7 +246,7 @@ def cmd_search(args):
     query = args.query
     k = args.k
     
-    model = E5Model()
+    model = get_model()
     q_emb = model.embed([query], prefix="query: ")[0].tolist()
     
     with psycopg.connect(dsn) as conn:

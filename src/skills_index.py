@@ -24,6 +24,7 @@ from tokenizers import Tokenizer
 # sys.path already carries src/.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, project_info  # noqa: E402
+from rules_index import get_model  # noqa: E402
 
 _TOKENIZER = None
 
@@ -72,7 +73,9 @@ class E5Model:
         self.tokenizer = _load_tokenizer()
         self.tokenizer.enable_truncation(max_length=512)
         self.tokenizer.enable_padding(pad_id=self.tokenizer.token_to_id("<pad>"), pad_token="<pad>")
-        self.session = ort.InferenceSession(self.model_path, providers=['CPUExecutionProvider'])
+        so = ort.SessionOptions()
+        so.enable_cpu_mem_arena = False
+        self.session = ort.InferenceSession(self.model_path, so, providers=['CPUExecutionProvider'])
 
     def embed(self, texts, prefix="passage: "):
         formatted_texts = [prefix + t for t in texts]
@@ -216,7 +219,7 @@ def ingest(force: bool = False, target_file: Path | None = None,
     with psycopg.connect(dsn) as conn:
         init_db(conn)
 
-        model = E5Model()
+        model = get_model()
 
         indexed_paths = []
         for filepath in target_files:
@@ -336,7 +339,7 @@ def cmd_search(args):
     query = args.query
     k = args.k
 
-    model = E5Model()
+    model = get_model()
     q_emb = model.embed([query], prefix="query: ")[0].tolist()
 
     with psycopg.connect(dsn) as conn:

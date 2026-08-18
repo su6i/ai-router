@@ -14,7 +14,7 @@ from tree_sitter import Language, Parser
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, project_info
-from rules_index import E5Model
+from rules_index import E5Model, get_model
 
 def init_db(conn):
     with conn.cursor() as cur:
@@ -297,7 +297,7 @@ def ingest(force: bool = False) -> dict:
             return stats
             
         chunk_map = _chunk_files_subprocess([f.resolve() for f in target_files])
-        model = E5Model()
+        model = get_model()
 
         for filepath in target_files:
             try:
@@ -433,7 +433,7 @@ def cmd_search(args):
     query = args.query
     k = args.k
     
-    model = E5Model()
+    model = get_model()
     q_emb = model.embed([query], prefix="query: ")[0].tolist()
     
     with psycopg.connect(dsn) as conn:

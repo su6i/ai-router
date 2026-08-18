@@ -62,6 +62,10 @@ graph TD
   `delegate.py` imports it. The whole feature is extractable as a
   standalone tool.
 
+## Model lifetime
+
+The `intfloat/multilingual-e5-small` model is loaded via ONNX Runtime as a process-wide singleton (`get_model()`). An idle-unload thread automatically frees the model after a period of inactivity to return memory to the OS, governed by the `RAG_MODEL_IDLE_TTL` environment variable (defaults to 900 seconds; set to 0 to disable unloading).
+
 ## Incremental reindex
 
 `r code --reindex` diffs `indexed_commit..HEAD` (`git diff --name-only`),
