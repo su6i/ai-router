@@ -245,6 +245,7 @@ def cmd_search(args):
         
     query = args.query
     k = args.k
+    repo = getattr(args, "repo", None)
     
     model = get_model()
     q_emb = model.embed([query], prefix="query: ")[0].tolist()
@@ -252,12 +253,21 @@ def cmd_search(args):
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             # HNSW cosine distance (<=>)
-            cur.execute("""
-                SELECT repo, path, start_line, heading, chunk, date 
-                FROM session_chunks 
-                ORDER BY embedding <=> %s::vector 
-                LIMIT %s
-            """, (str(q_emb), k))
+            if repo:
+                cur.execute("""
+                    SELECT repo, path, start_line, heading, chunk, date 
+                    FROM session_chunks 
+                    WHERE repo = %s
+                    ORDER BY embedding <=> %s::vector 
+                    LIMIT %s
+                """, (repo, str(q_emb), k))
+            else:
+                cur.execute("""
+                    SELECT repo, path, start_line, heading, chunk, date 
+                    FROM session_chunks 
+                    ORDER BY embedding <=> %s::vector 
+                    LIMIT %s
+                """, (str(q_emb), k))
             
             results = cur.fetchall()
             

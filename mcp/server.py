@@ -128,13 +128,16 @@ TOOLS = [
         "description": ("Retrieve only the most relevant rule/doc chunks "
                          "(constitution rules, project docs, skills) for a query — "
                          "USE THIS instead of reading whole rule files; "
-                         "output is capped at ~2k tokens."),
+                         "output is capped at ~2k tokens. If 'repo' is omitted, it is "
+                         "inferred from the current working directory."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "k": {"type": "integer", "default": 5},
                 "collection": {"type": "string", "default": "rules", "enum": ["rules", "skills", "sessions"]},
+                "repo": {"type": "string", "default": "",
+                         "description": "Explicit repo to search. If omitted, inferred from CWD."},
             },
             "required": ["query"],
         },
@@ -143,14 +146,19 @@ TOOLS = [
         "name": "code_lookup",
         "description": ("Retrieve only the most relevant code chunks (functions/classes) "
                          "for a query — USE THIS instead of exploratory file reads; "
-                         "output is capped at ~2k tokens."),
+                         "output is capped at ~2k tokens. Which repo is indexed is still "
+                         "inferred from the current working directory — 'repo' below is a "
+                         "path-prefix filter WITHIN that repo, not a repo selector "
+                         "(T-136 note: this name collides with the repo-selector meaning "
+                         "used by rules_lookup; unresolved, see T-136 report)."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "k": {"type": "integer", "default": 5},
                 "graph": {"type": "boolean", "default": False},
-                "repo": {"type": "string", "default": ""}
+                "repo": {"type": "string", "default": "",
+                         "description": "Path-prefix filter within the CWD-inferred repo, e.g. 'src/'. NOT a repo selector."}
             },
             "required": ["query"],
         },
@@ -390,6 +398,7 @@ def handle_rules_lookup(args: dict) -> dict:
     a = Args()
     a.query = query
     a.k = k
+    a.repo = args.get("repo") or None
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):

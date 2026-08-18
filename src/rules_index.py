@@ -396,9 +396,14 @@ def cmd_reindex(args):
 
 def cmd_search(args):
     load_env()
-    repo_name, commit = project_info()
-    if not repo_name:
-        repo_name = "ai-router"
+    repo = getattr(args, "repo", None)
+    if repo:
+        repo_name = repo
+        commit = None
+    else:
+        repo_name, commit = project_info()
+        if not repo_name:
+            repo_name = "ai-router"
         
     dsn = os.environ.get("POSTGRES_DSN")
     if not dsn:

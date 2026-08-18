@@ -419,11 +419,15 @@ def cmd_reindex(args):
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-def cmd_search(args):
+def cmd_search(args, repo: str | None = None):
     load_env()
-    repo_name, commit = project_info()
-    if not repo_name:
-        repo_name = "ai-router"
+    if repo:
+        repo_name = repo
+        commit = None
+    else:
+        repo_name, commit = project_info()
+        if not repo_name:
+            repo_name = "ai-router"
     
     dsn = os.environ.get("POSTGRES_DSN")
     if not dsn:
