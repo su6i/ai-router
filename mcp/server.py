@@ -146,19 +146,19 @@ TOOLS = [
         "name": "code_lookup",
         "description": ("Retrieve only the most relevant code chunks (functions/classes) "
                          "for a query — USE THIS instead of exploratory file reads; "
-                         "output is capped at ~2k tokens. Which repo is indexed is still "
-                         "inferred from the current working directory — 'repo' below is a "
-                         "path-prefix filter WITHIN that repo, not a repo selector "
-                         "(T-136 note: this name collides with the repo-selector meaning "
-                         "used by rules_lookup; unresolved, see T-136 report)."),
+                         "output is capped at ~2k tokens. If 'repo' is omitted, it is "
+                         "inferred from the current working directory. 'path_prefix' is "
+                         "a path filter within that repo."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "k": {"type": "integer", "default": 5},
                 "graph": {"type": "boolean", "default": False},
+                "path_prefix": {"type": "string", "default": "",
+                                "description": "Path-prefix filter within the searched repo, e.g. 'src/'. NOT a repo selector."},
                 "repo": {"type": "string", "default": "",
-                         "description": "Path-prefix filter within the CWD-inferred repo, e.g. 'src/'. NOT a repo selector."}
+                         "description": "Explicit repo to search. If omitted, inferred from CWD."}
             },
             "required": ["query"],
         },
@@ -422,11 +422,11 @@ def handle_code_lookup(args: dict) -> dict:
     a.query = query
     a.k = k
     a.graph = bool(args.get("graph"))
-    a.repo = args.get("repo", "")
+    a.repo = args.get("path_prefix", "")
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        ci.cmd_search(a)
+        ci.cmd_search(a, repo=args.get("repo") or None)
     return _text_result(out.getvalue())
 
 
