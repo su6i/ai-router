@@ -84,7 +84,7 @@ def test_output_cap(monkeypatch, capsys):
             import numpy as np
             return np.array([[0.0] * 384])
             
-    monkeypatch.setattr(ci, "E5Model", FakeModel)
+    monkeypatch.setattr(ci, "get_model", FakeModel)
     
     import psycopg
     class FakeCursor:
@@ -121,7 +121,7 @@ def test_stale_index_warning(monkeypatch, capsys):
             import numpy as np
             return np.array([[0.0] * 384])
             
-    monkeypatch.setattr(ci, "E5Model", FakeModel)
+    monkeypatch.setattr(ci, "get_model", FakeModel)
     monkeypatch.setattr(ci, "project_info", lambda: ("ai-router", "newcommit"))
     
     import psycopg
@@ -226,7 +226,7 @@ def test_incremental_reindex_mocked(monkeypatch, tmp_path):
     class FakeModel:
         def embed(self, texts, prefix=""):
             return [FakeVec([0.0] * 384) for _ in texts]
-    monkeypatch.setattr(ci, "E5Model", FakeModel)
+    monkeypatch.setattr(ci, "get_model", FakeModel)
 
     ci.cmd_reindex(FakeArgs())
 
@@ -281,7 +281,7 @@ def test_file_discovery_ignores_untracked(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Path, "read_text", mock_read_text)
     monkeypatch.setattr(ci, "_chunk_files_subprocess", lambda paths: {})
-    monkeypatch.setattr(ci, "E5Model", lambda: None)
+    monkeypatch.setattr(ci, "get_model", lambda: None)
 
     ci.cmd_reindex(FakeArgs())
     
