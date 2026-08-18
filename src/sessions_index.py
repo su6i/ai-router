@@ -62,6 +62,9 @@ def find_session_files(agent_projects: Path) -> list[Path]:
                 for f in handoff_dir.iterdir():
                     if f.is_file() and f.suffix in (".md", ".txt") and not f.name.startswith("."):
                         target_files.append(f)
+            registry_file = pdir / "REGISTRY-IDS.md"
+            if registry_file.exists():
+                target_files.append(registry_file)
         else:
             ws = pdir / "workspace"
             if ws.exists():

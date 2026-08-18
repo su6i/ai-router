@@ -8,6 +8,16 @@ import psycopg
 from tokenizers import Tokenizer
 import onnxruntime as ort
 import numpy as np
+
+# Set HF_HOME safe fallback BEFORE importing huggingface_hub, as it caches the env var at import time.
+if "HF_HOME" not in os.environ:
+    rag_hf = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "agent-projects" / "_memory" / "rag" / "hf_cache"
+    try:
+        rag_hf.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    os.environ["HF_HOME"] = str(rag_hf)
+
 from huggingface_hub import hf_hub_download, try_to_load_from_cache
 
 # Import delegate under ONE module identity ("delegate"), whether we run as
@@ -41,10 +51,14 @@ def _hf_file(filename: str) -> str:
     the request entirely, so the line appears at most once, on the very first
     download. Setting HF_TOKEN keeps the fast path and authenticates for real.
     """
-    cached = try_to_load_from_cache(repo_id=E5_REPO, filename=filename)
-    if isinstance(cached, str) and Path(cached).is_file():
-        return cached
-    return hf_hub_download(repo_id=E5_REPO, filename=filename, **_hf_token_kwargs())
+    try:
+        cached = try_to_load_from_cache(repo_id=E5_REPO, filename=filename)
+        if isinstance(cached, str) and Path(cached).is_file():
+            return cached
+        return hf_hub_download(repo_id=E5_REPO, filename=filename, **_hf_token_kwargs())
+    except (OSError, PermissionError) as e:
+        path = getattr(e, "filename", None) or os.environ.get("HF_HOME", "hf-cache")
+        raise RuntimeError(f"RAG unavailable: {path} (index/model not reachable)") from None
 
 
 def _load_tokenizer() -> Tokenizer:

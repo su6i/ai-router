@@ -362,6 +362,14 @@ def load_env():
                 k, v = line.split("=", 1)
                 os.environ[k.strip()] = v.strip()   # project secrets override shared
 
+    if "HF_HOME" not in os.environ:
+        rag_hf = AGENT_PROJECTS / "_memory" / "rag" / "hf_cache"
+        try:
+            rag_hf.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        os.environ["HF_HOME"] = str(rag_hf)
+
 
 def project_info():
     """Best-effort (project, commit) for the CWD where `amir router` was invoked."""

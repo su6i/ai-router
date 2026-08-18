@@ -4,6 +4,15 @@ import os
 from pathlib import Path
 import sys
 
+# Set HF_HOME safe fallback BEFORE importing huggingface_hub, as it caches the env var at import time.
+if "HF_HOME" not in os.environ:
+    rag_hf = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "agent-projects" / "_memory" / "rag" / "hf_cache"
+    try:
+        rag_hf.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    os.environ["HF_HOME"] = str(rag_hf)
+
 from huggingface_hub import hf_hub_download, try_to_load_from_cache
 import numpy as np
 import onnxruntime as ort
@@ -28,10 +37,14 @@ def _hf_token_kwargs() -> dict:
 
 def _hf_file(filename: str) -> str:
     """Resolve a model file, preferring the local cache over a Hub round-trip."""
-    cached = try_to_load_from_cache(repo_id=E5_REPO, filename=filename)
-    if isinstance(cached, str) and Path(cached).is_file():
-        return cached
-    return hf_hub_download(repo_id=E5_REPO, filename=filename, **_hf_token_kwargs())
+    try:
+        cached = try_to_load_from_cache(repo_id=E5_REPO, filename=filename)
+        if isinstance(cached, str) and Path(cached).is_file():
+            return cached
+        return hf_hub_download(repo_id=E5_REPO, filename=filename, **_hf_token_kwargs())
+    except (OSError, PermissionError) as e:
+        path = getattr(e, "filename", None) or os.environ.get("HF_HOME", "hf-cache")
+        raise RuntimeError(f"RAG unavailable: {path} (index/model not reachable)") from None
 
 
 def _load_tokenizer() -> Tokenizer:
