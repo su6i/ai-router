@@ -284,3 +284,38 @@ def test_sessions_modification_reingests(monkeypatch, tmp_path):
     assert res2["chunks_written"] == 1
 
 
+@pytest.mark.skipif(not (has_pg and has_model), reason="Missing Postgres or e5 model")
+def test_sweep_does_not_evict_hook_ingested_file(monkeypatch, tmp_path):
+    agent_root = tmp_path / "agent-projects"
+    agent_root.mkdir()
+    
+    r1 = agent_root / "hook_repo" / "workspace" / "inbox"
+    r1.mkdir(parents=True)
+    note_md_path = r1 / "note.md"
+    note_md_path.write_text("## Note\nHook ingested text.\n")
+    
+    monkeypatch.setattr(si, "_agent_projects_root", lambda: agent_root)
+    
+    si.ingest(force=True, target_file=note_md_path)
+    
+    dsn = os.environ.get("POSTGRES_DSN")
+    rel_path = str(note_md_path.relative_to(agent_root))
+    
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM session_chunks WHERE path = %s", (rel_path,))
+            count1 = cur.fetchone()[0]
+            
+    assert count1 > 0
+    
+    si.ingest(force=False)
+    
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM session_chunks WHERE path = %s", (rel_path,))
+            count2 = cur.fetchone()[0]
+            
+    assert count2 == count1
+    assert count2 > 0
+
+

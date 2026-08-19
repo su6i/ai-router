@@ -337,7 +337,12 @@ def get_model_channel(model: str) -> str:
 DEEPSEEK_PEAK_WINDOWS_UTC = [(1, 4), (6, 10)]
 DEEPSEEK_OFF_PEAK_MULTIPLIER = 2
 
+_DEEPSEEK_PEAK_WARNED = False
+
 def _warn_if_deepseek_peak(model: str) -> None:
+    global _DEEPSEEK_PEAK_WARNED
+    if _DEEPSEEK_PEAK_WARNED:
+        return
     if model not in ("flash", "pro", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek"):
         return
     from datetime import datetime, timezone
@@ -345,6 +350,7 @@ def _warn_if_deepseek_peak(model: str) -> None:
     for start, end in DEEPSEEK_PEAK_WINDOWS_UTC:
         if start <= now_utc < end:
             print(f"⚠️ DeepSeek peak window (UTC {start:02d}-{end:02d}) — off-peak price is {DEEPSEEK_OFF_PEAK_MULTIPLIER}× cheaper", file=sys.stderr)
+            _DEEPSEEK_PEAK_WARNED = True
             break
 
 def resolve_model(name: str) -> str:

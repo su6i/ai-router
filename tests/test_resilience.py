@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from delegate import _post_with_retry, ProviderError, delegate, resolve_model
+import delegate as delegate_module
 
 @pytest.fixture(autouse=True)
 def mock_env(monkeypatch):
@@ -112,3 +113,15 @@ def test_malformed_response(monkeypatch):
 def test_resolve_model_raises_value_error():
     with pytest.raises(ValueError, match="unknown model 'nope'"):
         resolve_model("nope")
+
+def test_deepseek_peak_warning_fires_once(monkeypatch, capsys):
+    monkeypatch.setattr(delegate_module, "DEEPSEEK_PEAK_WINDOWS_UTC", [(0, 24)])
+    delegate_module._DEEPSEEK_PEAK_WARNED = False
+    try:
+        resolve_model("deepseek")
+        resolve_model("deepseek")
+        captured = capsys.readouterr()
+        assert captured.err.count("DeepSeek peak window") == 1
+        assert delegate_module._DEEPSEEK_PEAK_WARNED is True
+    finally:
+        delegate_module._DEEPSEEK_PEAK_WARNED = False

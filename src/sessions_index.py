@@ -51,31 +51,20 @@ def find_session_files(agent_projects: Path) -> list[Path]:
     for pdir in agent_projects.iterdir():
         if not pdir.is_dir():
             continue
+
         if pdir.name == "_memory":
-            sess_dir = pdir / "sessions"
-            if sess_dir.exists():
-                for f in sess_dir.rglob("*.md"):
-                    if f.is_file() and not f.name.startswith("."):
-                        target_files.append(f)
-            handoff_dir = pdir / "handoffs"
-            if handoff_dir.exists():
-                for f in handoff_dir.iterdir():
-                    if f.is_file() and f.suffix in (".md", ".txt") and not f.name.startswith("."):
-                        target_files.append(f)
-            registry_file = pdir / "REGISTRY-IDS.md"
-            if registry_file.exists():
-                target_files.append(registry_file)
+            for f in pdir.rglob("*"):
+                if (f.is_file() and f.suffix in (".md", ".txt")
+                        and not f.name.startswith(".")):
+                    target_files.append(f)
         else:
             ws = pdir / "workspace"
             if ws.exists():
-                sess_file = ws / "SESSION.md"
-                if sess_file.exists():
-                    target_files.append(sess_file)
                 for f in ws.rglob("*"):
-                    if f.is_file() and f != sess_file and f.suffix in (".md", ".txt") and not f.name.startswith("."):
-                        rel_ws = f.relative_to(ws)
-                        if any(part.startswith("archive") for part in rel_ws.parts):
-                            target_files.append(f)
+                    if (f.is_file() and f.suffix in (".md", ".txt")
+                            and not f.name.startswith(".")):
+                        target_files.append(f)
+
     return sorted(target_files)
 
 def _extract_date(heading: str, text: str, filename: str) -> str | None:
