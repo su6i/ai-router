@@ -183,9 +183,9 @@ def main():
     parser_next.add_argument("--intent", required=True)
     parser_next.add_argument("--who", default="unknown")
     
-    parser_check = subparsers.add_parser("check")
+    subparsers.add_parser("check")
     
-    parser_seed = subparsers.add_parser("seed")
+    subparsers.add_parser("seed")
     
     args = parser.parse_args()
     

@@ -8,7 +8,7 @@ import pytest
 src_dir = str(Path(__file__).resolve().parent.parent / "src")
 sys.path.insert(0, src_dir)
 
-import id_alloc
+import id_alloc  # noqa: E402  (sys.path is set above so the src module resolves)
 
 @pytest.fixture(autouse=True)
 def isolated_paths(tmp_path, monkeypatch):
