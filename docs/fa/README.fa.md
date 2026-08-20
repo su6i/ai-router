@@ -129,6 +129,20 @@ r rules --reindex
 برای محافظت از محدودیت‌های context، خروجی در حدِ ~۸۰۰۰ کاراکتر hard-cap شده است.
 اگر ایندکس روی کامیتِ متفاوتی نسبت به کامیت فعلی ساخته شده باشد، `r rules` یک خط هشدار قبل از نتایج چاپ می‌کند.
 
+### صدور به والت (Vault Export)
+
+اسکریپت `src/vault_export.py` یک نمای Obsidian از تمام شناسه‌های یکتا (`T-###`، `D-###`، `N-###`، `B-###`، `W-###`) در `_memory/REGISTRY-IDS.md` تولید می‌کند.
+
+```bash
+# بار اول: ایجاد symlink ها در والت (queue/todo/wo/sessions)
+OBSIDIAN_VAULT=/path/to/vault uv run python src/vault_export.py --setup
+
+# اجراهای بعدی: تولید یا به‌روزرسانیِ نوت‌های مارک‌داون برای همه‌ی شناسه‌ها
+OBSIDIAN_VAULT=/path/to/vault uv run python src/vault_export.py
+```
+
+این اسکریپت متنِ اطراف هر شناسه را در سراسر فایل registry استخراج می‌کند، نوت‌های لینک‌شده در `<vault>/80-Agents/ids/` می‌سازد و یک فایل `_index.md` گروه‌بندی‌شده تولید می‌کند. نوت‌های تغییرنکرده برای جلوگیری از ایندکسِ بی‌موردِ Obsidian بازنویسی نمی‌شوند.
+
 ### بازیابی جلسات (Sessions): r sessions
 
 ابزار `ai-router` بازیابی معنایی روی زمینه جلسات گذشته (فایل‌های `~/.local/share/agent-projects/*/workspace/SESSION.md`) را دقیقاً مشابه بازیابی قوانین ارائه می‌دهد.

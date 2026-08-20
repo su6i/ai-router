@@ -153,6 +153,20 @@ r rules --reindex
 The output is hard-capped at ~8000 characters to protect context limits.
 If the index was built on a different commit than the current one, `r rules` will print a single warning line before the results.
 
+### Vault Export
+
+`src/vault_export.py` generates an Obsidian vault view of all unique IDs (`T-###`, `D-###`, `N-###`, `B-###`, `W-###`) found in `_memory/REGISTRY-IDS.md`.
+
+```bash
+# First time: setup symlinks in the vault (queue/todo/wo/sessions)
+OBSIDIAN_VAULT=/path/to/vault uv run python src/vault_export.py --setup
+
+# Subsequent runs: generate or update markdown notes for all IDs
+OBSIDIAN_VAULT=/path/to/vault uv run python src/vault_export.py
+```
+
+The script extracts the context around each ID across the registry, creates cross-linked notes in `<vault>/80-Agents/ids/`, and generates an `_index.md` grouped by type and status. Unchanged notes are skipped to prevent unnecessary Obsidian re-indexing.
+
 ### Sessions retrieval: r sessions
 
 `ai-router` provides semantic retrieval over past session context (the `~/.local/share/agent-projects/*/workspace/SESSION.md` files) exactly like it does for rules.
