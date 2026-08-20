@@ -333,6 +333,20 @@ def get_model_channel(model: str) -> str:
     return qc
 
 
+
+DEEPSEEK_PEAK_WINDOWS_UTC = [(1, 4), (6, 10)]
+DEEPSEEK_OFF_PEAK_MULTIPLIER = 2
+
+def _warn_if_deepseek_peak(model: str) -> None:
+    if model not in ("flash", "pro", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek"):
+        return
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc).hour
+    for start, end in DEEPSEEK_PEAK_WINDOWS_UTC:
+        if start <= now_utc < end:
+            print(f"⚠️ DeepSeek peak window (UTC {start:02d}-{end:02d}) — off-peak price is {DEEPSEEK_OFF_PEAK_MULTIPLIER}× cheaper", file=sys.stderr)
+            break
+
 def resolve_model(name: str) -> str:
     key = name.strip().lower()
     if key in REMOVED_MODELS:
@@ -343,11 +357,13 @@ def resolve_model(name: str) -> str:
             f"silently overrode the agy default). Use '{suggestion}'."
         )
     if key in MODELS:
+        _warn_if_deepseek_peak(key)
         return key
     resolved = ALIASES.get(key)
     if resolved is None:
         known = sorted(set(MODELS.keys()) | set(ALIASES.keys()))
         raise ValueError(f"unknown model '{name}'. Known: {', '.join(known)}")
+    _warn_if_deepseek_peak(resolved)
     return resolved
 
 

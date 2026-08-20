@@ -285,7 +285,7 @@ def ingest(force: bool = False) -> dict:
                 # (a Persian query then only ever hits the Persian mirror,
                 # never the canonical rule text). e5 is multilingual: Persian
                 # queries still match English chunks.
-                if "fa" in md.relative_to(docs_dir).parts or md.name.endswith(".fa.md"):
+                if "fa" in md.relative_to(docs_dir).parts or md.name.endswith(".fa.md") or "legacy" in md.relative_to(docs_dir).parts:
                     continue
                 target_files.append(md)
                 

@@ -7,6 +7,9 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Added
+- Archived legacy ai-router skill code in `docs/legacy/ai-router-skill-v0/` as a frozen reference.
+
 ### Changed
 
 - **RAG lookups accept an explicit `repo` argument instead of only inferring it from CWD.** `rules_lookup`/`code_lookup` (`mcp/server.py`) and the `cmd_search` in `rules_index.py`/`skills_index.py`/`sessions_index.py`/`code_index.py` now take an optional `repo`, used to filter the query directly when given; when omitted, behavior is unchanged (CWD → `project_info()`, and `sessions_index.py` stays unfiltered across repos as before). This decouples a future shared daemon (T-137) from the CWD-locking bug that would otherwise pin every session's lookups to whichever repo the daemon process happened to start in, silently, with no error.

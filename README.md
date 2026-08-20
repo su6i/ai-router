@@ -19,6 +19,7 @@ need **cost-per-task as a SQL query** instead of a guess. Full design:
 | `docker-compose.yml` | pgvector Postgres + monitoring stack |
 | `.env.example` | Reference list of the variables the vault `.env` must define (rule 035 — the repo never holds one) |
 | `CHANGELOG.md` | Notable changes, newest first |
+| `docs/legacy/ai-router-skill-v0/` | Frozen, non-executed reference archive of the old ai-router skill code — extracted from agent-constitution (see `docs/legacy/README.md` for capability table) |
 
 `delegate.py` keeps no state in the repo: cache, audit log and session memory
 live in the vault (`~/.local/share/agent-projects/ai-router/data/`, override

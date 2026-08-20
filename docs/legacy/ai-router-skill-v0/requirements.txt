@@ -1,0 +1,26 @@
+# ── Core (required) ──────────────────────────────────────────
+anthropic>=0.40.0          # Claude Opus / Sonnet / Haiku
+httpx>=0.27.0              # DeepSeek (direct REST)
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+aiofiles>=23.0.0
+
+# ── Proxy server (FastAPI) ────────────────────────────────────
+fastapi>=0.115.0           # OpenAI-compatible proxy (server.py)
+uvicorn[standard]>=0.30.0  # ASGI runner: uvicorn server:app --port 8787
+
+# ── Optional: GPT-5.x / OpenAI-compatible APIs ───────────────
+# openai>=1.0.0            # GPT-5.2, GPT-5 mini (OpenAI API)
+
+# ── Optional: Google Gemini ──────────────────────────────────
+# google-genai>=1.0.0          # Gemini 3.x Pro / Flash (new official SDK)
+
+# ── Optional: Universal adapter (all models via one API) ─────
+# litellm>=1.0.0           # Supports Claude, GPT, Gemini,
+#                          # MiniMax, Kimi, DeepSeek, Mistral…
+#                          # Replaces provider-specific clients
+
+# ── Optional: Orchestration / Agents ─────────────────────────
+# langchain>=0.3.0         # Chain/agent orchestration
+# langchain-anthropic>=0.3.0
+# langchain-openai>=0.3.0

@@ -19,3 +19,10 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.15.22",
 ]
+
+[tool.pytest.ini_options]
+addopts = "--ignore=docs/legacy"
+testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = ["docs/legacy"]
