@@ -22,3 +22,10 @@ fi
 # Print the unread note count (if any) and exit.
 # This runs `r inbox --peek` which just shows counts without marking read.
 r inbox --peek
+
+# Check ID allocator health
+AI_ROUTER_REPO="${AI_ROUTER_REPO:-$HOME/@-github/ai-router}"
+if ! PYTHONPATH="$AI_ROUTER_REPO/src" python3 -m id_alloc check >/dev/null 2>&1; then
+    echo "⚠️  ID Allocator health check failed. Run 'PYTHONPATH=\"$AI_ROUTER_REPO/src\" python3 -m id_alloc check' to view." >&2
+fi
+exit 0

@@ -8,6 +8,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ## Unreleased
 
 ### Added
+- **Atomic ID allocator (`src/id_alloc.py`)** — Added a concurrency-safe ledger for `D-`/`T-`/`N-`/`B-`/`W-` identifiers to prevent parallel sessions from colliding on the same "next" ID. Uses OS-level file locking (`fcntl.flock`) and an append-only TSV to guarantee monotonic, distinct allocations. Exposed via `PYTHONPATH=src python3 -m id_alloc next|check|seed`. `check` fails only on a manually assigned or duplicated ID; unallocated numbers are reported as information and capped, so a health line stays readable.
 - Archived legacy ai-router skill code in `docs/legacy/ai-router-skill-v0/` as a frozen reference.
 
 ### Changed

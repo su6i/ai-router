@@ -88,6 +88,23 @@ Every `send_note()` call (CLI `--note`, MCP `send_note`) also fires a short, bes
 
 Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_router_bot`) and `TELEGRAM_OWNER_CHAT_ID` in the rule-035 vault (`ai-router/secrets/.env`). This is a distinct bot from any other project's Telegram bot.
 
+### ID Allocation
+
+`ai-router` provides a concurrency-safe atomic ID allocator for `D-`, `T-`, `N-`, `B-`, and `W-` prefixes to prevent collisions across parallel sessions.
+The allocator uses an append-only TSV ledger backed by OS-level file locking. State lives in the vault (`~/.local/share/agent-projects/_memory/ID-LEDGER.tsv`, override with `AGENT_MEMORY_DIR`).
+
+```bash
+# Reserve the next ID atomically (returns bare ID like D-173)
+PYTHONPATH=src python3 -m id_alloc next D --intent "task description"
+
+# Check ledger health: exits non-zero on a manually assigned or duplicated ID.
+# Numbers nobody ever took are listed as information only, and capped.
+PYTHONPATH=src python3 -m id_alloc check
+
+# Seed the ledger from existing IDs in REGISTRY-IDS.md
+PYTHONPATH=src python3 -m id_alloc seed
+```
+
 ### One-shot chat
 
 ```bash
