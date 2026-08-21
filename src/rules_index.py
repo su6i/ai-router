@@ -186,6 +186,33 @@ def init_db(conn):
         """)
     conn.commit()
 
+# Bumped whenever the text handed to the embedder changes shape. It is folded
+# into both the file hash and the chunk sha so an incremental reindex re-embeds
+# the corpus on its own — otherwise a recipe change would sit dormant until
+# somebody remembered to pass --rebuild.
+EMBED_RECIPE_VERSION = 2
+
+
+def doc_title(path, text):
+    """First H1 of the document, else the file name.
+
+    A chunk deep inside a rule file carries its own `##` heading but nothing
+    that says WHICH rule it belongs to. Handing the embedder that document-level
+    context is what pulls the right file into top-k for a short query like
+    "قانون کامیت" -- measured: rank 9 -> rank 3 on this corpus.
+    """
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return os.path.basename(str(path))
+
+
+def embed_input(path, title, chunk_text):
+    """The text actually sent to the model. The STORED chunk stays untouched --
+    readers of `rules search` must see the rule, not our retrieval scaffolding."""
+    return f"{os.path.basename(str(path))} — {title}\n{chunk_text}"
+
+
 def chunk_markdown(text, max_tokens=300):
     tokenizer = _get_tokenizer()
 
@@ -275,6 +302,12 @@ def ingest(force: bool = False) -> dict:
             rules_dir = constitution_dir / "rules"
             if rules_dir.exists():
                 for md in rules_dir.glob("*.md"):
+                    # DIGEST.md is generated FROM the other rule files. Indexing it
+                    # duplicates the whole corpus (60 of 292 chunks here) and its
+                    # copies crowd the canonical rule out of top-k -- the same
+                    # reason the docs/fa mirrors are skipped below.
+                    if md.name == "DIGEST.md":
+                        continue
                     target_files.append(md)
         
         docs_dir = repo_path / "docs"
@@ -304,7 +337,10 @@ def ingest(force: bool = False) -> dict:
             indexed_paths.append(rel_path)
 
             text = filepath.read_text()
-            file_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            title = doc_title(filepath, text)
+            file_hash = hashlib.sha256(
+                f"v{EMBED_RECIPE_VERSION}\n{text}".encode("utf-8")
+            ).hexdigest()
 
             if not force:
                 with conn.cursor() as cur:
@@ -320,7 +356,9 @@ def ingest(force: bool = False) -> dict:
 
             for chunk in chunks:
                 chunk_text = chunk["text"]
-                chunk_sha = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+                chunk_sha = hashlib.sha256(
+                    f"v{EMBED_RECIPE_VERSION}\n{chunk_text}".encode("utf-8")
+                ).hexdigest()
                 current_shas.append(chunk_sha)
                 
                 # Check if exists
@@ -339,7 +377,9 @@ def ingest(force: bool = False) -> dict:
                         continue
                     
                     # Compute embedding
-                    emb = model.embed([chunk_text], prefix="passage: ")[0].tolist()
+                    emb = model.embed(
+                        [embed_input(rel_path, title, chunk_text)], prefix="passage: "
+                    )[0].tolist()
                     
                     cur.execute(
                         "INSERT INTO rules_chunks (repo, path, heading, start_line, chunk, chunk_sha, repo_commit, embedding) "

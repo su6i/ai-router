@@ -368,7 +368,19 @@ def resolve_model(name: str) -> str:
 
 
 def load_env():
-    # Layered secrets (rule 035): shared keys first, this project's own overrides second.
+    """Layered secrets (rule 035): shared keys first, this project's own second.
+
+    A variable that is already in the real environment WINS over both files —
+    standard dotenv `override=False` semantics. The old code stomped os.environ
+    unconditionally, which made the vault the only possible source of, say,
+    POSTGRES_DSN: every `load_env()` deep inside `ingest()`/`cmd_search()` undid
+    whatever the caller had exported. That is why the RAG tests could not be
+    isolated from the live database (T-151) — no fixture can outlive a callee
+    that re-reads the vault. Layering between the two FILES is unaffected: keys
+    the shared file just set are not "pre-existing", so the project file still
+    overrides them.
+    """
+    preexisting = set(os.environ)
     for f in (AGENT_PROJECTS / "_shared" / "secrets" / ".env", SECRETS_DIR / ".env"):
         if not f.exists():
             continue
@@ -376,7 +388,10 @@ def load_env():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ[k.strip()] = v.strip()   # project secrets override shared
+                k = k.strip()
+                if k in preexisting:
+                    continue
+                os.environ[k] = v.strip()   # project secrets override shared
 
     if "HF_HOME" not in os.environ:
         rag_hf = AGENT_PROJECTS / "_memory" / "rag" / "hf_cache"

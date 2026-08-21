@@ -140,6 +140,8 @@ the vault (never in the repo). `--new` resets a named session before running.
 
 `ai-router` provides semantic retrieval over rule files (the `.agent/constitution/rules/*.md` directory, `docs/**/*.md`, and `CLAUDE.md`).
 Translations (`docs/fa/`, `*.fa.md`) are excluded from the index: they duplicate the canonical English content and drown cross-lingual queries — the multilingual embedder still matches Persian queries against the English chunks.
+`rules/DIGEST.md` is excluded for the same reason: it is generated *from* the other rule files, so indexing it duplicated the whole corpus and pushed the canonical rule out of the top results.
+Each chunk is embedded together with its file name and the document's H1 title, so a chunk buried under a `##` heading still carries the identity of the rule it belongs to; the stored text, and therefore what you read in the output, is unaffected.
 This uses a local ONNX model (`intfloat/multilingual-e5-small`) and pgvector to find relevant rule chunks instead of loading whole files into context:
 
 ```bash
@@ -149,6 +151,11 @@ r rules "قانون کامیت"
 # Re-index all markdown files (only embeds changed chunks)
 r rules --reindex
 ```
+
+Changing how a chunk is embedded (rather than what it says) is versioned by
+`EMBED_RECIPE_VERSION` in `src/rules_index.py`: it is folded into the file hash
+and the chunk sha, so bumping it makes the ordinary incremental reindex re-embed
+the corpus. No `--rebuild` to remember, no half-old index.
 
 The output is hard-capped at ~8000 characters to protect context limits.
 If the index was built on a different commit than the current one, `r rules` will print a single warning line before the results.
