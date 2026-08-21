@@ -174,6 +174,21 @@ OBSIDIAN_VAULT=/path/to/vault uv run python src/vault_export.py
 
 The script extracts the context around each ID across the registry, creates cross-linked notes in `<vault>/80-Agents/ids/`, and generates an `_index.md` grouped by type and status. Unchanged notes are skipped to prevent unnecessary Obsidian re-indexing.
 
+#### Automated Sweep
+
+You can keep the export up to date automatically via a 30-minute launchd background schedule and a git post-merge hook.
+
+1. Create `~/.config/ai-router/vault-export.env` with one line:
+   ```ini
+   OBSIDIAN_VAULT=/path/to/your/vault
+   ```
+2. Install the automation:
+   ```bash
+   bash hooks/vault_export_sweep.sh --install
+   ```
+
+To remove the schedule later, run `bash hooks/vault_export_sweep.sh --uninstall`.
+
 ### Sessions retrieval: r sessions
 
 `ai-router` provides semantic retrieval over past session context (the `~/.local/share/agent-projects/*/workspace/SESSION.md` files) exactly like it does for rules.
