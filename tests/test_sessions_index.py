@@ -49,18 +49,8 @@ Just a normal heading.
 
 has_model = os.path.exists(os.path.expanduser("~/.cache/huggingface/hub"))
 
-def _pg_available() -> bool:
-    try:
-        si.load_env()
-        dsn = os.environ.get("POSTGRES_DSN")
-        if not dsn:
-            return False
-        psycopg.connect(dsn, connect_timeout=2).close()
-        return True
-    except Exception:
-        return False
-
-has_pg = _pg_available()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import has_pg  # noqa: E402  (sits below the sys.path setup it needs)
 
 @pytest.mark.skipif(not (has_pg and has_model), reason="Missing Postgres or e5 model")
 def test_ingest_idempotency(monkeypatch, tmp_path):

@@ -100,23 +100,9 @@ def test_stale_index_warning(monkeypatch, capsys):
 # We can loosely check if huggingface cache for e5 exists
 has_model = os.path.exists(os.path.expanduser("~/.cache/huggingface/hub"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import has_pg  # noqa: E402  (sits below the sys.path setup it needs)
 
-def _pg_available() -> bool:
-    """Real probe, not a hardcoded False — on the dev machine (vault DSN +
-    running container) the retrieval sanity test MUST actually run."""
-    try:
-        import psycopg
-        ri.load_env()
-        dsn = os.environ.get("POSTGRES_DSN")
-        if not dsn:
-            return False
-        psycopg.connect(dsn, connect_timeout=2).close()
-        return True
-    except Exception:
-        return False
-
-
-has_pg = _pg_available()
 
 @pytest.mark.skipif(not (has_pg and has_model), reason="Missing Postgres or e5 model")
 def test_retrieval_sanity(monkeypatch):

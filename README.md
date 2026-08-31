@@ -661,5 +661,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-Expected: `73 passed` (all suites under `tests/` — offline, no API keys
-or vault needed).
+All suites under `tests/` run offline, with no API keys needed. The tests that
+do talk to Postgres run against an `ai_router_test` schema, never the live one,
+so the suite is safe to run at any time and in any order — it cannot disturb the
+RAG index. Set `RAG_TEST_SCHEMA_RESET=1` to start that schema from scratch.

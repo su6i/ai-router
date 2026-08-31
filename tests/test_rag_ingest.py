@@ -1,5 +1,4 @@
 import sys
-import os
 import json
 import pytest
 from pathlib import Path
@@ -10,19 +9,8 @@ import rag_ingest
 import delegate as d
 import rules_index
 
-def _pg_available() -> bool:
-    try:
-        import psycopg
-        d.load_env()
-        dsn = os.environ.get("POSTGRES_DSN")
-        if not dsn:
-            return False
-        psycopg.connect(dsn, connect_timeout=2).close()
-        return True
-    except Exception:
-        return False
-
-has_pg = _pg_available()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import has_pg
 
 def test_pg_connection_error_stderr(monkeypatch, capsys):
     import psycopg

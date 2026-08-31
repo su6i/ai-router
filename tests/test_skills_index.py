@@ -1,4 +1,3 @@
-import os
 import sys
 import uuid
 from pathlib import Path
@@ -6,25 +5,10 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-import delegate as d
 import skills_index
 
-
-def _pg_available() -> bool:
-    try:
-        import psycopg
-
-        d.load_env()
-        dsn = os.environ.get("POSTGRES_DSN")
-        if not dsn:
-            return False
-        psycopg.connect(dsn, connect_timeout=2).close()
-        return True
-    except Exception:
-        return False
-
-
-has_pg = _pg_available()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import has_pg
 
 
 def test_missing_skills_dir_returns_zero_stats(tmp_path):

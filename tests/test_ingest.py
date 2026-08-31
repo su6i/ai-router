@@ -1,5 +1,3 @@
-import pytest
-import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -38,24 +36,11 @@ def test_parse_line_malformed():
     assert parse_line('{"ts": "2026-07-14T12:01:00Z"}') is None # missing model_asked
     assert parse_line('{"model_asked": "flash"}') is None # missing ts
 
-def _pg_available() -> bool:
-    # A set POSTGRES_DSN is not enough — Colima/Postgres may be stopped, in
-    # which case the integration test must skip, not fail. Probe a real
-    # connection with a short timeout.
-    try:
-        import psycopg
-        from delegate import load_env
-        load_env()
-        dsn = os.environ.get("POSTGRES_DSN")
-        if not dsn:
-            return False
-        psycopg.connect(dsn, connect_timeout=2).close()
-        return True
-    except Exception:
-        return False
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import requires_pg  # noqa: E402  (sits below the sys.path setup it needs)
 
 
-@pytest.mark.skipif(not _pg_available(), reason="Postgres not reachable")
+@requires_pg
 def test_integration_ingest_idempotent(capsys):
     # Runs against the real DB and real audit.log; safe because ingest is
     # idempotent by design (ON CONFLICT DO NOTHING on the line hash).
