@@ -31,6 +31,32 @@ session در والت هستند (`~/.local/share/agent-projects/ai-router/data/
 
 ## استفاده
 
+### سلامت نصب: r doctor
+
+دستور `r doctor` مجموعه‌ای از بررسی‌های خودکار را اجرا می‌کند تا از سلامت و اتصال کامل نصب اطمینان حاصل کند:
+- **mcp-registration**: ثبت صحیح سرور MCP در `~/.claude.json` را بررسی می‌کند.
+- **mcp-handshake**: سرور MCP را اجرا کرده و لیست ابزارها و ارتباط JSON-RPC را بررسی می‌کند.
+- **hooks-exist**: وجود و اجرای صحیح تمام فایل‌های پایتون استفاده شده در هوک‌های تنظیمات کلود را تأیید می‌کند.
+- **permissions-consistency**: اطمینان حاصل می‌کند که `permissions.allow` دقیقاً با ابزارهای سرور MCP مطابقت دارد.
+- **launchd**: بررسی می‌کند که plist‌های همگام‌سازی پس‌زمینه نصب شده و بدون خطا اجرا می‌شوند.
+- **vault-env**: وجود تمام کلیدهای API مورد نیاز در فایل‌های `.env` والت را تأیید می‌کند.
+- **postgres**: در دسترس بودن دیتابیس Postgres را بررسی می‌کند.
+
+```bash
+# اجرای بررسی‌ها
+r doctor
+
+# قالب خروجی: OK|WARN|FAIL check-name message
+# OK  mcp-registration  MCP server is correctly registered
+
+# اصلاح خودکار ثبت MCP
+r doctor --fix
+```
+
+فلگ `--fix` برگشت‌پذیر (idempotent) است و فقط ثبت MCP را تعمیر می‌کند. روی پیکربندی‌های غیرقابل پارس، از نوشتن امتناع می‌کند.
+اگر اصلاح خودکار انجام نشد، به صورت دستی سرور را مجدداً ثبت کنید:
+`claude mcp add --scope user ai-router python3 /Users/su6i/@-github/ai-router/mcp/server.py`
+
 ### پیام‌رسانی بین Sessionها (Inter-session Messaging)
 
 اجنت‌ها می‌توانند با استفاده از `r note` یا ابزار MCP `send_note` به پروژه‌های دیگر پیام بفرستند. این یادداشت‌ها در اینباکس پروژه مقصد به آدرس `<vault>/agent-projects/<project>/workspace/inbox/` ذخیره می‌شوند.

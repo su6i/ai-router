@@ -9,6 +9,7 @@
 #   r <model> <prompt words...>      chat: words are joined into one -p prompt
 #   r <model> --<delegate flags...>  raw passthrough (worker mode, --session, ...)
 #   r audit                          print the delegation ledger
+#   r doctor [--fix]                 run installation self-healing checks
 #
 # Env overrides:
 #   AI_ROUTER_REPO    path to the ai-router repo (default below)
@@ -38,6 +39,12 @@ r() {
 
   if [ "$1" = "audit" ]; then
     "$py" "$repo/src/delegate.py" --audit
+    return "$?"
+  fi
+
+  if [ "$1" = "doctor" ]; then
+    shift
+    "$py" "$repo/src/doctor.py" "$@"
     return "$?"
   fi
 

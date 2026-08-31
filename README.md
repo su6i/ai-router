@@ -33,6 +33,32 @@ INFO-level lines.
 
 ## Usage
 
+### Installation health: r doctor
+
+`r doctor` runs a suite of self-healing checks to verify the installation is healthy and fully connected:
+- **mcp-registration**: Ensures the MCP server is correctly registered in `~/.claude.json`.
+- **mcp-handshake**: Spawns the MCP server and verifies JSON-RPC initialization and tool list.
+- **hooks-exist**: Verifies all python files referenced in Claude settings hooks actually exist and compile.
+- **permissions-consistency**: Ensures `permissions.allow` precisely matches the tools served by the MCP server.
+- **launchd**: Checks background sync plists are installed and running cleanly.
+- **vault-env**: Verifies all required API keys defined by the router exist in the vault's `.env` files.
+- **postgres**: Verifies the Postgres database is reachable.
+
+```bash
+# Run checks
+r doctor
+
+# Output shape: OK|WARN|FAIL check-name message
+# OK  mcp-registration  MCP server is correctly registered
+
+# Fix MCP registration automatically
+r doctor --fix
+```
+
+`--fix` is idempotent and only repairs the MCP registration. It refuses to write on unparseable configurations.
+If automatic fix refuses to write, manually re-register the MCP server:
+`claude mcp add --scope user ai-router python3 /Users/su6i/@-github/ai-router/mcp/server.py`
+
 ### Inter-session Messaging
 
 Agents can send notes to other projects using `r note` or the `send_note` MCP tool. Notes are stored in `<vault>/agent-projects/<project>/workspace/inbox/`.
