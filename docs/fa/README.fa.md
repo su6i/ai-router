@@ -492,8 +492,10 @@ HTTP/SSE، بدون auth (خارج از scope نسخه‌ی ۱).
 | `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` | اشتراکِ Google AI Pro (از طریق `agy`) | $0 / $0 | بالاترین پله‌ی $0 — همان استخرِ Claude |
 
 هر ۱۱ شناسه‌ای که `agy models` چاپ می‌کند با همان نامِ دقیق قابلِ مسیریابی است
-(`gemini-3.6-flash-*`، `gemini-3.5-flash-*`، `gemini-3.1-pro-*`، دو مدلِ Claude،
-و `gpt-oss-120b-medium`). **هرگز `--effort` را کنارِ این نام‌ها نفرست:** سطحِ
+(`gemini-3.7-flash-*`، `gemini-3.6-flash-*`، `gemini-3.1-pro-*`، دو مدلِ Claude،
+و `gpt-oss-120b-medium`). ثبت‌نامِ `gemini-3.5-flash-*` هم در `MODELS` باقی
+مانده — کانال دیگر آن‌ها را چاپ نمی‌کند، ولی حذف‌شان تصمیمِ معمار است، نه این
+رفع (2026-09-01). **هرگز `--effort` را کنارِ این نام‌ها نفرست:** سطحِ
 effort از قبل بخشی از خودِ نام است و agy برای مدل‌های Claude این جفت را صریحاً رد
 می‌کند (`--effort is not supported for model "claude-sonnet-4-6"`).
 
