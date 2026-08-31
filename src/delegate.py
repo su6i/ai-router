@@ -2324,7 +2324,7 @@ def send_to_owner(files: list[str], title: str) -> str:
     return "message_id=" + ",".join(str(m) for m in msg_ids)
 
 
-def send_note(to_project: str, message: str, priority: str = "normal", subject: str = "", notify: bool = True) -> str:
+def send_note(to_project: str, message: str, priority: str = "normal", subject: str = "", notify: bool | None = None) -> str:
     """Send a note to another project's inbox."""
     if priority not in ("low", "normal", "high"):
         priority = "normal"
@@ -2340,6 +2340,8 @@ def send_note(to_project: str, message: str, priority: str = "normal", subject: 
     if not target_root.exists() or not target_root.is_dir():
         raise ValueError(f"unknown project: {to_project}")
         
+    should_notify = notify if notify is not None else (to_project == "@-github")
+    
     inbox_dir = target_root / "workspace" / "inbox"
     inbox_dir.mkdir(parents=True, exist_ok=True)
     
@@ -2382,7 +2384,7 @@ read: false"""
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
         
-    if notify:
+    if should_notify:
         bot_token = os.environ.get("AI_ROUTER_BOT_TOKEN")
         chat_id = os.environ.get("TELEGRAM_OWNER_CHAT_ID")
         if bot_token and chat_id:
