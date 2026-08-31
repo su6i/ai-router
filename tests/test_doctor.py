@@ -226,3 +226,176 @@ def test_repo_root_is_the_main_checkout_not_a_worktree():
     """
     assert (doctor.REPO_ROOT / ".git").is_dir()
     assert (doctor.REPO_ROOT / "mcp" / "server.py").is_file()
+
+def test_sessionstart_rag_missing_file_fails(monkeypatch, tmp_path, fake_home, capsys):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    assert not doctor.check_sessionstart_rag_hook()
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_sessionstart_rag_syntax_error_fails(monkeypatch, tmp_path, fake_home, capsys):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    hook_file = tmp_path / "hooks" / "session_start_brief.py"
+    hook_file.parent.mkdir(parents=True, exist_ok=True)
+    hook_file.write_text("def f(:\n")
+    
+    assert not doctor.check_sessionstart_rag_hook()
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "SyntaxError" in out
+
+
+def test_sessionstart_rag_not_registered_warns(monkeypatch, tmp_path, fake_home, capsys):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    hook_file = tmp_path / "hooks" / "session_start_brief.py"
+    hook_file.parent.mkdir(parents=True, exist_ok=True)
+    hook_file.write_text("print('ok')\n")
+    
+    assert doctor.check_sessionstart_rag_hook()
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_sessionstart_rag_registered_ok(monkeypatch, tmp_path, fake_home, capsys):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    hook_file = tmp_path / "hooks" / "session_start_brief.py"
+    hook_file.parent.mkdir(parents=True, exist_ok=True)
+    hook_file.write_text("print('ok')\n")
+    
+    p = fake_home / ".claude" / "settings.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"command": "python session_start_brief.py"}]
+                }
+            ]
+        }
+    }))
+    
+    assert doctor.check_sessionstart_rag_hook()
+    assert "OK" in capsys.readouterr().out
+
+
+def test_sessionstart_rag_fix_registers(monkeypatch, tmp_path, fake_home, capsys):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    hook_file = tmp_path / "hooks" / "session_start_brief.py"
+    hook_file.parent.mkdir(parents=True, exist_ok=True)
+    hook_file.write_text("print('ok')\n")
+    
+    p = fake_home / ".claude" / "settings.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    initial_data = {
+        "hooks": {
+            "PreToolUse": [{"type": "command", "command": "python foo.py"}],
+            "SessionStart": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": "bash something-else.sh"}]
+                }
+            ]
+        }
+    }
+    p.write_text(json.dumps(initial_data))
+    
+    doctor.fix_sessionstart_rag_hook()
+    
+    data = json.loads(p.read_text())
+    pre_tool = data["hooks"]["PreToolUse"]
+    assert len(pre_tool) == 1
+    assert pre_tool[0]["command"] == "python foo.py"
+    
+    session_start = data["hooks"]["SessionStart"]
+    assert len(session_start) == 1
+    hooks_list = session_start[0]["hooks"]
+    assert len(hooks_list) == 2
+    assert hooks_list[0]["command"] == "bash something-else.sh"
+    
+    added_hook = hooks_list[1]
+    assert "session_start_brief.py" in added_hook["command"]
+    assert str(tmp_path) in added_hook["command"]
+    
+    assert doctor.check_sessionstart_rag_hook()
+    assert "OK" in capsys.readouterr().out
+
+
+def test_sessionstart_rag_fix_dedupes_legacy(monkeypatch, tmp_path, fake_home, capsys):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    hook_file = tmp_path / "hooks" / "session_start_brief.py"
+    hook_file.parent.mkdir(parents=True, exist_ok=True)
+    hook_file.write_text("print('ok')\n")
+    
+    p = fake_home / ".claude" / "settings.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    initial_data = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/session-resume-su6i.sh"}]
+                }
+            ]
+        }
+    }
+    p.write_text(json.dumps(initial_data))
+    
+    doctor.fix_sessionstart_rag_hook()
+    
+    data = json.loads(p.read_text())
+    hooks_list = data["hooks"]["SessionStart"][0]["hooks"]
+    
+    assert len(hooks_list) == 1
+    assert "session_start_brief.py" in hooks_list[0]["command"]
+    assert "session-resume-su6i.sh" not in hooks_list[0]["command"]
+
+
+def test_sessionstart_rag_fix_is_idempotent(monkeypatch, tmp_path, fake_home):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    hook_file = tmp_path / "hooks" / "session_start_brief.py"
+    hook_file.parent.mkdir(parents=True, exist_ok=True)
+    hook_file.write_text("print('ok')\n")
+    
+    p = fake_home / ".claude" / "settings.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    initial_data = {
+        "hooks": {
+            "PreToolUse": [{"type": "command", "command": "python foo.py"}],
+            "SessionStart": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": "bash something-else.sh"}]
+                }
+            ]
+        }
+    }
+    p.write_text(json.dumps(initial_data))
+    
+    doctor.fix_sessionstart_rag_hook()
+    data_after_first = p.read_text()
+    
+    doctor.fix_sessionstart_rag_hook()
+    data_after_second = p.read_text()
+    
+    assert data_after_first == data_after_second
+
+
+def test_sessionstart_rag_fix_atomic_write(monkeypatch, tmp_path, fake_home):
+    monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path)
+    hook_file = tmp_path / "hooks" / "session_start_brief.py"
+    hook_file.parent.mkdir(parents=True, exist_ok=True)
+    hook_file.write_text("print('ok')\n")
+    
+    p = fake_home / ".claude" / "settings.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{}")
+    
+    real_settings = Path.home() / ".claude" / "settings.json"
+    real_mtime_before = real_settings.stat().st_mtime if real_settings.exists() else None
+    
+    doctor.fix_sessionstart_rag_hook()
+    
+    if real_mtime_before is not None:
+        assert real_settings.stat().st_mtime == real_mtime_before
+    else:
+        assert not real_settings.exists()

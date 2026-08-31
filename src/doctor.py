@@ -146,6 +146,129 @@ def fix_mcp_registration():
         os.unlink(tmp_path)
         raise e
 
+
+def _sessionstart_rag_hook_path() -> Path:
+    return REPO_ROOT / "hooks" / "session_start_brief.py"
+
+
+def _sessionstart_rag_registered() -> bool:
+    """True iff settings.json has a SessionStart hook entry whose command
+    mentions session_start_brief.py, anywhere under hooks.SessionStart[*].hooks[*]."""
+    p = _get_settings_json_path()
+    if not p.exists():
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    session_start = data.get("hooks", {}).get("SessionStart", [])
+    if not isinstance(session_start, list):
+        return False
+    for block in session_start:
+        if not isinstance(block, dict):
+            continue
+        for h in block.get("hooks", []):
+            if isinstance(h, dict) and "session_start_brief.py" in h.get("command", ""):
+                return True
+    return False
+
+
+def check_sessionstart_rag_hook():
+    hook_path = _sessionstart_rag_hook_path()
+    if not hook_path.is_file():
+        print(f"FAIL  sessionstart-rag  Hook file missing: {hook_path}")
+        return False
+    try:
+        src = hook_path.read_text(encoding="utf-8")
+        compile(src, str(hook_path), "exec")
+    except SyntaxError as e:
+        print(f"FAIL  sessionstart-rag  SyntaxError in hook: {e}")
+        return False
+    except Exception as e:
+        print(f"FAIL  sessionstart-rag  Error reading hook: {e}")
+        return False
+
+    if _sessionstart_rag_registered():
+        print("OK  sessionstart-rag  Hook exists, compiles, and is registered in SessionStart")
+        return True
+    print("WARN  sessionstart-rag  Hook exists but is not registered in settings.json SessionStart — run with --fix")
+    return True
+
+
+def fix_sessionstart_rag_hook():
+    """Idempotent. Registers hooks/session_start_brief.py in settings.json's
+    SessionStart matcher "*" array, and removes the legacy
+    session-resume-su6i.sh entry if present (never both at once — continuity
+    context must not be injected twice). Atomic write only: temp file in the
+    same directory, fsync, os.replace — mirrors fix_mcp_registration()."""
+    p = _get_settings_json_path()
+    hook_path = _sessionstart_rag_hook_path()
+    expected_command = f"uv run --directory {REPO_ROOT} python {hook_path}"
+
+    if not p.exists():
+        print(f"Cannot fix: {p} missing.")
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        print(f"Cannot fix: {p} is unparseable JSON.")
+        return
+
+    hooks = data.setdefault("hooks", {})
+    session_start = hooks.setdefault("SessionStart", [])
+    if not isinstance(session_start, list):
+        print("Cannot fix: hooks.SessionStart is not a list.")
+        return
+
+    star_block = None
+    for block in session_start:
+        if isinstance(block, dict) and block.get("matcher") == "*":
+            star_block = block
+            break
+    if star_block is None:
+        star_block = {"matcher": "*", "hooks": []}
+        session_start.append(star_block)
+
+    hook_list = star_block.setdefault("hooks", [])
+
+    already_registered = any(
+        isinstance(h, dict) and "session_start_brief.py" in h.get("command", "")
+        for h in hook_list
+    )
+    deduped = [
+        h for h in hook_list
+        if not (isinstance(h, dict) and "session-resume-su6i.sh" in h.get("command", ""))
+    ]
+    legacy_removed = len(deduped) != len(hook_list)
+    hook_list[:] = deduped
+
+    if not already_registered:
+        hook_list.append({
+            "type": "command",
+            "command": expected_command,
+            "timeout": 10,
+            "statusMessage": "▶️ su6i — session continuity (RAG)",
+        })
+
+    if already_registered and not legacy_removed:
+        print("already OK")
+        return
+
+    new_content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    fd, tmp_path = tempfile.mkstemp(dir=p.parent, prefix=".settings.json.tmp.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new_content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, p)
+    except Exception as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise e
+
 def check_mcp_handshake():
     server_path = str(REPO_ROOT / "mcp" / "server.py")
     proc = subprocess.Popen(
@@ -468,6 +591,7 @@ def main():
     
     if args.fix:
         fix_mcp_registration()
+        fix_sessionstart_rag_hook()
         
     cap = CaptureOutput()
     orig_stdout = sys.stdout
@@ -477,6 +601,7 @@ def main():
         check_mcp_registration()
         check_mcp_handshake()
         check_hooks_exist()
+        check_sessionstart_rag_hook()
         check_permissions_consistency()
         check_launchd()
         check_vault_env()

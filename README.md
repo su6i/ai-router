@@ -39,6 +39,7 @@ INFO-level lines.
 - **mcp-registration**: Ensures the MCP server is correctly registered in `~/.claude.json`.
 - **mcp-handshake**: Spawns the MCP server and verifies JSON-RPC initialization and tool list.
 - **hooks-exist**: Verifies all python files referenced in Claude settings hooks actually exist and compile.
+- **sessionstart-rag**: Verifies the SessionStart RAG brief hook (`hooks/session_start_brief.py`) exists, compiles, and is registered in `~/.claude/settings.json`. `--fix` registers it and removes the legacy pointer-only hook if still present.
 - **permissions-consistency**: Ensures `permissions.allow` precisely matches the tools served by the MCP server.
 - **launchd**: Checks background sync plists are installed and running cleanly.
 - **vault-env**: Verifies all required API keys defined by the router exist in the vault's `.env` files.
@@ -58,6 +59,50 @@ r doctor --fix
 `--fix` is idempotent and only repairs the MCP registration. It refuses to write on unparseable configurations.
 If automatic fix refuses to write, manually re-register the MCP server:
 `claude mcp add --scope user ai-router python3 /Users/su6i/@-github/ai-router/mcp/server.py`
+
+### SessionStart continuity: hooks/session_start_brief.py
+
+Every new Claude Code session in a repo fires a `SessionStart` hook. Historically
+this injected only a pointer telling the agent to go read that project's
+`SESSION.md` in full — for `ai-router` that file is 1800+ lines, so every session
+paid a full premium-context read to find a handful of open items.
+
+`hooks/session_start_brief.py` replaces the pointer with a retrieved brief,
+assembled from four blocks (hard cap 4500 chars total):
+
+1. **Open items** — the `## <repo>` section of the central `TODO.md`, filtered to
+   only `[ ]` and `[~]` (open/in-progress) checkbox lines.
+2. **Retrieved continuity (RAG)** — the top chunks from the `session_chunks`
+   index (see `src/sessions_index.py`) for that repo, with a quality filter:
+   chunks that are ≥70% auto git-ping lines (`branch ...`, `last:`, `session:`)
+   are dropped as noise, and chunks mentioning "Left Open", "Next Work Order",
+   "Open Questions", "Ready to test" or "blocked" are ranked first.
+
+   Three further filters decide whether the block is worth its cap:
+   - **Continuity files only.** The session index also holds work orders,
+     benchmark fixtures, design docs and closed inbox notes. Retrieval is
+     restricted to `SESSION.md`, `architect-memory.md` and `NEXT-SESSION.md`,
+     so the brief never quotes a work order back at the agent that wrote it.
+   - **Zero-boost chunks are dropped** when at least two boosted ones survived —
+     a nearest neighbour that states no open state is topical noise here.
+   - **Stale chunks are dropped.** A digest more than 30 days older than the
+     freshest chunk retrieved still says "Left Open" about work that has since
+     shipped; a brief that opens a session with it is worse than one that stays
+     quiet, because the agent re-raises closed items as live. The window is
+     measured against the freshest chunk, never an absolute date, and if
+     *nothing* is recent the old chunks are kept — an old brief beats none.
+3. **Inbox** — up to 10 filenames waiting in that repo's vault inbox.
+4. **Pointer tail** — `SESSION.md` and the latest handoff file, named as
+   fallback-only sources.
+
+**Fail-safe by design**: if `POSTGRES_DSN` is unset/unreachable, the local
+embedding model isn't already cached on disk (this hook never triggers a model
+download), or the retrieval takes longer than a 6-second wall-clock budget, block
+2 silently falls back to the legacy pointer text instead — the hook always exits
+`0` and always emits exactly one line of JSON on stdout.
+
+Registered (and kept in sync, replacing the legacy `session-resume-su6i.sh`
+entry) via `r doctor --fix` — see the `sessionstart-rag` check above.
 
 ### Inter-session Messaging
 
