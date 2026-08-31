@@ -426,6 +426,33 @@ def project_info():
     return (project or os.path.basename(cwd), git("rev-parse", "--short", "HEAD") or None)
 
 
+def _now_local() -> dt.datetime:
+    """Current instant as an aware datetime in the machine's local zone.
+
+    A seam so budget-window tests can pin "now" instead of having to wait for a
+    real month boundary to expose an off-by-a-month bucketing bug.
+    """
+    return dt.datetime.now().astimezone()
+
+
+def _ts_local(ts: str, tz: dt.tzinfo | None = None) -> dt.datetime | None:
+    """Audit-log timestamp as an aware datetime in `tz` (local when omitted).
+
+    Rows are normally stamped with the writer's own UTC offset, but the ledger
+    also collects rows stamped in another zone (UTC from a container, an
+    imported ledger). Bucketing those by string prefix files them under the
+    wrong month or day — and around a month boundary that silently zeroes the
+    very spend a cap exists to abort on.
+    """
+    if not ts:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return None
+    return parsed.astimezone(tz)
+
+
 def show_audit():
     print(AUDIT.read_text().rstrip() if AUDIT.exists() else "(no audit.log yet)")
 
@@ -452,10 +479,11 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
     project_caps = budgets.get("per_project_monthly_usd", {})
     project_cap = project_caps.get(project) if project else None
 
-    now = dt.datetime.now().astimezone()
-    month_str = now.isoformat()[:7]
-    today_str = now.isoformat()[:10]
-    week_ago = (now - dt.timedelta(days=7)).isoformat()
+    now = _now_local()
+    month_str = now.strftime("%Y-%m")
+    today = now.date()
+    week_ago = now - dt.timedelta(days=7)
+    undated = 0
 
     spent_month = 0.0
     spent_week = 0.0
@@ -476,26 +504,33 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                 except Exception:  # noqa: BLE001, S112
                     continue
                 
-                ts = rec.get("ts", "")
+                ts_local = _ts_local(rec.get("ts", ""), now.tzinfo)
                 channel = rec.get("quota_channel")
-                
+                if ts_local is None:
+                    undated += 1
+
                 # Cache HITs never reached the provider — they consume no quota.
-                if ts.startswith(today_str) and channel and not rec.get("cached"):
+                if ts_local is not None and ts_local.date() == today and channel and not rec.get("cached"):
                     daily_calls_count[channel] = daily_calls_count.get(channel, 0) + 1
-                    
+
                 cost = rec.get("cost_usd", 0.0)
                 if not cost:
                     continue
-                
-                if ts.startswith(month_str):
+
+                if ts_local is not None and ts_local.strftime("%Y-%m") == month_str:
                     spent_month += cost
                     spent_premium += rec.get("premium_requests", 0)
                     if project and rec.get("project") == project:
                         spent_project += cost
-                if ts >= week_ago:
+                if ts_local is not None and ts_local >= week_ago:
                     spent_week += cost
                 if session and rec.get("session") == session:
                     spent_session += cost
+
+    # An unreadable ts means that row sits in no window at all; a cap must not
+    # be lowered by rows it cannot see without saying so.
+    if undated and not print_estimate:
+        logger.warning(f"⚠️  {undated} audit row(s) have an unreadable ts — excluded from every spend window")
 
     if print_estimate:
         print("  Current month spend vs caps:")
@@ -589,8 +624,9 @@ def show_cost(since: str | None = None, by: str = "model"):
 
     malformed = 0
     copilot_premium_month = 0
-    today_str = dt.datetime.now().astimezone().isoformat()[:10]
-    month_str = today_str[:7]
+    now = _now_local()
+    today_str = now.strftime("%Y-%m-%d")
+    month_str = now.strftime("%Y-%m")
     today_channel_calls = collections.defaultdict(int)
     with AUDIT.open("r") as fh:
         for line in fh:
@@ -604,17 +640,19 @@ def show_cost(since: str | None = None, by: str = "model"):
                 continue
 
             ts = rec.get("ts", "")
+            ts_local = _ts_local(ts, now.tzinfo)
+            day_str = ts_local.strftime("%Y-%m-%d") if ts_local is not None else ts[:10]
             channel = rec.get("quota_channel")
-            if ts.startswith(month_str):
+            if ts_local is not None and ts_local.strftime("%Y-%m") == month_str:
                 copilot_premium_month += rec.get("premium_requests", 0)
-                
-            if ts.startswith(today_str) and channel and not rec.get("cached"):
+
+            if day_str == today_str and channel and not rec.get("cached"):
                 today_channel_calls[channel] += 1
-            if since and ts[:10] < since:
+            if since and day_str < since:
                 continue
 
             if by == "day":
-                group_val = ts[:10]
+                group_val = day_str
             elif by == "model":
                 group_val = rec.get("model_asked") or rec.get("model")
             else:
