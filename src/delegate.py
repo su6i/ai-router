@@ -189,6 +189,15 @@ def _vault_root() -> Path:
 
 
 AGENT_PROJECTS = _agent_projects_root()
+# Sized so the real WORKER-RULES.md (~11 KB on 2026-09-01) fits whole. At the
+# original 4000 it silently dropped 64% of the file — including most of the
+# recorded defect patterns and the per-model notes — so workers were being
+# handed the header of the rules and none of the rules that matter. This is a
+# safety valve against an unbounded file, not a budget to tune down.
+WORKER_RULES_MAX_CHARS = 16000
+_WORKER_RULES_CACHE: dict = {}
+_worker_rules_truncated_warned = False
+
 VAULT = _vault_root()
 DATA_DIR = VAULT / "data"
 DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1430,6 +1439,28 @@ def _get_channel_system_prompt(model: str) -> str:
     return ""
 
 
+def _load_worker_rules() -> str:
+    global _worker_rules_truncated_warned
+    path = AGENT_PROJECTS / "_memory" / "WORKER-RULES.md"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    key = (str(path), mtime)
+    if key not in _WORKER_RULES_CACHE:
+        content = path.read_text().strip()
+        if not content:
+            _WORKER_RULES_CACHE[key] = ""
+        elif len(content) > WORKER_RULES_MAX_CHARS:
+            if not _worker_rules_truncated_warned:
+                print(f"WORKER-RULES.md truncated to {WORKER_RULES_MAX_CHARS} chars", file=sys.stderr)
+                _worker_rules_truncated_warned = True
+            _WORKER_RULES_CACHE[key] = content[:WORKER_RULES_MAX_CHARS] + "\n… (truncated)"
+        else:
+            _WORKER_RULES_CACHE[key] = content
+    return _WORKER_RULES_CACHE[key]
+
+
 def build_worker_prompt(task: str, file_specs: list, model: str | None = None) -> str:
     import repo_map
     parts = []
@@ -1438,6 +1469,9 @@ def build_worker_prompt(task: str, file_specs: list, model: str | None = None) -
         if channel_prompt:
             parts.append(channel_prompt)
     parts.append(CONTEXT_DISCIPLINE_PREAMBLE)
+    worker_rules = _load_worker_rules()
+    if worker_rules:
+        parts.append(f"## Standing worker rules (violating these fails review)\n\n{worker_rules}\n")
     parts.append(repo_map.generate_repo_map(cwd="."))
     # Prefix-cache invariant: constant text (preamble, repo map) precedes the
     # files block; the variable task text stays last.
