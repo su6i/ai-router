@@ -43,7 +43,7 @@ def test_concurrency(isolated_paths):
 def test_registry_offset_and_check(isolated_paths):
     # Test case 2 & 3: registry has D-200, ledger empty -> next D is D-201
     registry_path = isolated_paths / "REGISTRY-IDS.md"
-    registry_path.write_text("Here is a manually added ID: D-200\n", encoding="utf-8")
+    registry_path.write_text("- D-200 — manually added\n", encoding="utf-8")
     
     env = os.environ.copy()
     env["AGENT_MEMORY_DIR"] = str(isolated_paths)
@@ -63,7 +63,7 @@ def test_registry_offset_and_check(isolated_paths):
 def test_seed_deduplication(isolated_paths):
     # Test case 4: fake registry with 3 occurrences of T-162 -> seed -> exactly 1 line
     registry_path = isolated_paths / "REGISTRY-IDS.md"
-    registry_path.write_text("T-162 first\nT-162 second\nT-162 third", encoding="utf-8")
+    registry_path.write_text("- T-162 — first\n- T-162 — second\n- T-162 — third\n", encoding="utf-8")
     
     env = os.environ.copy()
     env["AGENT_MEMORY_DIR"] = str(isolated_paths)

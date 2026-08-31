@@ -7,6 +7,24 @@ import sys
 
 ALLOWED_PREFIXES = {"D", "T", "N", "B", "W"}
 ID_REGEX = re.compile(r"\b([DTNBW])-(\d+)\b")
+# An ID counts only when it is the identifier OF a registry row, never when it is
+# merely mentioned inside one. Prose examples live in blockquotes ("> ... `T-0900`")
+# and sentences, so anchoring to the row shape is what kills the poisoning (N-031).
+#
+# Two real row shapes exist in REGISTRY-IDS.md, verified against the live file:
+#   - T-919 — ...                     bare id first
+#   - WO-ARX-0072 / T-925 — ...       an external work-order label, then the id
+# The second shape carries 9 real allocations. Missing them is worse than the bug
+# this fix replaces: an unseen maximum makes the allocator re-issue a live id, the
+# exact collision class the registry records for D-211 and D-037/D-038.
+#
+# The optional label is deliberately narrow — one bare token plus a slash. It cannot
+# span a sentence, so it cannot walk into prose. Only the FIRST id on the row is
+# taken: rows like "- T-919 — VOID, duplicate of T-916 (pattern of T-901)" must
+# yield T-919 and must not re-admit the voided ids quoted in their own body.
+_LABEL = r"(?:[A-Za-z0-9][A-Za-z0-9-]*\s*/\s*)?"
+LIST_ROW_REGEX = re.compile(r"^-\s+" + _LABEL + r"([DTNBW])-(\d+)\b")
+TABLE_ROW_REGEX = re.compile(r"^\|\s*" + _LABEL + r"([DTNBW])-(\d+)\s*\|")
 
 def get_base_dir():
     return os.environ.get("AGENT_MEMORY_DIR", os.path.expanduser("~/.local/share/agent-projects/_memory"))
@@ -23,13 +41,16 @@ def parse_registry():
     if not os.path.exists(registry_path):
         return found
     with open(registry_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    for match in ID_REGEX.finditer(content):
-        prefix, num_str = match.groups()
-        num = int(num_str)
-        full_id = f"{prefix}-{num_str}"
-        if full_id not in found:
-            found[full_id] = (prefix, num)
+        for line in f:
+            match = LIST_ROW_REGEX.match(line)
+            if not match:
+                match = TABLE_ROW_REGEX.match(line)
+            if match:
+                prefix, num_str = match.groups()
+                num = int(num_str)
+                full_id = f"{prefix}-{num_str}"
+                if full_id not in found:
+                    found[full_id] = (prefix, num)
     return found
 
 def parse_ledger(f):
