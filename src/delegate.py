@@ -242,6 +242,9 @@ MODELS = {
     # and passing it separately is not merely redundant — for the Claude models
     # agy hard-errors with `--effort is not supported for model "..."`. One
     # uniform rule (full id, no --effort) is what actually works for all 11.
+    "gemini-3.7-flash-high": {"api": "gemini-3.7-flash-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.7-flash-medium": {"api": "gemini-3.7-flash-medium", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
+    "gemini-3.7-flash-low": {"api": "gemini-3.7-flash-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "gemini-3.6-flash-high": {"api": "gemini-3.6-flash-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "gemini-3.6-flash-medium": {"api": "gemini-3.6-flash-medium", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "gemini-3.6-flash-low": {"api": "gemini-3.6-flash-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
