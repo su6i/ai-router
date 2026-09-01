@@ -7,21 +7,29 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Fixed
+- **`rules_index.ingest()` no longer destroys the rules index when run from a
+  `git worktree`.** `.agent/constitution` is an untracked local symlink to the
+  central constitution clone, so it does not exist inside a worktree checkout.
+  `ingest()` silently indexed zero rule files there and then ran its garbage
+  collector, which deletes every indexed path absent from the current corpus —
+  so a single `r rules reindex` (or the `post-merge` hook, or the cron sweep)
+  from a worktree wiped the entire rules corpus from the live index and left a
+  docs-only index behind. The index kept answering every query, confidently,
+  from the wrong corpus: measured on the isolated test schema, 232 chunks across
+  ~20 rule files collapsed to 29 chunks across 3 doc files, and a retrieval for
+  the commit rule returned `docs/ARCHITECTURE.md` instead of `040-git.md`. `ingest()`
+  now refuses an empty rules corpus with an explicit error **before opening the
+  Postgres connection**, so no code path can write on the way to the guard;
+  `AI_ROUTER_RULES_ALLOW_NO_CONSTITUTION=1` opts a genuine constitution-less
+  checkout back in. Two live tests (`test_retrieval_sanity`,
+  `test_incremental_real_db`) depended on that corpus without declaring it and
+  were asserting against the docs-only index in a worktree; both now skip
+  explicitly via the shared `requires_rules_corpus` marker in `tests/conftest.py`.
+- Removed a duplicated `Added` entry for the SessionStart continuity hook — the
+  same change was written into the changelog twice in one commit.
+
 ### Added
-- **SessionStart now injects a retrieved continuity brief instead of a pointer.**
-  `hooks/session_start_brief.py` replaces the pointer-only hook that told every
-  new session to read `SESSION.md` in full (1800+ lines for this repo). The brief
-  combines open `TODO.md` items, RAG-retrieved continuity chunks, the vault inbox
-  listing and a fallback pointer, capped at 4500 chars. Retrieval is restricted to
-  the files that actually record state (`SESSION.md`, `architect-memory.md`,
-  `NEXT-SESSION.md`); auto git-ping chunks, zero-boost chunks and chunks more than
-  30 days older than the freshest hit are dropped — an eight-week-old digest still
-  says "Left Open" about shipped work, and surfacing it makes a session re-raise
-  closed items. The hook always exits 0 and degrades to the byte-identical legacy
-  pointer when Postgres is unreachable, the embedding model is not already cached
-  (it never triggers a download), or retrieval exceeds a 6-second budget. A new
-  `r doctor` check `sessionstart-rag` reports registration; `--fix` registers it
-  with an atomic write and removes the legacy hook so context is not injected twice.
 - **SessionStart continuity from RAG (`hooks/session_start_brief.py`).** Replaces the legacy pointer-only `session-resume-su6i.sh` hook, which told every new session to read a 1800+ line `SESSION.md` in full to find a handful of open items, with a retrieved brief assembled from four blocks (open `TODO.md` items for the repo, top RAG-retrieved chunks from `session_chunks`, the vault inbox listing, and a fallback pointer tail), hard-capped at 4500 chars. The retrieval quality filter drops chunks that are mostly auto git-ping noise (`branch ...`/`last:`/`session:` lines) and ranks chunks mentioning "Left Open"/"Next Work Order"/"Open Questions"/"Ready to test"/"blocked" first, with newest-date as the tiebreak. Fails safe to the byte-identical legacy pointer text — never a hard failure, never a hang — when Postgres is unreachable, the embedding model isn't already cached on disk (never triggers a download inside the hook), or retrieval exceeds a 6-second wall-clock budget enforced via a joined daemon thread. A new `r doctor` check (`sessionstart-rag`) verifies the hook is registered, with an idempotent atomic `--fix` that also removes the legacy hook entry so continuity is never injected twice.
 - **`WORKER-RULES.md` is now auto-injected into every worker prompt.** `~/.local/share/agent-projects/_memory/WORKER-RULES.md` is the accumulated, hard-won list of rules workers keep breaking (ruff run on non-Python files, overclaimed verifications, stub tests, committing straight to main) — until now it was pasted **by hand** per delegation by whichever architect remembered, so any delegation that forgot the paste shipped a worker with none of the accumulated guardrails. `build_worker_prompt()` (`src/delegate.py`) now loads it via the existing `AGENT_PROJECTS` vault resolver (the same one `src/dashboards.py` uses for `QUEUE.md`) and prepends it under a `## Standing worker rules (violating these fails review)` heading, right after the context-discipline preamble. A missing or empty file is a silent no-op — workers must never break because the vault isn't mounted. The injected text is capped at 16000 chars — sized so the real ~11 KB file fits whole; a 4000-char cap silently dropped 64% of it, including most of the recorded defect patterns, which is the opposite of the point — (truncated with a `… (truncated)` marker, warned once per process on stderr, never per call) and cached per process on `(path, mtime)`, so a file that hasn't changed is read at most once no matter how many delegations run in that process.
 - **`r doctor` — Installation self-healing.** Root cause: on 2026-08-31 `~/.claude.json`'s `mcpServers` was found empty — the ai-router MCP server registration was silently lost to a failed atomic write on a near-full disk (five 0-byte `.claude.json.tmp.*` files from the same timestamp), while `~/.claude/settings.json` still allow-listed `mcp__ai-router__*` tools and still ran hooks matching them. Every agent session silently lost the MCP door for two days with no error. Added a suite of checks (`src/doctor.py`) to verify the health and connectivity of the ai-router installation. It checks MCP registration (`~/.claude.json`), performs a live JSON-RPC handshake with the MCP server, verifies all Python hooks exist and compile, cross-checks `permissions.allow` against the served tools, checks background launchd plists, and verifies vault environment keys and Postgres reachability. Includes a `--fix` flag that idempotently repairs lost MCP registrations, via a real atomic write (temp file + `fsync` + `os.replace`), without touching other configuration. The repo root is resolved to the MAIN checkout via `git rev-parse --git-common-dir`, never to the current one: `--fix` writes that path into the global config, so a run from a throwaway worktree would otherwise repoint the registration at a directory deleted minutes later. The Postgres check sources its DSN from the rule-035 vault as well as the environment — reading `os.environ` alone made it report "not set" on a machine whose vault does define it.

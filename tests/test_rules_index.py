@@ -101,10 +101,34 @@ def test_stale_index_warning(monkeypatch, capsys):
 has_model = os.path.exists(os.path.expanduser("~/.cache/huggingface/hub"))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from conftest import has_pg  # noqa: E402  (sits below the sys.path setup it needs)
+# has_rules_corpus: without the constitution symlink there is no 040-git.md to
+# retrieve, so a red here would be a missing fixture, not a ranking regression.
+from conftest import has_pg, has_rules_corpus  # noqa: E402  (sits below the sys.path setup it needs)
 
 
-@pytest.mark.skipif(not (has_pg and has_model), reason="Missing Postgres or e5 model")
+def test_ingest_refuses_empty_rules_corpus(tmp_path, monkeypatch):
+    """An empty rules corpus must abort before the first write.
+
+    The GC at the end of `ingest()` deletes every indexed path that is not in
+    the current corpus, so proceeding here would wipe the live rules index and
+    leave a docs-only one that still answers queries. Refusing is the whole
+    contract; assert it fires before anything touches Postgres by pointing at a
+    DSN that cannot connect -- if the guard regresses, the test fails with a
+    connection error instead of passing.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(ri.ALLOW_NO_CONSTITUTION_ENV, raising=False)
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://0.0.0.0:1/nope")
+    monkeypatch.setattr(ri, "load_env", lambda: None)
+
+    with pytest.raises(RuntimeError, match="rules corpus is empty"):
+        ri.ingest()
+
+
+@pytest.mark.skipif(
+    not (has_pg and has_model and has_rules_corpus),
+    reason="Missing Postgres, e5 model, or the constitution rules corpus",
+)
 def test_retrieval_sanity(monkeypatch):
     class Args:
         pass

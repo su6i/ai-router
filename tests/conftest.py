@@ -39,6 +39,18 @@ def _pg_available() -> bool:
 has_pg = _pg_available()
 requires_pg = pytest.mark.skipif(not has_pg, reason="Missing Postgres")
 
+# `rules_index.ingest()` reads its corpus from the CWD, and `.agent/constitution`
+# is an untracked local symlink to the central clone -- so it is absent inside a
+# `git worktree` checkout. Tests that ingest or retrieve real rule text need it
+# present; without it they are asserting on a docs-only corpus, which is a
+# missing fixture, not a result. `ingest()` itself now refuses that case loudly.
+from pathlib import Path as _Path  # noqa: E402
+
+has_rules_corpus = any((_Path.cwd() / ".agent" / "constitution" / "rules").glob("*.md"))
+requires_rules_corpus = pytest.mark.skipif(
+    not has_rules_corpus, reason="Missing .agent/constitution/rules corpus (git worktree?)"
+)
+
 # Fail loudly at collection time if a DB-touching test would run against the
 # live search_path — no silent fallback to the real DB ever.
 os.environ["POSTGRES_DSN"] = "postgresql://0.0.0.0:0/invalid_db_no_silent_fallback"

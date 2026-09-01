@@ -10,7 +10,7 @@ import delegate as d
 import rules_index
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from conftest import has_pg
+from conftest import has_pg, requires_rules_corpus
 
 def test_pg_connection_error_stderr(monkeypatch, capsys):
     import psycopg
@@ -36,6 +36,7 @@ def test_pg_connection_error_stderr(monkeypatch, capsys):
     assert "Traceback" not in captured.err
 
 @pytest.mark.skipif(not has_pg, reason="Missing Postgres")
+@requires_rules_corpus
 def test_incremental_real_db(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(d, "DATA_DIR", tmp_path)
     

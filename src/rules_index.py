@@ -39,6 +39,10 @@ _MODEL_UNLOAD_THREAD_STARTED = False
 
 RAG_MODEL_IDLE_TTL = int(os.environ.get("RAG_MODEL_IDLE_TTL", "900"))
 
+# Escape hatch for a checkout that legitimately has no constitution symlink
+# (a clean bootstrap clone). Opt in explicitly; never the default.
+ALLOW_NO_CONSTITUTION_ENV = "AI_ROUTER_RULES_ALLOW_NO_CONSTITUTION"
+
 def _idle_unloader() -> None:
     global _MODEL
     if RAG_MODEL_IDLE_TTL <= 0:
@@ -289,27 +293,44 @@ def ingest(force: bool = False) -> dict:
         
     stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0}
 
+    # files: .agent/constitution/rules/*.md, docs/**/*.md, CLAUDE.md
+    repo_path = Path.cwd()
+
+    # Follow symlinks with resolve() or explicitly checking .agent/constitution
+    constitution_dir = repo_path / ".agent" / "constitution"
+    rule_files = []
+    rules_dir = constitution_dir / "rules"
+    if rules_dir.exists():
+        for md in rules_dir.glob("*.md"):
+            # DIGEST.md is generated FROM the other rule files. Indexing it
+            # duplicates the whole corpus (60 of 292 chunks here) and its
+            # copies crowd the canonical rule out of top-k -- the same
+            # reason the docs/fa mirrors are skipped below.
+            if md.name == "DIGEST.md":
+                continue
+            rule_files.append(md)
+
+    # `.agent/constitution` is an untracked local symlink to the central clone,
+    # so it does NOT exist inside a `git worktree` checkout. Ingesting anyway is
+    # not a degraded index, it is a destructive one: the GC at the end of this
+    # function deletes every indexed path missing from the current corpus, so a
+    # single `r rules reindex` (or post-merge hook) run from a worktree wipes the
+    # whole rules corpus from the live index and leaves a docs-only index that
+    # still answers queries -- confidently, from the wrong corpus. Refuse before
+    # opening the connection, so no code path can write on the way to the guard.
+    if not rule_files and not os.environ.get(ALLOW_NO_CONSTITUTION_ENV):
+        raise RuntimeError(
+            f"rules corpus is empty: no *.md under {rules_dir} (cwd={repo_path}). "
+            f"Refusing to reindex -- this would delete the indexed rules. Run from "
+            f"the main checkout, or set {ALLOW_NO_CONSTITUTION_ENV}=1 to index a "
+            f"corpus with no constitution."
+        )
+
     with psycopg.connect(dsn) as conn:
         init_db(conn)
-        
-        # files: .agent/constitution/rules/*.md, docs/**/*.md, CLAUDE.md
-        repo_path = Path.cwd()
-        target_files = []
-        
-        # Follow symlinks with resolve() or explicitly checking .agent/constitution
-        constitution_dir = repo_path / ".agent" / "constitution"
-        if constitution_dir.exists():
-            rules_dir = constitution_dir / "rules"
-            if rules_dir.exists():
-                for md in rules_dir.glob("*.md"):
-                    # DIGEST.md is generated FROM the other rule files. Indexing it
-                    # duplicates the whole corpus (60 of 292 chunks here) and its
-                    # copies crowd the canonical rule out of top-k -- the same
-                    # reason the docs/fa mirrors are skipped below.
-                    if md.name == "DIGEST.md":
-                        continue
-                    target_files.append(md)
-        
+
+        target_files = list(rule_files)
+
         docs_dir = repo_path / "docs"
         if docs_dir.exists():
             for md in docs_dir.rglob("*.md"):
@@ -422,6 +443,8 @@ def ingest(force: bool = False) -> dict:
             stats["total_chunks"] = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'rules'")
             stats["total_docs"] = cur.fetchone()[0]
+
+        stats["rule_files"] = len(rule_files)
 
         conn.commit()
     return stats
