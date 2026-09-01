@@ -43,6 +43,25 @@ def _save_state(state: dict) -> None:
     f.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _audit_telegram(api: str, message_ids: list[int], caller: str, kind: str = "", extra: dict | None = None) -> None:
+    try:
+        d.AUDIT.parent.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "mode": "telegram",
+            "api": api,
+            "message_ids": list(message_ids),
+            "caller": caller,
+            "kind": kind
+        }
+        if extra is not None:
+            rec.update(extra)
+        with d.AUDIT.open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _escape_html(s: str) -> str:
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -273,6 +292,7 @@ def push_dashboard(kind: str) -> str:
     entry = state.get(kind)
     
     if entry and entry.get("hash") == h:
+        _audit_telegram("editMessageText", [entry["message_id"]], "push_dashboard", kind, {"outcome": "unchanged"})
         return f"unchanged (message_id={entry['message_id']})"
         
     token = os.environ.get("AI_ROUTER_BOT_TOKEN")
@@ -306,6 +326,8 @@ def push_dashboard(kind: str) -> str:
         if not data.get("ok") or msg_id is None:
             _raise_api_err("Telegram refused sendMessage", data.get("description", "no description"))
             
+        _audit_telegram("sendMessage", [msg_id], "push_dashboard", kind, {"outcome": "created"})
+        
         pin_url = f"https://api.telegram.org/bot{token}/pinChatMessage"
         pin_payload = {
             "chat_id": chat_id,
@@ -318,10 +340,13 @@ def push_dashboard(kind: str) -> str:
                 pin_data = pin_resp.json()
                 if not pin_data.get("ok"):
                     d.logger.warning(f"Telegram pinChatMessage failed: {d._redact(pin_data.get('description', ''))}")
+                _audit_telegram("pinChatMessage", [msg_id], "push_dashboard", kind, {"outcome": "created" if pin_data.get("ok") else "failed"})
             except Exception:  # noqa: BLE001
                 d.logger.warning(f"Telegram pinChatMessage failed with HTTP {pin_resp.status_code}")
+                _audit_telegram("pinChatMessage", [msg_id], "push_dashboard", kind, {"outcome": "failed"})
         except Exception as e:  # noqa: BLE001
             d.logger.warning(f"Telegram pinChatMessage network error: {d._redact(str(e))}")
+            _audit_telegram("pinChatMessage", [msg_id], "push_dashboard", kind, {"outcome": "failed"})
             
         state[kind] = {"message_id": msg_id, "hash": h}
         _save_state(state)
@@ -348,17 +373,20 @@ def push_dashboard(kind: str) -> str:
         if data.get("ok"):
             state[kind]["hash"] = h
             _save_state(state)
+            _audit_telegram("editMessageText", [entry["message_id"]], "push_dashboard", kind, {"outcome": "edited"})
             return f"edited (message_id={entry['message_id']})"
             
         desc = data.get("description", "").lower()
         if "message is not modified" in desc:
             state[kind]["hash"] = h
             _save_state(state)
+            _audit_telegram("editMessageText", [entry["message_id"]], "push_dashboard", kind, {"outcome": "unchanged"})
             return f"unchanged (message_id={entry['message_id']})"
             
         if "message to edit not found" in desc or "message can't be edited" in desc:
             del state[kind]
             _save_state(state)
+            _audit_telegram("editMessageText", [entry["message_id"]], "push_dashboard", kind, {"outcome": "failed"})
             result = push_dashboard(kind)
             return result.replace("created", "recreated", 1)
             
@@ -394,6 +422,7 @@ def send_note_ping(text: str) -> str:
     if not data.get("ok") or msg_id is None:
         _raise_api_err("Telegram refused sendMessage", data.get("description", "no description"))
         
+    _audit_telegram("sendMessage", [msg_id], "send_note_ping", "", {"outcome": "created"})
     return f"message_id={msg_id}"
 
 
@@ -458,6 +487,7 @@ def send_note_ping_deduped(text: str, dedupe_key: str, window_seconds: int = 900
                 entry["ts"] = now.isoformat()
                 state["note_pings"] = pings
                 _save_state(state)
+                _audit_telegram("editMessageText", [msg_id], "send_note_ping_deduped", "", {"outcome": "coalesced"})
                 return f"coalesced (message_id={msg_id}, count={count})"
 
             desc = data.get("description", "").lower()
