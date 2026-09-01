@@ -7,6 +7,14 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Changed
+- **`tests/test_model_catalog.py` now asserts a real set difference** between
+  what the live `agy models` channel serves and what `MODELS` registers,
+  instead of a hardcoded model-generation string that silently stayed green
+  while a whole new model family went missing from the registry. The
+  registry-has-more-than-CLI direction is a warning, not a failure — deleting
+  a model from the registry stays an architect decision.
+
 ### Fixed
 - **`test_retrieval_sanity` now asserts its own DB isolation instead of relying silently on the session fixture.** The test previously depended on an autouse fixture setting a test schema on `POSTGRES_DSN` and would have wiped the live rules index if that fixture were ever disabled or reordered. It now explicitly asserts that the schema parameter is present in the environment before triggering the reindex.
 - **Test fixtures no longer carry a plausible-looking fake model name.**
