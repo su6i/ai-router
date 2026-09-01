@@ -231,6 +231,20 @@ the corpus. No `--rebuild` to remember, no half-old index.
 The output is hard-capped at ~8000 characters to protect context limits.
 If the index was built on a different commit than the current one, `r rules` will print a single warning line before the results.
 
+**Reindex from the main checkout, not from a `git worktree`.** The corpus is read
+from the current working directory, and `.agent/constitution` is an untracked local
+symlink to the central constitution clone — it does not exist inside a worktree.
+Because the reindex ends with a garbage collector that drops every indexed path
+missing from the current corpus, a run from a worktree would otherwise delete the
+whole rules corpus and leave a docs-only index that still answers queries. So
+`r rules --reindex` now **aborts** with an explicit error when it finds no rule
+files at all. If a checkout genuinely has no constitution and you want to index
+only its docs, opt in on purpose:
+
+```bash
+AI_ROUTER_RULES_ALLOW_NO_CONSTITUTION=1 r rules --reindex
+```
+
 ### Vault Export
 
 `src/vault_export.py` generates an Obsidian vault view of all unique IDs (`T-###`, `D-###`, `N-###`, `B-###`, `W-###`) found in `_memory/REGISTRY-IDS.md`.
