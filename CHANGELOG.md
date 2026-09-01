@@ -8,6 +8,14 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ## Unreleased
 
 ### Fixed
+- **Test fixtures no longer carry a plausible-looking fake model name.**
+  `tests/test_misc.py` used `"deepseek-chat"` as its stub provider response.
+  That string is not a model this router serves (the registry has
+  `deepseek-v4-flash` / `deepseek-v4-pro`) and is not a pinned version on
+  DeepSeek's side either — it is an unversioned alias. An agent grepping the
+  repo for a model name found it and quoted it to the owner as real. Renamed to
+  `test-model-fake`, which cannot be mistaken for one. (Reported from the arix
+  side, 2026-08-27.)
 - **`rules_index.ingest()` no longer destroys the rules index when run from a
   `git worktree`.** `.agent/constitution` is an untracked local symlink to the
   central constitution clone, so it does not exist inside a worktree checkout.

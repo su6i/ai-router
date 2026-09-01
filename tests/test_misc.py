@@ -16,11 +16,18 @@ def mock_env(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test_ds")
     monkeypatch.setenv("MINIMAX_API_KEY", "test_mm")
 
+# "test-model-fake", not a plausible model name. The fixtures here used to say
+# "deepseek-chat", which is not a model this router serves (the registry has
+# deepseek-v4-flash / deepseek-v4-pro) and not a model DeepSeek documents as a
+# pinned version either -- it is an unversioned alias that silently resolves to
+# whatever generation is current. An agent grepping the repo for a model name
+# found it and quoted it to the owner as real. A fixture name must not be
+# mistakable for a real one.
 def test_call_openai_success(monkeypatch):
     def mock_post(*args, **kwargs):
         return httpx.Response(200, json={
             "id": "chatcmpl-123",
-            "model": "deepseek-chat",
+            "model": "test-model-fake",
             "choices": [{"message": {"content": "hello world"}}],
             "usage": {
                 "prompt_tokens": 10,
@@ -30,10 +37,10 @@ def test_call_openai_success(monkeypatch):
         }, request=httpx.Request("POST", "http://test"))
     
     monkeypatch.setattr("httpx.post", mock_post)
-    spec = {"api": "deepseek-chat", "url": "http://test"}
+    spec = {"api": "test-model-fake", "url": "http://test"}
     ans, raw_model, id_, p_tok, c_tok, cache_tok, cache_miss = call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
     assert ans == "hello world"
-    assert raw_model == "deepseek-chat"
+    assert raw_model == "test-model-fake"
     assert id_ == "chatcmpl-123"
     assert (p_tok, c_tok, cache_tok, cache_miss) == (10, 20, 5, None)
 
@@ -42,7 +49,7 @@ def test_call_openai_error_path(monkeypatch):
         return httpx.Response(400, request=httpx.Request("POST", "http://test"))
     
     monkeypatch.setattr("httpx.post", mock_post)
-    spec = {"api": "deepseek-chat", "url": "http://test"}
+    spec = {"api": "test-model-fake", "url": "http://test"}
     with pytest.raises(ProviderError) as exc:
         call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
     assert exc.value.status == 400
@@ -178,7 +185,7 @@ def test_call_openai_deepseek_hit_miss(monkeypatch):
     def mock_post(*args, **kwargs):
         return httpx.Response(200, json={
             "id": "chatcmpl-456",
-            "model": "deepseek-chat",
+            "model": "test-model-fake",
             "choices": [{"message": {"content": "hi ds"}}],
             "usage": {
                 "prompt_tokens": 100,
@@ -189,7 +196,7 @@ def test_call_openai_deepseek_hit_miss(monkeypatch):
         }, request=httpx.Request("POST", "http://test"))
     
     monkeypatch.setattr("httpx.post", mock_post)
-    spec = {"api": "deepseek-chat", "url": "http://test"}
+    spec = {"api": "test-model-fake", "url": "http://test"}
     ans, raw_model, id_, p_tok, c_tok, cache_tok, cache_miss = call_openai(spec, "Bearer xyz", [{"role": "user", "content": "hello"}], "")
     assert ans == "hi ds"
     assert (p_tok, c_tok, cache_tok, cache_miss) == (100, 20, 60, 40)
