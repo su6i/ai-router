@@ -7,6 +7,14 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 
 ## Unreleased
 
+### Changed
+- **`tests/test_model_catalog.py` now asserts a real set difference** between
+  what the live `agy models` channel serves and what `MODELS` registers,
+  instead of a hardcoded model-generation string that silently stayed green
+  while a whole new model family went missing from the registry. The
+  registry-has-more-than-CLI direction is a warning, not a failure — deleting
+  a model from the registry stays an architect decision.
+
 ### Fixed
 - **Test fixtures no longer carry a plausible-looking fake model name.**
   `tests/test_misc.py` used `"deepseek-chat"` as its stub provider response.
