@@ -116,6 +116,14 @@ def test_first_push(fake_agent_projects, monkeypatch):
     assert state["inbox"]["message_id"] == 111
     assert "hash" in state["inbox"]
 
+    audit_lines = d.AUDIT.read_text().strip().splitlines()
+    assert len(audit_lines) == 2
+    create_row = json.loads(audit_lines[0])
+    assert create_row["outcome"] == "created"
+    assert create_row["message_ids"] == [111]
+    assert create_row["caller"] == "push_dashboard"
+    assert create_row["mode"] == "telegram"
+
 def test_second_push_identical(fake_agent_projects, monkeypatch):
     monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", "fake_token")
     monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "123")
@@ -173,6 +181,11 @@ def test_changed_content_editMessageText(fake_agent_projects, monkeypatch):
     assert "editMessageText" in mock_post.call_args[0][0]
     assert mock_post.call_args[1]["json"]["message_id"] == 111
 
+    audit_lines = d.AUDIT.read_text().strip().splitlines()
+    edit_row = json.loads(audit_lines[-1])
+    assert edit_row["outcome"] == "edited"
+    assert edit_row["message_ids"] == [111]
+
 def test_message_not_found_fallback(fake_agent_projects, monkeypatch):
     monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", "fake_token")
     monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "123")
@@ -200,6 +213,14 @@ def test_message_not_found_fallback(fake_agent_projects, monkeypatch):
     
     final_state = json.loads((d.DATA_DIR / "telegram_dashboards.json").read_text())
     assert final_state["inbox"]["message_id"] == 112
+
+    audit_lines = d.AUDIT.read_text().strip().splitlines()
+    failed_rows = [json.loads(line) for line in audit_lines if json.loads(line).get("outcome") == "failed"]
+    created_rows = [json.loads(line) for line in audit_lines if json.loads(line).get("outcome") == "created"]
+    assert len(failed_rows) == 1
+    assert len(created_rows) == 2
+    assert created_rows[0]["message_ids"] == [112]
+    assert created_rows[1]["message_ids"] == [112]
 
 def test_ok_false_raises(fake_agent_projects, monkeypatch):
     monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", "fake_token")
@@ -373,3 +394,45 @@ def test_send_note_ping_deduped_prunes_old_entries(fake_agent_projects, monkeypa
     final_state = json.loads((d.DATA_DIR / "telegram_dashboards.json").read_text())
     assert "old_key" not in final_state["note_pings"]
     assert "new_key" in final_state["note_pings"]
+
+def test_audit_fail_open(fake_agent_projects, monkeypatch):
+    monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", "fake_token")
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "123")
+    
+    mock_post = MagicMock()
+    def side_effect(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "sendMessage" in url:
+            resp.json.return_value = {"ok": True, "result": {"message_id": 111}}
+        elif "pinChatMessage" in url:
+            resp.json.return_value = {"ok": True, "result": {}}
+        return resp
+    mock_post.side_effect = side_effect
+    monkeypatch.setattr("httpx.post", mock_post)
+    
+    monkeypatch.setattr(d, "AUDIT", Path("/nonexistent-root-xyz/audit.log"))
+    
+    res = dashboards.push_dashboard("inbox")
+    assert "created (message_id=111)" in res
+
+def test_audit_secret_redaction(fake_agent_projects, monkeypatch):
+    secret = "SUPER-SECRET-TOKEN-XYZ"
+    monkeypatch.setenv("AI_ROUTER_BOT_TOKEN", secret)
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "123")
+    
+    mock_post = MagicMock()
+    def side_effect(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "sendMessage" in url:
+            resp.json.return_value = {"ok": True, "result": {"message_id": 111}}
+        elif "pinChatMessage" in url:
+            resp.json.return_value = {"ok": True, "result": {}}
+        return resp
+    mock_post.side_effect = side_effect
+    monkeypatch.setattr("httpx.post", mock_post)
+    
+    dashboards.push_dashboard("inbox")
+    raw_audit = d.AUDIT.read_text()
+    assert secret not in raw_audit

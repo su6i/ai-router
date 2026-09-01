@@ -484,6 +484,8 @@ Prints `audit.log` (one JSON line per call: model asked/echoed, session,
 project, commit, cost, cached; worker-mode calls add files written/rejected,
 verify command/status, attempts).
 
+Every Telegram API send (dashboard push/edit/pin, note pings, coalesced pings, `send_to_owner` document sends) now also writes a `mode: "telegram"` row to `audit.log`. Each row records `ts`, `mode`, `api`, `message_ids`, `caller`, `kind`, and `outcome`. These writes are fail-open (they never break a send if the write fails) and never contain the bot token or chat id.
+
 ### Channel Registry
 
 `delegate.py` routes tasks to execution channels (e.g. `agy`, `codewhale`, `codex`, `copilot`). Channel availability is managed by a local registry.

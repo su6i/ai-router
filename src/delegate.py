@@ -2324,6 +2324,22 @@ def send_to_owner(files: list[str], title: str) -> str:
                 raise RuntimeError(f"Telegram refused {p.name}: {desc}")
             msg_ids.append(msg_id)
 
+    try:
+        rec = {
+            "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "mode": "telegram",
+            "api": "sendDocument",
+            "message_ids": list(msg_ids),
+            "caller": "send_to_owner",
+            "kind": "",
+            "outcome": "created",
+        }
+        AUDIT.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT.open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass  # fail-open: audit never breaks a send
+
     return "message_id=" + ",".join(str(m) for m in msg_ids)
 
 
