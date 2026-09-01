@@ -133,6 +133,12 @@ def test_retrieval_sanity(monkeypatch):
     class Args:
         pass
     a = Args()
+    
+    assert "ai_router_test" in os.environ.get("POSTGRES_DSN", ""), (
+        "Isolation failure: missing 'ai_router_test' schema in POSTGRES_DSN. "
+        "Proceeding would reindex the LIVE rules index."
+    )
+    
     ri.cmd_reindex(a)
     
     # k=5, membership assert: e5-small cross-lingual ranking (Persian query →
