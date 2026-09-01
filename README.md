@@ -565,7 +565,7 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 
 | Door | Best For | Default Model | Notes |
 | --- | --- | --- | --- |
-| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `agy` (Gemini 3.1 Pro, grounded search, **$0**) | Paid `grok` must now be named explicitly (~$0.02–$0.05/call). |
+| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `gemini-3.7-flash-high` (grounded search, **$0**) | Triage/lookup is a cheap high-throughput call, flash is the right generation. Code generation stays on 3.1-pro-high, the channel the worker ladder was measured on; both are $0 on the Google AI Pro subscription (quality/latency split, not cost). Paid `grok` must now be named explicitly (~$0.02–$0.05/call). |
 | **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `agy` (free, Google AI Pro sub) | Pass known file paths. Generated code never crosses the wire. |
 | **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
 | **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
@@ -580,8 +580,8 @@ claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/
 Three tools only, all capped — no uncapped chat tool, ever:
 
 - **`delegate_research`** — fact lookup / live-data checks / doc
-  verification. **The default is `agy` (Gemini 3.1 Pro on the Google AI Pro
-  subscription): $0, using agy's own grounded web search**. Note the
+  verification. **The default is `gemini-3.7-flash-high` on the Google AI Pro
+  subscription: $0, using its own grounded web search**. (Code writing tools stay on `gemini-3.1-pro-high`; triage/lookup is a cheap high-throughput call where flash is the right generation, while the worker ladder was measured on 3.1-pro — this is a quality/latency split, not a cost split since both are $0). Note the
   implementation constraint: the agy branch
   routes through `agent_delegate()`, *not* `delegate()`, because the latter
   appends `AGY_NO_TOOLS_ADDENDUM` and would leave agy answering live-fact

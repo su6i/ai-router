@@ -422,3 +422,48 @@ def test_delegate_research_agy_unwrap_log_and_fallback(tmp_path, monkeypatch):
     text_fallback = res_fallback["content"][0]["text"]
     assert "status        : COMPLETED" in text_fallback
     assert "cost: $0.000000" in text_fallback
+
+
+def test_delegate_research_default_model(tmp_path, monkeypatch):
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import delegate as d
+    import server
+
+    models_called = []
+    def fake_agent_delegate(task, runner="agy", model="agy", workdir=None, via=None, **kwargs):
+        models_called.append(model)
+        return "status        : COMPLETED\noutput saved  : /dev/null\n"
+
+    monkeypatch.setattr(d, "agent_delegate", fake_agent_delegate)
+
+    server.handle_delegate_research({"question": "default test"})
+    assert models_called == ["gemini-3.7-flash-high"]
+
+
+def test_delegate_research_explicit_model_agy(tmp_path, monkeypatch):
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import delegate as d
+    import server
+
+    models_called = []
+    def fake_agent_delegate(task, runner="agy", model="agy", workdir=None, via=None, **kwargs):
+        models_called.append(model)
+        return "status        : COMPLETED\noutput saved  : /dev/null\n"
+
+    monkeypatch.setattr(d, "agent_delegate", fake_agent_delegate)
+
+    server.handle_delegate_research({"question": "agy override", "model": "agy"})
+    assert models_called == ["gemini-3.1-pro-high"]
+
+
+def test_agy_alias_is_not_flash():
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    import delegate as d
+    assert d.ALIASES["agy"] == "gemini-3.1-pro-high"

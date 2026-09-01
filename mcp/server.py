@@ -40,7 +40,7 @@ TOOLS = [
     {
         "name": "delegate_research",
         "description": ("Ask a fact-lookup or live-data question with real web search. "
-                         "DEFAULT is agy (Gemini 3.1 Pro on the Google AI Pro "
+                         "DEFAULT is gemini-3.7-flash-high (on the Google AI Pro "
                          "subscription) using its own grounded web-search tool: $0. "
                          "grok stays reachable but is PAID and must "
                          "be named explicitly — it routes via xAI's /v1/responses "
@@ -53,9 +53,9 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "question": {"type": "string"},
-                "model": {"type": "string", "default": "agy",
-                          "enum": ["agy", "grok", "grok-4.5"],
-                          "description": "router alias; agy (default, $0, subscription "
+                "model": {"type": "string", "default": "gemini-3.7-flash-high",
+                          "enum": ["gemini-3.7-flash-high", "agy", "grok", "grok-4.5"],
+                          "description": "router alias; gemini-3.7-flash-high (default, $0, subscription "
                                          "quota) or the PAID grok (4.3) / grok-4.5"},
                 "max_output_tokens": {"type": "integer", "default": 500, "maximum": 2000,
                                       "description": "grok only; agy is not token-capped"},
@@ -282,7 +282,7 @@ def handle_delegate_research(args: dict) -> dict:
     if not isinstance(max_tool_calls, int) or isinstance(max_tool_calls, bool) \
             or not (0 < max_tool_calls <= 20):
         raise ValueError("'max_tool_calls' must be an integer in (0, 20]")
-    model = d.resolve_model(args.get("model", "agy"))
+    model = d.resolve_model(args.get("model", "gemini-3.7-flash-high"))
 
     if d.MODELS[model]["provider"] == "agy_cli":
         # agy searches the web only when it is allowed to use its own tools, so
@@ -546,7 +546,7 @@ def handle_request(msg: dict):
         m = args.get("model")
         if not m:
             if tool == "delegate_research":
-                m = "agy"
+                m = "gemini-3.7-flash-high"
             elif tool == "delegate_worker":
                 m = "agy"
             elif tool == "delegate_agent":
