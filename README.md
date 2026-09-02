@@ -174,7 +174,23 @@ PYTHONPATH=src python3 -m id_alloc check
 
 # Seed the ledger from existing IDs in REGISTRY-IDS.md
 PYTHONPATH=src python3 -m id_alloc seed
+
+# Void a duplicated/retired ID (resolves the duplicate finding in check)
+# A voided id still counts toward max() (never reissued); voiding an id
+# that was never allocated is refused (exit 3) so a typo can't poison the
+# ledger with a number nobody actually took.
+PYTHONPATH=src python3 -m id_alloc void D-173 --reason "duplicate of T-999"
 ```
+
+`seed` covers every prefix in `ALLOWED_PREFIXES`, not just one — it is safe to
+run repeatedly (idempotent: a second run adds zero rows) and safe to run on a
+ledger that already contains some of the ids it would seed. Two hooks wrap
+these commands so the ledger stays current without a manual step: `hooks/id_alloc_seed_on_end.py`
+runs `seed` on `SessionEnd`, and `hooks/id_alloc_check_on_start.py` runs `check`
+on `SessionStart` and surfaces its output as additional context when it exits
+non-zero. Both wrap their subprocess in a short timeout and always exit `0`
+themselves — the non-zero exit is a property of the wrapped `check` command,
+never of the hook or the session.
 
 ### One-shot chat
 

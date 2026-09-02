@@ -102,3 +102,155 @@ def test_registry_only_ids_are_not_also_reported_as_gaps(isolated_paths, capsys)
     assert "gap in sequence: D-003" in out
     for taken in ("gap in sequence: D-001", "gap in sequence: D-002", "gap in sequence: D-004"):
         assert taken not in out
+
+def test_seed_idempotent(isolated_paths):
+    # Idempotency guarantee: seed run twice adds no new lines on second run
+    registry_path = isolated_paths / "REGISTRY-IDS.md"
+    registry_path.write_text("- T-162 — first\n", encoding="utf-8")
+    
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+    
+    subprocess.run([sys.executable, "-m", "id_alloc", "seed"], env=env, check=True)
+    
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    bytes_first = ledger_path.read_bytes()
+    
+    subprocess.run([sys.executable, "-m", "id_alloc", "seed"], env=env, check=True)
+    bytes_second = ledger_path.read_bytes()
+    
+    assert bytes_first == bytes_second
+
+def test_void_id_is_not_reissued(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+    
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_path.write_text("D-173\t2026-09-03T00:00:00Z\ttest\tfirst issue\n", encoding="utf-8")
+    
+    subprocess.run([sys.executable, "-m", "id_alloc", "void", "D-173", "--reason", "duplicate test"], env=env, check=True)
+    
+    res = subprocess.run([sys.executable, "-m", "id_alloc", "next", "D", "--intent", "next test"], env=env, capture_output=True, text=True, check=True)
+    
+    assert res.stdout.strip() == "D-174"
+
+def test_void_unknown_id_is_refused(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_path.write_text("D-173\t2026-09-03T00:00:00Z\ttest\tfirst issue\n", encoding="utf-8")
+
+    res = subprocess.run([sys.executable, "-m", "id_alloc", "void", "D-999", "--reason", "typo"],
+                         env=env, capture_output=True, text=True)
+    assert res.returncode != 0
+    # the ledger must be untouched: a refused void may not move `max`
+    assert ledger_path.read_text(encoding="utf-8").count("D-999") == 0
+    nxt = subprocess.run([sys.executable, "-m", "id_alloc", "next", "D", "--intent", "after refused void"],
+                         env=env, capture_output=True, text=True, check=True)
+    assert nxt.stdout.strip() == "D-174"
+
+def test_check_clean_ledger(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+    
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_path.write_text("D-001\t2026-09-03T00:00:00Z\ttest\ttest intent\n", encoding="utf-8")
+    
+    res = subprocess.run([sys.executable, "-m", "id_alloc", "check"], env=env, capture_output=True, text=True)
+    assert res.returncode == 0
+    assert "duplicated" in res.stdout
+    assert "0 duplicated" in res.stdout
+
+def test_check_genuine_duplicate(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+    
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_path.write_text(
+        "D-001\t2026-09-03T00:00:00Z\ttest\ttest intent 1\n"
+        "D-001\t2026-09-03T00:01:00Z\ttest\ttest intent 2\n",
+        encoding="utf-8"
+    )
+    
+    res = subprocess.run([sys.executable, "-m", "id_alloc", "check"], env=env, capture_output=True, text=True)
+    assert res.returncode == 1
+    assert "duplicate in ledger: D-001" in res.stdout
+
+def test_void_resolves_duplicate(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+    
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_path.write_text(
+        "D-173\t2026-09-03T00:00:00Z\tseed\tseeded from registry\n"
+        "D-173\t2026-09-03T00:01:00Z\tuser\tmanual assignment\n",
+        encoding="utf-8"
+    )
+    
+    res_before = subprocess.run([sys.executable, "-m", "id_alloc", "check"], env=env, capture_output=True, text=True)
+    assert res_before.returncode == 1
+    assert "duplicate in ledger: D-173" in res_before.stdout
+    
+    # Void the duplicate
+    subprocess.run([sys.executable, "-m", "id_alloc", "void", "D-173", "--reason", "duplicate of T-999"], env=env, check=True)
+    
+    res_after = subprocess.run([sys.executable, "-m", "id_alloc", "check"], env=env, capture_output=True, text=True)
+    assert res_after.returncode == 0
+    assert "duplicate in ledger: D-173" not in res_after.stdout
+    
+    # Still counted for max
+    res_next = subprocess.run([sys.executable, "-m", "id_alloc", "next", "D", "--intent", "next test"], env=env, capture_output=True, text=True, check=True)
+    assert res_next.stdout.strip() == "D-174"
+
+def test_d173_d174_hand_written_duplicate_not_reissued(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+    
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_path.write_text(
+        "D-173\t2026-08-20T14:32:11Z\tseed\tseeded from registry\n"
+        "D-174\t2026-08-20T14:32:11Z\tseed\tseeded from registry\n"
+        "D-173\t2026-08-21T03:10:00Z\tuser\tmanual assignment\n"
+        "D-174\t2026-08-22T01:15:00Z\tuser\tmanual assignment\n",
+        encoding="utf-8"
+    )
+    
+    res_check = subprocess.run([sys.executable, "-m", "id_alloc", "check"], env=env, capture_output=True, text=True)
+    assert res_check.returncode == 1
+    assert "duplicate in ledger: D-173" in res_check.stdout
+    assert "duplicate in ledger: D-174" in res_check.stdout
+    
+    res_next = subprocess.run([sys.executable, "-m", "id_alloc", "next", "D", "--intent", "next test"], env=env, capture_output=True, text=True, check=True)
+    assert res_next.stdout.strip() == "D-175"
+
+def test_seed_covers_all_allowed_prefixes(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+    
+    registry_path = isolated_paths / "REGISTRY-IDS.md"
+    registry_lines = [f"- {prefix}-501 — test\n" for prefix in id_alloc.ALLOWED_PREFIXES]
+    registry_path.write_text("".join(registry_lines), encoding="utf-8")
+    
+    subprocess.run([sys.executable, "-m", "id_alloc", "seed"], env=env, check=True)
+    
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_content = ledger_path.read_text(encoding="utf-8")
+    for prefix in id_alloc.ALLOWED_PREFIXES:
+        assert f"{prefix}-501" in ledger_content
+        
+    bytes_first = ledger_path.read_bytes()
+    
+    subprocess.run([sys.executable, "-m", "id_alloc", "seed"], env=env, check=True)
+    bytes_second = ledger_path.read_bytes()
+    
+    assert bytes_first == bytes_second
+

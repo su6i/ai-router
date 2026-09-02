@@ -57,7 +57,7 @@ def parse_ledger(f):
     f.seek(0)
     ledger_ids = set()
     max_nums = {p: 0 for p in ALLOWED_PREFIXES}
-    duplicates = set()
+    occurrences = {}
     lines = f.read().splitlines()
     for line in lines:
         if not line.strip():
@@ -66,15 +66,29 @@ def parse_ledger(f):
         if not parts:
             continue
         full_id = parts[0]
+        intent = parts[3] if len(parts) > 3 else ""
         match = ID_REGEX.fullmatch(full_id)
         if match:
             prefix, num_str = match.groups()
             num = int(num_str)
-            if full_id in ledger_ids:
-                duplicates.add(full_id)
+            if full_id not in occurrences:
+                occurrences[full_id] = []
+            occurrences[full_id].append(intent)
             ledger_ids.add(full_id)
             if num > max_nums[prefix]:
                 max_nums[prefix] = num
+                
+    duplicates = set()
+    for full_id, intents in occurrences.items():
+        if len(intents) > 1:
+            if intents[-1].startswith("VOID"):
+                num_voids = sum(1 for i in intents if i.startswith("VOID"))
+                num_actives = len(intents) - num_voids
+                if num_actives - num_voids > 1:
+                    duplicates.add(full_id)
+            else:
+                duplicates.add(full_id)
+                
     return ledger_ids, max_nums, duplicates
 
 def cmd_next(args):
@@ -195,6 +209,41 @@ def cmd_seed(args):
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+def cmd_void(args):
+    full_id = args.id
+    reason = args.reason
+    who = args.who or "unknown"
+    
+    match = ID_REGEX.fullmatch(full_id)
+    if not match:
+        sys.exit(2)
+        
+    os.makedirs(get_base_dir(), exist_ok=True)
+    ledger_path = get_ledger_path()
+    
+    with open(ledger_path, "a+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            # An id that was never allocated cannot be voided: appending the row
+            # anyway would put a number in the ledger that no allocation ever
+            # produced and push `max` past it, which is the same "the ledger
+            # gained a number nobody issued" failure N-035 documents. A typo in
+            # the id must fail loudly instead.
+            ledger_ids, _, _ = parse_ledger(f)
+            if full_id not in ledger_ids:
+                print(f"cannot void {full_id}: not in ledger", file=sys.stderr)
+                sys.exit(3)
+
+            now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            row = f"{full_id}\t{now_str}\t{who}\tVOID \u2014 {reason}\n"
+            
+            f.seek(0, os.SEEK_END)
+            f.write(row)
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
 def main():
     parser = argparse.ArgumentParser(prog="id_alloc")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -207,6 +256,11 @@ def main():
     subparsers.add_parser("check")
     
     subparsers.add_parser("seed")
+
+    parser_void = subparsers.add_parser("void")
+    parser_void.add_argument("id")
+    parser_void.add_argument("--reason", required=True)
+    parser_void.add_argument("--who", default="unknown")
     
     args = parser.parse_args()
     
@@ -216,6 +270,8 @@ def main():
         cmd_check(args)
     elif args.command == "seed":
         cmd_seed(args)
+    elif args.command == "void":
+        cmd_void(args)
 
 if __name__ == "__main__":
     main()
