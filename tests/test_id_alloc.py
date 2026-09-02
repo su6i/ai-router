@@ -41,19 +41,26 @@ def test_concurrency(isolated_paths):
         assert f"D-{i:03d}" in unique_ids
 
 def test_registry_offset_and_check(isolated_paths):
-    # Test case 2 & 3: registry has D-200, ledger empty -> next D is D-201
+    # T-915 phase B/C: next's max() comes only from the locked ledger, never
+    # from the registry (that coupling was the D-173/D-174/N-035 root cause).
+    # Registry has D-200, ledger empty -> next D is D-001, NOT D-201: a manual
+    # registry entry that never made it into the ledger no longer moves max.
+    # check still uses parse_registry() for reporting, so it still flags
+    # D-200 as manually assigned -- that's the signal an operator (or the
+    # SessionStart hook) uses to run `seed` and close the gap before it can
+    # ever collide.
     registry_path = isolated_paths / "REGISTRY-IDS.md"
     registry_path.write_text("- D-200 — manually added\n", encoding="utf-8")
-    
+
     env = os.environ.copy()
     env["AGENT_MEMORY_DIR"] = str(isolated_paths)
     env["PYTHONPATH"] = src_dir
-    
-    # 2. next D returns D-201
+
+    # 2. next D ignores the registry-only entry and returns D-001
     cmd_next = [sys.executable, "-m", "id_alloc", "next", "D", "--intent", "test_offset"]
     res_next = subprocess.run(cmd_next, env=env, capture_output=True, text=True, check=True)
-    assert res_next.stdout.strip() == "D-201"
-    
+    assert res_next.stdout.strip() == "D-001"
+
     # 3. check should exit 1 and report D-200 as manually assigned
     cmd_check = [sys.executable, "-m", "id_alloc", "check"]
     res_check = subprocess.run(cmd_check, env=env, capture_output=True, text=True)
@@ -246,11 +253,55 @@ def test_seed_covers_all_allowed_prefixes(isolated_paths):
     ledger_content = ledger_path.read_text(encoding="utf-8")
     for prefix in id_alloc.ALLOWED_PREFIXES:
         assert f"{prefix}-501" in ledger_content
-        
+
     bytes_first = ledger_path.read_bytes()
-    
+
     subprocess.run([sys.executable, "-m", "id_alloc", "seed"], env=env, check=True)
     bytes_second = ledger_path.read_bytes()
-    
+
     assert bytes_first == bytes_second
+
+def test_who_column_is_canonicalized(isolated_paths):
+    # manager@-github / manager @-github / manager-@-github are three
+    # spellings of one actor (T-915 phase C). New writes canonicalize; old
+    # ledger rows are never rewritten (ids/rows locked forever).
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+
+    variants = ["manager@-github", "manager @-github", "manager-@-github"]
+    for who in variants:
+        subprocess.run(
+            [sys.executable, "-m", "id_alloc", "next", "D", "--intent", "who test", "--who", who],
+            env=env, check=True,
+        )
+
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    for line in lines:
+        who_field = line.split("\t")[2]
+        assert who_field == "manager@-github"
+
+def test_atomic_write_survives_a_ledger_that_already_exists(isolated_paths):
+    # Regression for the temp+os.replace() rewrite (T-915 phase C): the
+    # atomic write must preserve every prior row, not just append blindly to
+    # whatever the fd happened to be positioned at.
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+
+    ledger_path = isolated_paths / "ID-LEDGER.tsv"
+    ledger_path.write_text("D-001\t2026-09-03T00:00:00Z\ttest\tpre-existing row\n", encoding="utf-8")
+
+    res = subprocess.run(
+        [sys.executable, "-m", "id_alloc", "next", "D", "--intent", "second row"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert res.stdout.strip() == "D-002"
+
+    lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("D-001\t")
+    assert lines[1].startswith("D-002\t")
 

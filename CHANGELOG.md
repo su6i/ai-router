@@ -8,6 +8,31 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ## Unreleased
 
 ### Changed
+- **`id_alloc next`'s `max()` now comes only from the locked ledger, never the
+  registry (T-915 phase C, final phase of the three-phase T-915/T-916 split).**
+  `parse_registry()` is no longer consulted by `next` at all — a live,
+  unlocked markdown file able to move `max` out from under a concurrent
+  allocation was the root cause the `D-173`/`D-174`/`N-035` forensics trace
+  back to. This is safe only because it lands after T-916's seed backfilled
+  every manually-assigned registry id into the ledger; `check` still parses
+  the registry for its "manually assigned" reporting, so a future gap is
+  still caught, just never silently re-allocated. Every write (`next`,
+  `seed`, `void`) is now atomic: the full new ledger content is written to a
+  temp file in the ledger's own directory, `fsync`'d, then swapped into place
+  with `os.replace()`. Locking moved from the ledger path itself to a
+  dedicated, never-replaced `ID-LEDGER.tsv.lock` sidecar — a lock held on a
+  file that then gets renamed out from under it stops protecting the live
+  file the instant a second writer, already queued on the old inode, wakes
+  up holding a lock nobody else is contending for any more. Verified against
+  the existing 8-way concurrency test plus an ad hoc 40-way stress run: zero
+  collisions, zero lost updates. The `who` value passed to `next`/`void` is
+  now canonicalized on write (`manager@-github` / `manager @-github` /
+  `manager-@-github` → one spelling); historical rows are never rewritten.
+  The manual "تخصیص‌شده تا" ("assigned up to") clause — the proven root cause
+  of the `D-173`/`D-174` duplicates, since it was the actual number source
+  for at least one hand-written ledger row — is deleted from the live
+  `REGISTRY-IDS.md` header (backed up first); it is not regenerated, since a
+  line that does not exist cannot go stale.
 - **`id_alloc` allocates `R-` (research finding, T-014) instead of `W-`.**
   `ALLOWED_PREFIXES` and every regex that gates prefix recognition
   (`ID_REGEX`, used by the ledger parser and `void`; `LIST_ROW_REGEX` /
