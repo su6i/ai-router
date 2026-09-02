@@ -432,15 +432,17 @@ def test_delegate_research_default_model(tmp_path, monkeypatch):
     import delegate as d
     import server
 
+    monkeypatch.setattr(d, "MODELS", d.MODELS.copy())
     models_called = []
     def fake_agent_delegate(task, runner="agy", model="agy", workdir=None, via=None, **kwargs):
         models_called.append(model)
         return "status        : COMPLETED\noutput saved  : /dev/null\n"
 
     monkeypatch.setattr(d, "agent_delegate", fake_agent_delegate)
+    monkeypatch.setattr(d, "agy_served_models", lambda *a, **kw: ["gemini-3.9-flash-high", "gemini-3.8-flash-high", "gemini-3.1-pro-high"])
 
     server.handle_delegate_research({"question": "default test"})
-    assert models_called == ["gemini-3.7-flash-high"]
+    assert models_called == ["gemini-3.9-flash-high"]
 
 
 def test_delegate_research_explicit_model_agy(tmp_path, monkeypatch):
@@ -451,19 +453,25 @@ def test_delegate_research_explicit_model_agy(tmp_path, monkeypatch):
     import delegate as d
     import server
 
+    monkeypatch.setattr(d, "MODELS", d.MODELS.copy())
     models_called = []
     def fake_agent_delegate(task, runner="agy", model="agy", workdir=None, via=None, **kwargs):
         models_called.append(model)
         return "status        : COMPLETED\noutput saved  : /dev/null\n"
 
     monkeypatch.setattr(d, "agent_delegate", fake_agent_delegate)
+    monkeypatch.setattr(d, "agy_served_models", lambda *a, **kw: ["gemini-3.9-flash-high", "gemini-3.8-flash-high", "gemini-3.1-pro-high"])
 
     server.handle_delegate_research({"question": "agy override", "model": "agy"})
     assert models_called == ["gemini-3.1-pro-high"]
 
 
-def test_agy_alias_is_not_flash():
+def test_agy_alias_is_not_flash(monkeypatch):
     if str(SRC_DIR) not in sys.path:
         sys.path.insert(0, str(SRC_DIR))
     import delegate as d
-    assert d.ALIASES["agy"] == "gemini-3.1-pro-high"
+    monkeypatch.setattr(d, "MODELS", d.MODELS.copy())
+    monkeypatch.setattr(d, "agy_served_models", lambda *a, **kw: ["gemini-3.9-flash-high", "gemini-3.8-flash-high", "gemini-3.1-pro-high"])
+
+    assert "-pro-" in d.resolve_model("agy")
+    assert "-flash-" in d.resolve_model("gemini-flash")

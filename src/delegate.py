@@ -7,7 +7,8 @@ you have an independent ledger. Optional conversation memory (--session) makes c
 iterative ("now add tests") instead of one-shot.
 
 Providers:
-  agy     — Gemini 3.1 Pro via the `agy` CLI, Google AI Pro subscription ($0)
+  agy     — newest Gemini Pro via the `agy` CLI, Google AI Pro subscription ($0);
+            the generation is resolved from the live CLI catalog, never hardcoded
   minimax — MiniMax-M3 (prepaid, spend first)
   flash   — deepseek-v4-flash    pro — deepseek-v4-pro    grok — grok-4.3
 
@@ -248,9 +249,6 @@ MODELS = {
     "gemini-3.6-flash-high": {"api": "gemini-3.6-flash-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "gemini-3.6-flash-medium": {"api": "gemini-3.6-flash-medium", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "gemini-3.6-flash-low": {"api": "gemini-3.6-flash-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
-    "gemini-3.5-flash-high": {"api": "gemini-3.5-flash-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
-    "gemini-3.5-flash-medium": {"api": "gemini-3.5-flash-medium", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
-    "gemini-3.5-flash-low": {"api": "gemini-3.5-flash-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "gemini-3.1-pro-high": {"api": "gemini-3.1-pro-high", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "gemini-3.1-pro-low": {"api": "gemini-3.1-pro-low", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-gemini"},
     "claude-sonnet-4-6": {"api": "claude-sonnet-4-6", "effort": None, "provider": "agy_cli", "url": "", "cin": 0.0, "cout": 0.0, "key": "", "quota_channel": "google-ai-pro-claude"},
@@ -266,8 +264,133 @@ ALIASES = {
     "pro": "pro", "reasoner": "pro", "deepseek-pro": "pro", "deepseek-v4-pro": "pro",
     "grok": "grok", "grok-4.3": "grok", "grok4": "grok",
     "grok-4.5": "grok-4.5", "grok45": "grok-4.5", "grok4.5": "grok-4.5",
-    "agy": "gemini-3.1-pro-high", "antigravity": "gemini-3.1-pro-high", "gemini-3-pro": "gemini-3.1-pro-high",
+    # "agy"/"antigravity"/"gemini-flash" are NOT here: they are family aliases
+    # resolved against the live catalog at call time (see FAMILY_ALIASES).
 }
+
+# ── Live agy catalog ────────────────────────────────────────────────────────
+# Owner decree 2026-09-03: the router NEVER hardcodes which generation is
+# current. Google ships a new Gemini flash every few weeks (3.6 → 3.7 → 3.8 in
+# two months) and every pinned id is a manual edit waiting to happen — the
+# owner had to notice 3.8 shipped and tell us. So the static MODELS table above
+# is a pricing/floor table, not the answer to "which model is newest": that
+# answer comes from what `agy models` serves right now. FAMILY_ALIASES resolve
+# at call time, so a new generation is used the day it ships, no code edit.
+AGY_CATALOG_CACHE = DATA_DIR / "agy_models.json"
+AGY_CATALOG_TTL_S = 6 * 3600
+AGY_CATALOG_TIMEOUT_S = 20
+
+# gemini-<version>-<family>-<effort>, e.g. gemini-3.8-flash-high.
+AGY_GEMINI_ID_RE = re.compile(r"^gemini-(\d+(?:\.\d+)*)-(flash|pro)-(high|medium|low)$")
+
+# Alias -> (family, effort), resolved against the live catalog on every call.
+FAMILY_ALIASES = {
+    "agy": ("pro", "high"),
+    "antigravity": ("pro", "high"),
+    "gemini-pro": ("pro", "high"),
+    "gemini-3-pro": ("pro", "high"),
+    "gemini-pro-low": ("pro", "low"),
+    "agy-flash": ("flash", "high"),
+    "gemini-flash": ("flash", "high"),
+    "gemini-flash-medium": ("flash", "medium"),
+    "gemini-flash-low": ("flash", "low"),
+}
+
+
+def parse_agy_models(stdout: str) -> list[str]:
+    """Model ids exactly as `agy models` prints them (first token of a data row).
+
+    Rows are "<id>\t<human label>"; the banner line and blanks carry no tab.
+    """
+    ids = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line and "\t" in line:
+            ids.append(line.split()[0])
+    return ids
+
+
+def agy_quota_channel(model_id: str) -> str:
+    """Which Google AI Pro sub-pool a served id bills against."""
+    if model_id.startswith("claude-"):
+        return "google-ai-pro-claude"
+    if model_id.startswith("gpt-"):
+        return "google-ai-pro-gpt"
+    if model_id.startswith("gemini-"):
+        return "google-ai-pro-gemini"
+    return "google-ai-pro"
+
+
+def register_agy_model(model_id: str) -> str:
+    """Register a live-served agy id that the static table predates.
+
+    Same spec as every other agy_cli entry ($0 on the subscription, dispatched
+    to call_agy_print(), no env-var key, effort baked into the id), so a brand
+    new generation is fully usable — cost math included — without a code edit.
+    """
+    if model_id not in MODELS:
+        MODELS[model_id] = {"api": model_id, "effort": None, "provider": "agy_cli",
+                            "url": "", "cin": 0.0, "cout": 0.0, "key": "",
+                            "quota_channel": agy_quota_channel(model_id)}
+    return model_id
+
+
+def agy_served_models(max_age_s: int = AGY_CATALOG_TTL_S) -> list[str]:
+    """Ids the live `agy` CLI serves, cached in the vault for max_age_s seconds.
+
+    Never raises. An offline/absent CLI degrades to the last cached list, and
+    an empty cache degrades to the static catalog at the call site — model
+    resolution must not break because a subprocess is unavailable.
+    """
+    cached: list[str] = []
+    fetched_at = 0.0
+    try:
+        blob = json.loads(AGY_CATALOG_CACHE.read_text())
+        cached = [str(m) for m in blob.get("models", [])]
+        fetched_at = float(blob.get("fetched_at", 0.0))
+    except (OSError, ValueError, TypeError):
+        pass  # cold start or corrupt cache — refetch below
+    if cached and (time.time() - fetched_at) < max_age_s:
+        return cached
+    try:
+        r = subprocess.run(["agy", "models"], capture_output=True, text=True,
+                           timeout=AGY_CATALOG_TIMEOUT_S, check=False)
+        fresh = parse_agy_models(r.stdout) if r.returncode == 0 else []
+    except (subprocess.TimeoutExpired, OSError):
+        fresh = []
+    if not fresh:
+        return cached
+    try:
+        AGY_CATALOG_CACHE.write_text(
+            json.dumps({"fetched_at": time.time(), "models": fresh}, indent=1) + "\n")
+    except OSError:
+        pass  # a read-only vault costs a cache, not a resolution
+    return fresh
+
+
+def latest_agy_model(family: str = "flash", effort: str = "high") -> str:
+    """Highest-version gemini id of that family/effort the channel serves NOW.
+
+    Version order is numeric per component (3.10 > 3.9), not lexical. Falls
+    back to the newest id of that shape in the static catalog when the CLI and
+    the cache are both unavailable — never to a pinned generation.
+    """
+    def _pick(ids):
+        ranked = []
+        for mid in ids:
+            m = AGY_GEMINI_ID_RE.match(mid)
+            if m and m.group(2) == family and m.group(3) == effort:
+                ranked.append((tuple(int(n) for n in m.group(1).split(".")), mid))
+        return max(ranked)[1] if ranked else ""
+
+    live = _pick(agy_served_models())
+    if live:
+        return register_agy_model(live)
+    static = _pick(list(MODELS))
+    if static:
+        return static
+    raise ValueError(f"no gemini {family}-{effort} model served by agy or in the catalog")
+
 
 # Owner decree 2026-07-27: the free-quota Gemini API channel ("gemini",
 # "gemini-lite", "gemma") is REMOVED, not silently remapped. It defeated the
@@ -374,12 +497,20 @@ def resolve_model(name: str) -> str:
             f"free-quota Gemini flash truncates files and "
             f"silently overrode the agy default). Use '{suggestion}'."
         )
+    if key in FAMILY_ALIASES:
+        # Newest generation of that family, live — checked before MODELS so a
+        # static entry can never shadow a family alias.
+        return latest_agy_model(*FAMILY_ALIASES[key])
     if key in MODELS:
         _warn_if_deepseek_peak(key)
         return key
     resolved = ALIASES.get(key)
     if resolved is None:
-        known = sorted(set(MODELS.keys()) | set(ALIASES.keys()))
+        if AGY_GEMINI_ID_RE.match(key) and key in agy_served_models():
+            # A generation newer than this file: the channel serves it, so it
+            # is a real model, not a typo. Register instead of rejecting.
+            return register_agy_model(key)
+        known = sorted(set(MODELS.keys()) | set(ALIASES.keys()) | set(FAMILY_ALIASES.keys()))
         raise ValueError(f"unknown model '{name}'. Known: {', '.join(known)}")
     _warn_if_deepseek_peak(resolved)
     return resolved
@@ -2014,7 +2145,10 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         raise ValueError("Claude models are banned inside delegate (subscription-billed; routing them here double-bills)")
 
     if runner == "agy":
-        model_name = model or "gemini-3.1-pro-high"
+        try:
+            model_name = resolve_model(model) if model else latest_agy_model("pro", "high")
+        except ValueError as e:
+            raise ValueError(f"Unknown agy model: {model} ({e})") from e
         provider_model = MODELS.get(model_name)
         if not provider_model:
             raise ValueError(f"Unknown agy model: {model_name}")
