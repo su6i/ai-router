@@ -5,8 +5,8 @@ import os
 import re
 import sys
 
-ALLOWED_PREFIXES = {"D", "T", "N", "B", "W"}
-ID_REGEX = re.compile(r"\b([DTNBW])-(\d+)\b")
+ALLOWED_PREFIXES = {"D", "T", "N", "B", "R"}
+ID_REGEX = re.compile(r"\b([DTNBR])-(\d+)\b")
 # An ID counts only when it is the identifier OF a registry row, never when it is
 # merely mentioned inside one. Prose examples live in blockquotes ("> ... `T-0900`")
 # and sentences, so anchoring to the row shape is what kills the poisoning (N-031).
@@ -23,8 +23,8 @@ ID_REGEX = re.compile(r"\b([DTNBW])-(\d+)\b")
 # taken: rows like "- T-919 — VOID, duplicate of T-916 (pattern of T-901)" must
 # yield T-919 and must not re-admit the voided ids quoted in their own body.
 _LABEL = r"(?:[A-Za-z0-9][A-Za-z0-9-]*\s*/\s*)?"
-LIST_ROW_REGEX = re.compile(r"^-\s+" + _LABEL + r"([DTNBW])-(\d+)\b")
-TABLE_ROW_REGEX = re.compile(r"^\|\s*" + _LABEL + r"([DTNBW])-(\d+)\s*\|")
+LIST_ROW_REGEX = re.compile(r"^-\s+" + _LABEL + r"([DTNBR])-(\d+)\b")
+TABLE_ROW_REGEX = re.compile(r"^\|\s*" + _LABEL + r"([DTNBR])-(\d+)\s*\|")
 
 def get_base_dir():
     return os.environ.get("AGENT_MEMORY_DIR", os.path.expanduser("~/.local/share/agent-projects/_memory"))

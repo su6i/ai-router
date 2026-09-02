@@ -8,6 +8,22 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ## Unreleased
 
 ### Changed
+- **`id_alloc` allocates `R-` (research finding, T-014) instead of `W-`.**
+  `ALLOWED_PREFIXES` and every regex that gates prefix recognition
+  (`ID_REGEX`, used by the ledger parser and `void`; `LIST_ROW_REGEX` /
+  `TABLE_ROW_REGEX`, used by `parse_registry`) now accept `R` and reject `W`.
+  Before this change `parse_registry()` could not see any `R-` row at all —
+  `R` was absent from the character class the two registry row-shape regexes
+  share with `ID_REGEX` — so the eight `R-` ids already live in
+  `REGISTRY-IDS.md` were invisible to `check`/`seed`, and a `next R` would
+  have re-issued `R-001` instead of continuing past `R-008`. `W-001` remains
+  in `ID-LEDGER.tsv` with no registry counterpart; it is no longer recognized
+  by the allocator and is left in place, unvoided, pending a follow-up that
+  retires it explicitly with `id_alloc void` (T-915 phase B/C). This is phase
+  A of T-915 (WO-0046) and is a hard prerequisite of T-916 (WO-0045)'s seed,
+  which cannot cover the `R` prefix until this lands. T-915 phase B (removing
+  `parse_registry()` from the `max()` path) is deliberately deferred until
+  after T-916's seed closes the gap between the ledger and the registry.
 - **No default names a model generation any more; the catalog is read from the
   live channel.** `delegate_research` defaulted to the pinned
   `gemini-3.7-flash-high` and `agy` was a static alias for `gemini-3.1-pro-high`,

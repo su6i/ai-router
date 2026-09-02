@@ -57,22 +57,23 @@ def test_parse_multiple_prefixes_prose_ignored(isolated_paths):
     assert res_n.stdout.strip() == "N-004"
 
 def test_parse_clean_registry(isolated_paths):
-    # Case (c): Clean registry with only real structural rows
+    # Case (c): Clean registry with only real structural rows. Uses R (research
+    # finding, T-014) rather than the retired W prefix (T-915 Phase A).
     registry_path = isolated_paths / "REGISTRY-IDS.md"
     registry_path.write_text(
-        "- W-001 — one\n"
-        "| W-002 | two |\n"
-        "- W-003 — three\n",
+        "- R-001 — one\n"
+        "| R-002 | two |\n"
+        "- R-003 — three\n",
         encoding="utf-8"
     )
-    
+
     env = os.environ.copy()
     env["AGENT_MEMORY_DIR"] = str(isolated_paths)
     env["PYTHONPATH"] = src_dir
-    
-    cmd_next_w = [sys.executable, "-m", "id_alloc", "next", "W", "--intent", "test_w"]
-    res_w = subprocess.run(cmd_next_w, env=env, capture_output=True, text=True, check=True)
-    assert res_w.stdout.strip() == "W-004"
+
+    cmd_next_r = [sys.executable, "-m", "id_alloc", "next", "R", "--intent", "test_r"]
+    res_r = subprocess.run(cmd_next_r, env=env, capture_output=True, text=True, check=True)
+    assert res_r.stdout.strip() == "R-004"
 
 def test_parse_labelled_row_is_an_allocation(isolated_paths):
     """A row may carry a work-order label before the id — 9 such rows hold real
