@@ -8,6 +8,22 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ## Unreleased
 
 ### Changed
+- **No default names a model generation any more; the catalog is read from the
+  live channel.** `delegate_research` defaulted to the pinned
+  `gemini-3.7-flash-high` and `agy` was a static alias for `gemini-3.1-pro-high`,
+  so the day Google shipped Gemini 3.8 Flash the router kept calling 3.7 until a
+  human noticed and edited the source — which is what happened (owner report,
+  2026-09-03). `src/delegate.py` now resolves family aliases (`agy`,
+  `gemini-flash`, and the effort variants) against what `agy models` actually
+  serves, cached in the vault for six hours, comparing versions numerically so
+  `3.10` outranks `3.9`; `resolve_model()` also accepts and registers a served id
+  the static table predates, so a new generation needs no code edit at all. The
+  static `MODELS` table stays as the pricing/floor table and the offline
+  fallback: an unreachable CLI degrades to the cache, an empty cache to the
+  newest matching static id. Explicit pinning still works by naming the exact id.
+- **Dropped the `gemini-3.5-flash-*` registrations.** The channel stopped
+  serving them; under the rule above the static table is the offline fallback,
+  and a fallback to a model that no longer exists is worse than no row at all.
 - **`tests/test_model_catalog.py` now asserts a real set difference** between
   what the live `agy models` channel serves and what `MODELS` registers,
   instead of a hardcoded model-generation string that silently stayed green

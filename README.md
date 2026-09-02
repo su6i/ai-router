@@ -192,7 +192,38 @@ AI Pro subscription — including `claude-sonnet-4-6` and `claude-opus-4-6-think
 which draw on a **different** quota pool from the Gemini ids and so can absorb work
 without competing with the default worker. Pass the id exactly as printed and never
 add `--effort`: the effort level is already part of the id, and agy rejects the pair
-outright for the Claude models. `agy` remains an alias for `gemini-3.1-pro-high`.
+outright for the Claude models. `agy` is a **family alias**, not a pinned id: it
+resolves at call time to the newest `gemini-*-pro-high` the CLI serves, and
+`gemini-flash` to the newest `gemini-*-flash-high` (see § Model catalog is live).
+
+### Model catalog is live, not hardcoded
+
+Google ships a new Gemini generation every few weeks (3.6 → 3.7 → 3.8 within two
+months). A router that names a generation in code needs a human to notice the
+release and a commit to act on it — which is exactly how it silently keeps
+running last month's model. So no default here names a generation:
+
+| Alias | Resolves to |
+| --- | --- |
+| `agy`, `antigravity`, `gemini-pro` | newest `gemini-*-pro-high` the channel serves |
+| `gemini-pro-low` | newest `gemini-*-pro-low` |
+| `gemini-flash`, `agy-flash` | newest `gemini-*-flash-high` |
+| `gemini-flash-medium` / `gemini-flash-low` | newest flash at that effort |
+
+`delegate.agy_served_models()` reads the live `agy models` listing and caches it
+in the vault (`<data>/agy_models.json`, 6-hour TTL), so resolution costs one
+subprocess per six hours, not one per call. Versions are compared numerically —
+`3.10` outranks `3.9`, which a string sort gets backwards. An id the live channel
+serves but the static `MODELS` table predates is registered on the fly ($0,
+`agy_cli`, right quota channel), so a brand-new generation is routable the day it
+ships, by alias or by its exact id.
+
+Degradation is deliberate: an offline CLI falls back to the cached listing, an
+empty cache to the newest matching id in the static table. Resolution never fails
+because a subprocess is unavailable, and it never silently pins a generation.
+
+Pinning is still available and still explicit — name the exact id
+(`gemini-3.8-flash-low`) when a run must be reproducible.
 
 ### Sessions
 
@@ -567,7 +598,7 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 
 | Door | Best For | Default Model | Notes |
 | --- | --- | --- | --- |
-| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `gemini-3.7-flash-high` (grounded search, **$0**) | Triage/lookup is a cheap high-throughput call, flash is the right generation. Code generation stays on 3.1-pro-high, the channel the worker ladder was measured on; both are $0 on the Google AI Pro subscription (quality/latency split, not cost). Paid `grok` must now be named explicitly (~$0.02–$0.05/call). |
+| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `gemini-flash` — newest flash the channel serves, resolved live (grounded search, **$0**) | Triage/lookup is a cheap high-throughput call, so it takes the flash family; code generation stays on the pro family (`agy`). Both are $0 on the Google AI Pro subscription — a quality/latency split, not a cost one. Neither is pinned to a generation. Paid `grok` must now be named explicitly (~$0.02–$0.05/call). |
 | **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `agy` (free, Google AI Pro sub) | Pass known file paths. Generated code never crosses the wire. |
 | **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
 | **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
@@ -582,8 +613,12 @@ claude mcp add --scope user ai-router -- python3 /Users/su6i/@-github/ai-router/
 Three tools only, all capped — no uncapped chat tool, ever:
 
 - **`delegate_research`** — fact lookup / live-data checks / doc
-  verification. **The default is `gemini-3.7-flash-high` on the Google AI Pro
-  subscription: $0, using its own grounded web search**. (Code writing tools stay on `gemini-3.1-pro-high`; triage/lookup is a cheap high-throughput call where flash is the right generation, while the worker ladder was measured on 3.1-pro — this is a quality/latency split, not a cost split since both are $0). Note the
+  verification. **The default is `gemini-flash` — the newest Gemini flash the
+  agy channel serves at the moment of the call — on the Google AI Pro
+  subscription: $0, using its own grounded web search**. (Code-writing tools stay
+  on the pro family via `agy`; triage/lookup is a cheap high-throughput call where
+  flash is the right family — a quality/latency split, not a cost split, since both
+  are $0.) Note the
   implementation constraint: the agy branch
   routes through `agent_delegate()`, *not* `delegate()`, because the latter
   appends `AGY_NO_TOOLS_ADDENDUM` and would leave agy answering live-fact
