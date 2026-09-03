@@ -124,6 +124,18 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   explicitly via the shared `requires_rules_corpus` marker in `tests/conftest.py`.
 - Removed a duplicated `Added` entry for the SessionStart continuity hook — the
   same change was written into the changelog twice in one commit.
+- **`agy_served_models()` now memoizes the served catalog in-process, and its
+  cache write is atomic (T-944).** The memo is keyed off the on-disk
+  `fetched_at` value, never filesystem mtime, so a test that rewrites the
+  cache file directly is still honored — but N alias resolutions within one
+  delegate run now cost at most one `agy models` subprocess call instead of
+  one per resolution whenever the disk write silently fails (e.g. a
+  read-only vault), which is exactly the scenario T-941 traced back to
+  duplicate subprocess calls breaking CI call-count assertions. The cache
+  write itself goes to a temp file in the same directory then `os.replace()`
+  — the same shape `id_alloc.py` already uses for the ledger — so a crash or
+  concurrent writer mid-write can no longer leave a truncated JSON cache
+  behind.
 
 ### Added
 - **`hooks/code_lookup_gate.py` (PreToolUse hook for Read)** — Added a hook to prevent agents from dumping large files into context by rejecting exploratory `Read` calls on files over 8KB (`AI_ROUTER_CODE_LOOKUP_GATE_MAX_BYTES`). The read is allowed if `mcp__ai-router__code_lookup` was used within the last 10 tool calls (`AI_ROUTER_CODE_LOOKUP_GATE_RECENT_N`), guiding the agent toward semantic search, or if the agent recently wrote the file. The block message's `repo=` hint is derived from the target file's nearest git root (walking up to the nearest `.git`, directory or worktree pointer file) rather than hardcoded, since the hook is registered globally and fires in every repo the owner works in — a fixed `repo="ai-router"` would send an agent in a different repo to search the wrong index; omitted when no git root is found. The transcript is read from the end and capped at `AI_ROUTER_CODE_LOOKUP_GATE_TRANSCRIPT_TAIL_BYTES` (default 1MB) rather than parsed in full, since this hook runs synchronously in front of every large Read and a multi-MB transcript would otherwise add real latency; a transcript tail that is entirely unparseable fails open rather than being treated as "no recent lookup found". A deliberate second attempt passes.

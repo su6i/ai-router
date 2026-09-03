@@ -341,7 +341,17 @@ def agy_served_models(max_age_s: int = AGY_CATALOG_TTL_S) -> list[str]:
     Never raises. An offline/absent CLI degrades to the last cached list, and
     an empty cache degrades to the static catalog at the call site — model
     resolution must not break because a subprocess is unavailable.
+
+    Memoized per process (as a function attribute, `agy_served_models._memo`)
+    so N resolutions in one run cost at most one `agy models` subprocess call,
+    even when the cache write below silently fails (e.g. a read-only vault).
+    The memo is keyed off the on-disk `fetched_at` value, not filesystem
+    mtime (which can collide at second-level resolution when a cache file is
+    rewritten twice quickly), so a test that rewrites the cache file directly
+    is still honored, never served stale in-process data.
     """
+    memo = agy_served_models.__dict__.setdefault(
+        "_memo", {"path": None, "disk_fetched_at": None, "resolved_fetched_at": None, "models": None})
     cached: list[str] = []
     fetched_at = 0.0
     try:
@@ -350,7 +360,13 @@ def agy_served_models(max_age_s: int = AGY_CATALOG_TTL_S) -> list[str]:
         fetched_at = float(blob.get("fetched_at", 0.0))
     except (OSError, ValueError, TypeError):
         pass  # cold start or corrupt cache — refetch below
+    if (memo["path"] == AGY_CATALOG_CACHE
+            and memo["disk_fetched_at"] == fetched_at
+            and (time.time() - memo["resolved_fetched_at"]) < max_age_s):
+        return memo["models"]
     if cached and (time.time() - fetched_at) < max_age_s:
+        memo.update(path=AGY_CATALOG_CACHE, disk_fetched_at=fetched_at,
+                     resolved_fetched_at=time.time(), models=cached)
         return cached
     try:
         r = subprocess.run(["agy", "models"], capture_output=True, text=True,
@@ -360,11 +376,25 @@ def agy_served_models(max_age_s: int = AGY_CATALOG_TTL_S) -> list[str]:
         fresh = []
     if not fresh:
         return cached
+    now = time.time()
     try:
-        AGY_CATALOG_CACHE.write_text(
-            json.dumps({"fetched_at": time.time(), "models": fresh}, indent=1) + "\n")
+        import tempfile
+        AGY_CATALOG_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".agy-catalog-", suffix=".tmp",
+                                         dir=str(AGY_CATALOG_CACHE.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                tmp_f.write(json.dumps({"fetched_at": now, "models": fresh}, indent=1) + "\n")
+                tmp_f.flush()
+                os.fsync(tmp_f.fileno())
+            os.replace(tmp_path, AGY_CATALOG_CACHE)
+        except BaseException:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
     except OSError:
         pass  # a read-only vault costs a cache, not a resolution
+    memo.update(path=AGY_CATALOG_CACHE, disk_fetched_at=now, resolved_fetched_at=now, models=fresh)
     return fresh
 
 
