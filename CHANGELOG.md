@@ -74,6 +74,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   a model from the registry stays an architect decision.
 
 ### Fixed
+- **The test suite no longer depends on a warm `agy models` cache in the vault (T-941).** `latest_agy_model()` resolves family aliases against the live channel, falling back to a catalog cached under `<vault>/data/`. That cache is warm on the developer machine and cold in CI, so the same commit passed locally and failed on GitHub: every alias resolution shelled out to `agy models` through each test's own subprocess mock, adding a captured call that broke four call-count assertions and routing a `subprocess.run` through a `Popen` mock with no `poll()` in a fifth. A new autouse `frozen_agy_catalog` fixture points `AGY_CATALOG_CACHE` at a pre-seeded tmp file, so resolution is hermetic and writes nothing to the real vault. Catalog tests that patch the same names still win, because a test's own monkeypatch applies after the autouse fixture's.
 - **`test_retrieval_sanity` now asserts its own DB isolation instead of relying silently on the session fixture.** The test previously depended on an autouse fixture setting a test schema on `POSTGRES_DSN` and would have wiped the live rules index if that fixture were ever disabled or reordered. It now explicitly asserts that the schema parameter is present in the environment before triggering the reindex.
 - **Test fixtures no longer carry a plausible-looking fake model name.**
   `tests/test_misc.py` used `"deepseek-chat"` as its stub provider response.
