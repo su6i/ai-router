@@ -161,8 +161,23 @@ Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_route
 
 ### ID Allocation
 
-`ai-router` provides a concurrency-safe atomic ID allocator for `D-`, `T-`, `N-`, `B-`, and `W-` prefixes to prevent collisions across parallel sessions.
+`ai-router` provides a concurrency-safe atomic ID allocator for `D-`, `T-`, `N-`, `B-`, and `R-` prefixes to prevent collisions across parallel sessions. (`W-` was retired in favor of `R-` — research finding, per T-014.)
 The allocator uses an append-only TSV ledger backed by OS-level file locking. State lives in the vault (`~/.local/share/agent-projects/_memory/ID-LEDGER.tsv`, override with `AGENT_MEMORY_DIR`).
+
+`next`'s number comes **only** from the locked ledger — `REGISTRY-IDS.md` is
+never consulted for it any more (T-915 phase C). A live, unlocked markdown
+file moving `max` out from under a concurrent allocation was the root cause
+traced by the `D-173`/`D-174`/`N-035` forensics; this is safe only because
+`seed` (below) keeps the ledger a superset of every manually-assigned
+registry id. `check` still parses the registry, so anything that slips
+through between seeds is still caught and reported, just never silently
+re-allocated. Every write (`next`, `seed`, `void`) is atomic: the new full
+ledger content is written to a temp file in the same directory, `fsync`'d,
+then swapped into place with `os.replace()`. Locking uses a dedicated,
+never-replaced `ID-LEDGER.tsv.lock` sidecar rather than the ledger path
+itself — a lock held on a file that then gets renamed out from under it no
+longer protects the live file against a second writer that was already
+queued on the old inode.
 
 ```bash
 # Reserve the next ID atomically (returns bare ID like D-173)
@@ -174,7 +189,28 @@ PYTHONPATH=src python3 -m id_alloc check
 
 # Seed the ledger from existing IDs in REGISTRY-IDS.md
 PYTHONPATH=src python3 -m id_alloc seed
+
+# Void a duplicated/retired ID (resolves the duplicate finding in check)
+# A voided id still counts toward max() (never reissued); voiding an id
+# that was never allocated is refused (exit 3) so a typo can't poison the
+# ledger with a number nobody actually took.
+PYTHONPATH=src python3 -m id_alloc void D-173 --reason "duplicate of T-999"
 ```
+
+`seed` covers every prefix in `ALLOWED_PREFIXES`, not just one — it is safe to
+run repeatedly (idempotent: a second run adds zero rows) and safe to run on a
+ledger that already contains some of the ids it would seed. Two hooks wrap
+these commands so the ledger stays current without a manual step: `hooks/id_alloc_seed_on_end.py`
+runs `seed` on `SessionEnd`, and `hooks/id_alloc_check_on_start.py` runs `check`
+on `SessionStart` and surfaces its output as additional context when it exits
+non-zero. Both wrap their subprocess in a short timeout and always exit `0`
+themselves — the non-zero exit is a property of the wrapped `check` command,
+never of the hook or the session.
+
+The `who` value passed to `next`/`void` is canonicalized on write: `manager@-github`,
+`manager @-github` and `manager-@-github` are three spellings of one actor and
+all normalize to the first form. Historical ledger rows are never rewritten —
+ids and their rows are locked forever (owner decree 2026-07-31).
 
 ### One-shot chat
 

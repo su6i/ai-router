@@ -8,6 +8,47 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ## Unreleased
 
 ### Changed
+- **`id_alloc next`'s `max()` now comes only from the locked ledger, never the
+  registry (T-915 phase C, final phase of the three-phase T-915/T-916 split).**
+  `parse_registry()` is no longer consulted by `next` at all — a live,
+  unlocked markdown file able to move `max` out from under a concurrent
+  allocation was the root cause the `D-173`/`D-174`/`N-035` forensics trace
+  back to. This is safe only because it lands after T-916's seed backfilled
+  every manually-assigned registry id into the ledger; `check` still parses
+  the registry for its "manually assigned" reporting, so a future gap is
+  still caught, just never silently re-allocated. Every write (`next`,
+  `seed`, `void`) is now atomic: the full new ledger content is written to a
+  temp file in the ledger's own directory, `fsync`'d, then swapped into place
+  with `os.replace()`. Locking moved from the ledger path itself to a
+  dedicated, never-replaced `ID-LEDGER.tsv.lock` sidecar — a lock held on a
+  file that then gets renamed out from under it stops protecting the live
+  file the instant a second writer, already queued on the old inode, wakes
+  up holding a lock nobody else is contending for any more. Verified against
+  the existing 8-way concurrency test plus an ad hoc 40-way stress run: zero
+  collisions, zero lost updates. The `who` value passed to `next`/`void` is
+  now canonicalized on write (`manager@-github` / `manager @-github` /
+  `manager-@-github` → one spelling); historical rows are never rewritten.
+  The manual "تخصیص‌شده تا" ("assigned up to") clause — the proven root cause
+  of the `D-173`/`D-174` duplicates, since it was the actual number source
+  for at least one hand-written ledger row — is deleted from the live
+  `REGISTRY-IDS.md` header (backed up first); it is not regenerated, since a
+  line that does not exist cannot go stale.
+- **`id_alloc` allocates `R-` (research finding, T-014) instead of `W-`.**
+  `ALLOWED_PREFIXES` and every regex that gates prefix recognition
+  (`ID_REGEX`, used by the ledger parser and `void`; `LIST_ROW_REGEX` /
+  `TABLE_ROW_REGEX`, used by `parse_registry`) now accept `R` and reject `W`.
+  Before this change `parse_registry()` could not see any `R-` row at all —
+  `R` was absent from the character class the two registry row-shape regexes
+  share with `ID_REGEX` — so the eight `R-` ids already live in
+  `REGISTRY-IDS.md` were invisible to `check`/`seed`, and a `next R` would
+  have re-issued `R-001` instead of continuing past `R-008`. `W-001` remains
+  in `ID-LEDGER.tsv` with no registry counterpart; it is no longer recognized
+  by the allocator and is left in place, unvoided, pending a follow-up that
+  retires it explicitly with `id_alloc void` (T-915 phase B/C). This is phase
+  A of T-915 (WO-0046) and is a hard prerequisite of T-916 (WO-0045)'s seed,
+  which cannot cover the `R` prefix until this lands. T-915 phase B (removing
+  `parse_registry()` from the `max()` path) is deliberately deferred until
+  after T-916's seed closes the gap between the ledger and the registry.
 - **No default names a model generation any more; the catalog is read from the
   live channel.** `delegate_research` defaulted to the pinned
   `gemini-3.7-flash-high` and `agy` was a static alias for `gemini-3.1-pro-high`,
@@ -63,6 +104,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   same change was written into the changelog twice in one commit.
 
 ### Added
+- **`id_alloc` VOID support, all-prefix `seed`, and automated check/seed hooks (T-916/WO-0045).** A duplicated or retired ledger id can now be explicitly voided via `python3 -m id_alloc void D-173 --reason "..."` instead of remaining permanently flagged as a duplicate — ids are never renumbered (owner decree 2026-07-31), only voided. `id_alloc check` now ignores duplicates that are cleanly terminated by a trailing `VOID` row while still flagging unexplained repetition, and `cmd_next`/gap-detection continue to count voided rows toward the maximum so a retired number is never re-issued. Voiding an id that was never allocated is refused (exit 3, ledger untouched) rather than silently inserting a number nobody actually took. `cmd_seed` already iterated every prefix in `ALLOWED_PREFIXES` generically; verified idempotent (a second run adds zero rows) and, run against a temp copy of the real vault ledger, now closes the gap for every prefix (`ledger_max >= registry_max` holds for B, D, N, R, T after one seed run — T-915 phase A landed first so `seed` can finally see the `R-` ids at all). Added regression coverage reproducing the real `D-173`/`D-174` incident (a legitimate seed row followed by a hand-written duplicate at a suspiciously round timestamp) and asserting the allocator continues past the true ledger maximum rather than re-issuing either id. Two Claude Code hooks keep this current automatically: a `SessionStart` hook (`hooks/id_alloc_check_on_start.py`) that runs `id_alloc check` and surfaces any duplicated/manually-assigned warnings as additional context (the hook itself always exits `0` — only the wrapped `check` call's exit code reflects ledger health), and a `SessionEnd` hook (`hooks/id_alloc_seed_on_end.py`) that quietly runs `id_alloc seed`. Both hooks apply a short subprocess timeout and swallow all errors so a broken ledger or vault path never hangs or hard-fails a session. This is phase B of the three-phase T-915/T-916 split (see the `id_alloc` allocates `R-`... entry above); `max()` still consults `parse_registry()` until T-915 phase B/C removes it.
 - **Every Telegram send now leaves an audit trail.** `push_dashboard`, `send_note_ping`, `send_note_ping_deduped`, and `send_to_owner` each write a fail-open `mode: "telegram"` row to `audit.log` (`ts`, `api`, `message_ids`, `caller`, `kind`, `outcome`) — previously an unrecorded send was unrecoverable forever since the Bot API cannot read a bot's own sent history. These writes never carry the bot token or chat id.
 - **SessionStart continuity from RAG (`hooks/session_start_brief.py`).** Replaces the legacy pointer-only `session-resume-su6i.sh` hook, which told every new session to read a 1800+ line `SESSION.md` in full to find a handful of open items, with a retrieved brief assembled from four blocks (open `TODO.md` items for the repo, top RAG-retrieved chunks from `session_chunks`, the vault inbox listing, and a fallback pointer tail), hard-capped at 4500 chars. The retrieval quality filter drops chunks that are mostly auto git-ping noise (`branch ...`/`last:`/`session:` lines) and ranks chunks mentioning "Left Open"/"Next Work Order"/"Open Questions"/"Ready to test"/"blocked" first, with newest-date as the tiebreak. Fails safe to the byte-identical legacy pointer text — never a hard failure, never a hang — when Postgres is unreachable, the embedding model isn't already cached on disk (never triggers a download inside the hook), or retrieval exceeds a 6-second wall-clock budget enforced via a joined daemon thread. A new `r doctor` check (`sessionstart-rag`) verifies the hook is registered, with an idempotent atomic `--fix` that also removes the legacy hook entry so continuity is never injected twice.
 - **`WORKER-RULES.md` is now auto-injected into every worker prompt.** `~/.local/share/agent-projects/_memory/WORKER-RULES.md` is the accumulated, hard-won list of rules workers keep breaking (ruff run on non-Python files, overclaimed verifications, stub tests, committing straight to main) — until now it was pasted **by hand** per delegation by whichever architect remembered, so any delegation that forgot the paste shipped a worker with none of the accumulated guardrails. `build_worker_prompt()` (`src/delegate.py`) now loads it via the existing `AGENT_PROJECTS` vault resolver (the same one `src/dashboards.py` uses for `QUEUE.md`) and prepends it under a `## Standing worker rules (violating these fails review)` heading, right after the context-discipline preamble. A missing or empty file is a silent no-op — workers must never break because the vault isn't mounted. The injected text is capped at 16000 chars — sized so the real ~11 KB file fits whole; a 4000-char cap silently dropped 64% of it, including most of the recorded defect patterns, which is the opposite of the point — (truncated with a `… (truncated)` marker, warned once per process on stderr, never per call) and cached per process on `(path, mtime)`, so a file that hasn't changed is read at most once no matter how many delegations run in that process.
