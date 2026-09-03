@@ -122,3 +122,37 @@ def reset_e5_singleton():
     rules_index._MODEL = None
     yield
     rules_index._MODEL = None
+
+
+# The live `agy models` catalog is an outside-world call like the ones above.
+# `latest_agy_model()` resolves family aliases against what the CLI serves NOW,
+# falling back to a list cached in the vault. On the developer machine that
+# cache is warm, so nothing shells out; in CI it is cold, so every alias
+# resolution ran `agy models` through each test's own subprocess mock — one
+# extra captured call that broke four call-count assertions, and a
+# `subprocess.run` routed through a `Popen` mock with no `poll()` in a fifth.
+# Same suite, green here and red there, purely from an untracked file outside
+# the repo.
+_AGY_CATALOG_FIXTURE = [
+    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+    "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+    "claude-sonnet-4-6", "gpt-oss-120b-medium",
+]
+
+
+@pytest.fixture(autouse=True)
+def frozen_agy_catalog(monkeypatch, tmp_path_factory):
+    """Resolve agy model aliases from a frozen cache: no CLI, no vault writes.
+
+    Tests that exercise the catalog itself patch `AGY_CATALOG_CACHE` or
+    `agy_served_models` again and win — a test's own monkeypatch is applied
+    after the autouse fixture's.
+    """
+    import json
+    import time
+    import delegate
+
+    cache = tmp_path_factory.mktemp("agy-catalog") / "agy_models.json"
+    cache.write_text(json.dumps(
+        {"fetched_at": time.time(), "models": _AGY_CATALOG_FIXTURE}) + "\n")
+    monkeypatch.setattr(delegate, "AGY_CATALOG_CACHE", cache)
