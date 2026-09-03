@@ -74,6 +74,27 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   a model from the registry stays an architect decision.
 
 ### Fixed
+- **The test suite could read and write the owner's real vault (T-943).** Any
+  test that forgot to patch `delegate.DATA_DIR`/`AUDIT`/`BUDGETS`/`SESSIONS`/
+  `CACHE`/`AGY_CATALOG_CACHE`/`WORKER_SESSIONS` ran against
+  `~/.local/share/agent-projects/ai-router/` for real -- state that differs
+  between the developer's machine and CI (this is the same class of bug T-941
+  fixed for just the agy catalog cache) and that a test run could mutate
+  live: `tests/test_ingest.py::test_integration_ingest_idempotent` called
+  `ingest()` directly and wrote a real `last_ingest.json` into the owner's
+  vault on every run. A new session-scoped, autouse `isolate_vault` fixture
+  in `tests/conftest.py` now redirects the whole vault (data + secrets) to a
+  per-run temp directory for every test, patching the already-imported
+  module attributes directly (`AI_ROUTER_DATA_DIR` alone cannot reach them,
+  since they are bound at `delegate.py` import time) -- including `ingest.py`'s
+  own separate `from delegate import AUDIT, DATA_DIR` bindings, which a plain
+  `delegate.AUDIT` patch does not touch. This fixture subsumes T-941's
+  `frozen_agy_catalog`, which is removed. Postgres-backed integration tests
+  are unaffected: their DSN is captured once at collection time (before any
+  fixture runs) and scoped to the `ai_router_test` schema by the existing
+  `isolate_pg_schema` fixture, so they still opportunistically run against a
+  real local Postgres when one is available.
+- **The test suite no longer depends on a warm `agy models` cache in the vault (T-941).** `latest_agy_model()` resolves family aliases against the live channel, falling back to a catalog cached under `<vault>/data/`. That cache is warm on the developer machine and cold in CI, so the same commit passed locally and failed on GitHub: every alias resolution shelled out to `agy models` through each test's own subprocess mock, adding a captured call that broke four call-count assertions and routing a `subprocess.run` through a `Popen` mock with no `poll()` in a fifth. A new autouse `frozen_agy_catalog` fixture points `AGY_CATALOG_CACHE` at a pre-seeded tmp file, so resolution is hermetic and writes nothing to the real vault. Catalog tests that patch the same names still win, because a test's own monkeypatch applies after the autouse fixture's.
 - **`test_retrieval_sanity` now asserts its own DB isolation instead of relying silently on the session fixture.** The test previously depended on an autouse fixture setting a test schema on `POSTGRES_DSN` and would have wiped the live rules index if that fixture were ever disabled or reordered. It now explicitly asserts that the schema parameter is present in the environment before triggering the reindex.
 - **Test fixtures no longer carry a plausible-looking fake model name.**
   `tests/test_misc.py` used `"deepseek-chat"` as its stub provider response.

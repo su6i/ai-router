@@ -42,9 +42,27 @@ from conftest import requires_pg  # noqa: E402  (sits below the sys.path setup i
 
 @requires_pg
 def test_integration_ingest_idempotent(capsys):
-    # Runs against the real DB and real audit.log; safe because ingest is
-    # idempotent by design (ON CONFLICT DO NOTHING on the line hash).
-    from ingest import ingest
+    # AUDIT is pointed at a per-run temp file by the session-scoped
+    # `isolate_vault` fixture in conftest.py (which patches `ingest.AUDIT`
+    # directly, since this module's own `from delegate import AUDIT` made a
+    # separate binding). Seed it with fixture rows so the test still
+    # exercises real insert-then-idempotent-noop behaviour instead of
+    # depending on whatever the developer's own audit.log happened to
+    # contain (T-943).
+    from ingest import AUDIT, ingest
+
+    AUDIT.parent.mkdir(parents=True, exist_ok=True)
+    AUDIT.write_text(
+        '{"ts": "2026-07-14T12:00:00Z", "model_asked": "flash", '
+        '"model_echoed": "deepseek-v4-flash", "id": "resp-ingest-test-1", '
+        '"in": 10, "out": 5, "cache": 0, "cost_usd": 0.0001, '
+        '"latency_s": 0.5, "cached": false}\n'
+        '{"ts": "2026-07-14T12:01:00Z", "model_asked": "flash", '
+        '"model_echoed": "deepseek-v4-flash", "id": "resp-ingest-test-2", '
+        '"in": 20, "out": 10, "cache": 0, "cost_usd": 0.0002, '
+        '"latency_s": 0.6, "cached": false}\n'
+    )
+
     ingest()
     capsys.readouterr()
     ingest()

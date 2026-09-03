@@ -122,3 +122,81 @@ def reset_e5_singleton():
     rules_index._MODEL = None
     yield
     rules_index._MODEL = None
+
+
+# The vault itself -- `<vault>/data/` and `<vault>/secrets/` -- is an
+# outside-world dependency exactly like the live `agy models` catalog below:
+# state that differs between the developer's machine and CI, and files a
+# careless test can mutate for real. `delegate.VAULT`, `DATA_DIR`,
+# `SECRETS_DIR`, and every path derived from `DATA_DIR` (`AUDIT`, `BUDGETS`,
+# `SESSIONS`, `CACHE`, `AGY_CATALOG_CACHE`, `WORKER_SESSIONS`) are bound at
+# `delegate.py` IMPORT time, so setting `AI_ROUTER_DATA_DIR` alone does
+# nothing for the already-imported module -- the derived module attributes
+# are patched directly below. `ingest.py` additionally does
+# `from delegate import AUDIT, DATA_DIR`, which creates its OWN name bindings
+# in `ingest`'s namespace, decoupled from `delegate.AUDIT`/`delegate.DATA_DIR`
+# after that import: `tests/test_ingest.py::test_integration_ingest_idempotent`
+# called `ingest()` directly and wrote a real `last_ingest.json` into the
+# owner's vault on every run (T-943 audit) precisely because patching only
+# `delegate.AUDIT`/`delegate.DATA_DIR` would have missed it -- `ingest`'s own
+# bindings are patched here too.
+#
+# This subsumes T-941's `frozen_agy_catalog`: `AGY_CATALOG_CACHE` now always
+# lives under this same isolated vault, seeded once below with the same
+# fixture data, so the standalone fixture is removed (see CHANGELOG).
+_AGY_CATALOG_FIXTURE = [
+    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+    "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+    "claude-sonnet-4-6", "gpt-oss-120b-medium",
+]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolate_vault(tmp_path_factory):
+    """No test reads or writes the owner's real vault. See module comment above.
+
+    Session-scoped: these constants are frozen once per process, exactly like
+    the real module load they stand in for. A test that needs its own state
+    (e.g. `test_budgets.py`) still patches these same names again with its own
+    `monkeypatch`/`tmp_path` -- that patch is applied after this one and wins
+    for the duration of that test, then reverts to *this* fixture's value on
+    teardown, never to the real path.
+    """
+    import json
+    import time
+    import delegate
+    import ingest
+
+    vault_dir = tmp_path_factory.mktemp("ai-router-vault")
+    data_dir = vault_dir / "data"
+    secrets_dir = vault_dir / "secrets"
+    data_dir.mkdir()
+    secrets_dir.mkdir()
+
+    audit = data_dir / "audit.log"
+    agy_catalog = data_dir / "agy_models.json"
+    agy_catalog.write_text(json.dumps(
+        {"fetched_at": time.time(), "models": _AGY_CATALOG_FIXTURE}) + "\n")
+
+    with pytest.MonkeyPatch.context() as m:
+        # For any test that spawns a fresh subprocess and lets it inherit the
+        # parent environment -- a fresh `import delegate` in that process
+        # resolves AI_ROUTER_DATA_DIR itself, no per-test override needed.
+        m.setenv("AI_ROUTER_DATA_DIR", str(vault_dir))
+
+        m.setattr(delegate, "VAULT", vault_dir)
+        m.setattr(delegate, "DATA_DIR", data_dir)
+        m.setattr(delegate, "SECRETS_DIR", secrets_dir)
+        m.setattr(delegate, "AUDIT", audit)
+        m.setattr(delegate, "BUDGETS", data_dir / "budgets.json")
+        m.setattr(delegate, "SESSIONS", data_dir / "sessions")
+        m.setattr(delegate, "CACHE", data_dir / "cache.db")
+        m.setattr(delegate, "AGY_CATALOG_CACHE", agy_catalog)
+        m.setattr(delegate, "WORKER_SESSIONS", data_dir / "worker_sessions.json")
+
+        # `ingest.py`'s own `from delegate import AUDIT, DATA_DIR` bindings --
+        # see the module comment above.
+        m.setattr(ingest, "AUDIT", audit)
+        m.setattr(ingest, "DATA_DIR", data_dir)
+
+        yield
