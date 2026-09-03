@@ -7,8 +7,6 @@ import re
 import sys
 import tempfile
 
-ALLOWED_PREFIXES = {"D", "T", "N", "B", "R"}
-ID_REGEX = re.compile(r"\b([DTNBR])-(\d+)\b")
 # An ID counts only when it is the identifier OF a registry row, never when it is
 # merely mentioned inside one. Prose examples live in blockquotes ("> ... `T-0900`")
 # and sentences, so anchoring to the row shape is what kills the poisoning (N-031).
@@ -25,8 +23,41 @@ ID_REGEX = re.compile(r"\b([DTNBR])-(\d+)\b")
 # taken: rows like "- T-919 — VOID, duplicate of T-916 (pattern of T-901)" must
 # yield T-919 and must not re-admit the voided ids quoted in their own body.
 _LABEL = r"(?:[A-Za-z0-9][A-Za-z0-9-]*\s*/\s*)?"
-LIST_ROW_REGEX = re.compile(r"^-\s+" + _LABEL + r"([DTNBR])-(\d+)\b")
-TABLE_ROW_REGEX = re.compile(r"^\|\s*" + _LABEL + r"([DTNBR])-(\d+)\s*\|")
+
+_cached_prefixes_dir = None
+_cached_prefixes_result = None
+
+def get_allowed_prefixes_and_regexes():
+    global _cached_prefixes_dir, _cached_prefixes_result
+    base_dir = get_base_dir()
+    if _cached_prefixes_dir == base_dir and _cached_prefixes_result is not None:
+        return _cached_prefixes_result
+
+    prefixes_path = os.path.join(base_dir, "PREFIXES.tsv")
+    if not os.path.exists(prefixes_path):
+        print(f"⚠️  {prefixes_path} not found, falling back to builtin default prefixes", file=sys.stderr)
+        prefixes = {"D", "T", "N", "B", "R"}
+    else:
+        prefixes = set()
+        with open(prefixes_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i == 0 or not line.strip():
+                    continue
+                parts = line.split("\t")
+                if parts and parts[0].strip():
+                    prefixes.add(parts[0].strip())
+
+    if not prefixes:
+        prefixes = {"D", "T", "N", "B", "R"}
+
+    prefix_class = "".join(sorted(prefixes))
+    id_regex = re.compile(rf"\b([{prefix_class}])-(\d+)\b")
+    list_row_regex = re.compile(r"^-\s+" + _LABEL + rf"([{prefix_class}])-(\d+)\b")
+    table_row_regex = re.compile(r"^\|\s*" + _LABEL + rf"([{prefix_class}])-(\d+)\s*\|")
+
+    _cached_prefixes_dir = base_dir
+    _cached_prefixes_result = (prefixes, id_regex, list_row_regex, table_row_regex)
+    return _cached_prefixes_result
 
 def get_base_dir():
     return os.environ.get("AGENT_MEMORY_DIR", os.path.expanduser("~/.local/share/agent-projects/_memory"))
@@ -101,11 +132,12 @@ def parse_registry():
     found = {}
     if not os.path.exists(registry_path):
         return found
+    _, _, list_row_regex, table_row_regex = get_allowed_prefixes_and_regexes()
     with open(registry_path, "r", encoding="utf-8") as f:
         for line in f:
-            match = LIST_ROW_REGEX.match(line)
+            match = list_row_regex.match(line)
             if not match:
-                match = TABLE_ROW_REGEX.match(line)
+                match = table_row_regex.match(line)
             if match:
                 prefix, num_str = match.groups()
                 num = int(num_str)
@@ -115,8 +147,9 @@ def parse_registry():
     return found
 
 def parse_ledger(text):
+    allowed_prefixes, id_regex, _, _ = get_allowed_prefixes_and_regexes()
     ledger_ids = set()
-    max_nums = {p: 0 for p in ALLOWED_PREFIXES}
+    max_nums = {p: 0 for p in allowed_prefixes}
     occurrences = {}
     lines = text.splitlines()
     for line in lines:
@@ -127,7 +160,7 @@ def parse_ledger(text):
             continue
         full_id = parts[0]
         intent = parts[3] if len(parts) > 3 else ""
-        match = ID_REGEX.fullmatch(full_id)
+        match = id_regex.fullmatch(full_id)
         if match:
             prefix, num_str = match.groups()
             num = int(num_str)
@@ -152,8 +185,11 @@ def parse_ledger(text):
     return ledger_ids, max_nums, duplicates
 
 def cmd_next(args):
+    allowed_prefixes, _, _, _ = get_allowed_prefixes_and_regexes()
     prefix = args.prefix
-    if prefix not in ALLOWED_PREFIXES:
+    if prefix not in allowed_prefixes:
+        prefixes_path = os.path.join(get_base_dir(), "PREFIXES.tsv")
+        print(f"Error: prefix '{prefix}' not in allowed set loaded from {prefixes_path}", file=sys.stderr)
         sys.exit(2)
 
     intent = args.intent
@@ -201,10 +237,11 @@ def cmd_check(args):
     # yet in the ledger is already reported as "manually assigned" above, so it must
     # not be counted a second time here -- otherwise a fresh ledger reports every
     # historical number as missing and buries the two findings that matter.
+    allowed_prefixes, id_regex, _, _ = get_allowed_prefixes_and_regexes()
     known = set(ledger_ids) | set(registry_ids)
     gaps = []
-    for p in ALLOWED_PREFIXES:
-        nums = sorted(int(ID_REGEX.fullmatch(k).group(2)) for k in known if k.startswith(p + "-"))
+    for p in allowed_prefixes:
+        nums = sorted(int(id_regex.fullmatch(k).group(2)) for k in known if k.startswith(p + "-"))
         if not nums:
             continue
         gaps.extend(f"{p}-{m:03d}" for m in range(1, max(nums) + 1) if m not in set(nums))
@@ -253,7 +290,8 @@ def cmd_void(args):
     reason = args.reason
     who = canonicalize_who(args.who or "unknown")
 
-    match = ID_REGEX.fullmatch(full_id)
+    _, id_regex, _, _ = get_allowed_prefixes_and_regexes()
+    match = id_regex.fullmatch(full_id)
     if not match:
         sys.exit(2)
 

@@ -93,6 +93,7 @@ def test_invalid_prefix(isolated_paths):
     cmd_invalid = [sys.executable, "-m", "id_alloc", "next", "BOGUS", "--intent", "x"]
     res = subprocess.run(cmd_invalid, env=env, capture_output=True, text=True)
     assert res.returncode == 2
+    assert "not in allowed set loaded from" in res.stderr
 
 def test_registry_only_ids_are_not_also_reported_as_gaps(isolated_paths, capsys):
     # A number that lives in the registry is taken, not free. Counting it as a gap
@@ -243,15 +244,19 @@ def test_seed_covers_all_allowed_prefixes(isolated_paths):
     env["AGENT_MEMORY_DIR"] = str(isolated_paths)
     env["PYTHONPATH"] = src_dir
     
+    prefixes = {"D", "T", "N", "B", "R"}
+    prefixes_path = isolated_paths / "PREFIXES.tsv"
+    prefixes_path.write_text("prefix\tname\tscope\n" + "\n".join(f"{p}\tTest\tTest" for p in prefixes), encoding="utf-8")
+
     registry_path = isolated_paths / "REGISTRY-IDS.md"
-    registry_lines = [f"- {prefix}-501 — test\n" for prefix in id_alloc.ALLOWED_PREFIXES]
+    registry_lines = [f"- {prefix}-501 — test\n" for prefix in prefixes]
     registry_path.write_text("".join(registry_lines), encoding="utf-8")
     
     subprocess.run([sys.executable, "-m", "id_alloc", "seed"], env=env, check=True)
     
     ledger_path = isolated_paths / "ID-LEDGER.tsv"
     ledger_content = ledger_path.read_text(encoding="utf-8")
-    for prefix in id_alloc.ALLOWED_PREFIXES:
+    for prefix in prefixes:
         assert f"{prefix}-501" in ledger_content
 
     bytes_first = ledger_path.read_bytes()
@@ -304,4 +309,49 @@ def test_atomic_write_survives_a_ledger_that_already_exists(isolated_paths):
     assert len(lines) == 2
     assert lines[0].startswith("D-001\t")
     assert lines[1].startswith("D-002\t")
+
+
+def test_prefix_from_source_file_becomes_allocatable(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+
+    prefixes_path = isolated_paths / "PREFIXES.tsv"
+    prefixes_path.write_text("prefix\tname\tscope\nX\tExample\tExample scope\n", encoding="utf-8")
+
+    res = subprocess.run(
+        [sys.executable, "-m", "id_alloc", "next", "X", "--intent", "test custom prefix"],
+        env=env, capture_output=True, text=True, check=True
+    )
+    assert res.stdout.strip() == "X-001"
+
+
+def test_prefix_absent_from_source_file_rejected(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+
+    prefixes_path = isolated_paths / "PREFIXES.tsv"
+    prefixes_path.write_text("prefix\tname\tscope\nT\tTest\tTest scope\n", encoding="utf-8")
+
+    res = subprocess.run(
+        [sys.executable, "-m", "id_alloc", "next", "D", "--intent", "test missing prefix"],
+        env=env, capture_output=True, text=True
+    )
+    assert res.returncode == 2
+    assert "not in allowed set loaded from" in res.stderr
+    assert "PREFIXES.tsv" in res.stderr
+
+
+def test_no_prefixes_tsv_falls_back_to_builtin(isolated_paths):
+    env = os.environ.copy()
+    env["AGENT_MEMORY_DIR"] = str(isolated_paths)
+    env["PYTHONPATH"] = src_dir
+
+    res = subprocess.run(
+        [sys.executable, "-m", "id_alloc", "next", "D", "--intent", "test builtin fallback"],
+        env=env, capture_output=True, text=True, check=True
+    )
+    assert res.stdout.strip() == "D-001"
+    assert "falling back to builtin default prefixes" in res.stderr
 

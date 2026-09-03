@@ -161,7 +161,7 @@ Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_route
 
 ### ID Allocation
 
-`ai-router` provides a concurrency-safe atomic ID allocator for `D-`, `T-`, `N-`, `B-`, and `R-` prefixes to prevent collisions across parallel sessions. (`W-` was retired in favor of `R-` — research finding, per T-014.)
+`ai-router` provides a concurrency-safe atomic ID allocator to prevent collisions across parallel sessions. Allowed prefixes are sourced from `<vault>/PREFIXES.tsv` (resolved via `AGENT_MEMORY_DIR` alongside the ledger). If the file is absent, it falls back to a hardcoded set (`D-`, `T-`, `N-`, `B-`, `R-`) so the tool keeps working fully offline. An unknown prefix is refused with a message naming the source file. (`W-` was retired in favor of `R-` — research finding, per T-014.)
 The allocator uses an append-only TSV ledger backed by OS-level file locking. State lives in the vault (`~/.local/share/agent-projects/_memory/ID-LEDGER.tsv`, override with `AGENT_MEMORY_DIR`).
 
 `next`'s number comes **only** from the locked ledger — `REGISTRY-IDS.md` is
