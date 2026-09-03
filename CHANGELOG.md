@@ -8,6 +8,7 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
 ## Unreleased
 
 ### Changed
+- **`id_alloc` allowed prefixes are sourced from `<vault>/PREFIXES.tsv` instead of a hardcoded set.** Single source of truth for prefixes, shared with agent-constitution's rule 075, eliminating the hardcoded duplicate list. It resolves the vault path identically to the ledger via `AGENT_MEMORY_DIR`. If the file is absent, it safely falls back to the builtin 5-prefix set (`D, T, N, B, R`) so offline or unconfigured environments keep working. A prefix missing from the loaded set is explicitly rejected with an error naming the file path. Regular expressions are generated dynamically from the loaded set so custom prefixes are recognized seamlessly in `REGISTRY-IDS.md` and `ID-LEDGER.tsv`.
 - **`id_alloc next`'s `max()` now comes only from the locked ledger, never the
   registry (T-915 phase C, final phase of the three-phase T-915/T-916 split).**
   `parse_registry()` is no longer consulted by `next` at all — a live,
