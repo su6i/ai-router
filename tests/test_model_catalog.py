@@ -179,3 +179,66 @@ def test_resolve_model_live_and_missing(monkeypatch):
     # Fails for unknown model
     with pytest.raises(ValueError, match="unknown model"):
         delegate.resolve_model("gemini-3.10-flash-high")
+
+
+def test_agy_served_models_one_subprocess_per_process(monkeypatch, tmp_path):
+    # T-944: two consecutive resolutions against a cold cache must shell out
+    # to `agy models` exactly once -- the second call is served from the
+    # in-process memo, not a second subprocess.
+    cache_file = tmp_path / "agy_models.json"
+    monkeypatch.setattr(delegate, "AGY_CATALOG_CACHE", cache_file)
+    monkeypatch.setattr(delegate.agy_served_models, "_memo",
+                         {"path": None, "disk_fetched_at": None, "resolved_fetched_at": None, "models": None},
+                         raising=False)
+
+    call_count = {"n": 0}
+
+    class FakeResult:
+        returncode = 0
+        stdout = "gemini-3.9-flash-high\tFake Model\n"
+
+    def counting_run(*a, **kw):
+        call_count["n"] += 1
+        return FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", counting_run)
+
+    first = delegate.agy_served_models()
+    second = delegate.agy_served_models()
+
+    assert first == ["gemini-3.9-flash-high"]
+    assert second == ["gemini-3.9-flash-high"]
+    assert call_count["n"] == 1, f"expected exactly one ['agy', 'models'] subprocess call, got {call_count['n']}"
+
+
+def test_agy_catalog_write_failure_falls_back_without_raising(monkeypatch, tmp_path):
+    # T-944: a failed atomic write (temp file + os.replace) must never raise
+    # and must never leave a corrupt/partial cache file or a stray temp file
+    # behind -- resolution still succeeds off the freshly-fetched, in-memory
+    # value even though persistence to disk failed.
+    cache_file = tmp_path / "agy_models.json"
+    monkeypatch.setattr(delegate, "AGY_CATALOG_CACHE", cache_file)
+    monkeypatch.setattr(delegate.agy_served_models, "_memo",
+                         {"path": None, "disk_fetched_at": None, "resolved_fetched_at": None, "models": None},
+                         raising=False)
+
+    class FakeResult:
+        returncode = 0
+        stdout = "gemini-3.9-flash-high\tFake Model\n"
+
+    def fake_run(*a, **kw):
+        return FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def failing_replace(*a, **kw):
+        raise OSError("simulated failure")
+
+    monkeypatch.setattr(delegate.os, "replace", failing_replace)
+
+    result = delegate.agy_served_models()
+
+    assert result == ["gemini-3.9-flash-high"]
+    assert not cache_file.exists(), "a failed os.replace must never leave a partial cache file in place"
+    leftover_tmp = list(tmp_path.glob(".agy-catalog-*.tmp"))
+    assert leftover_tmp == [], f"leftover temp file(s) after failed write: {leftover_tmp}"

@@ -103,6 +103,18 @@ tagged releases yet (see `README.md` § Status), so entries are grouped as
   explicitly via the shared `requires_rules_corpus` marker in `tests/conftest.py`.
 - Removed a duplicated `Added` entry for the SessionStart continuity hook — the
   same change was written into the changelog twice in one commit.
+- **`agy_served_models()` now memoizes the served catalog in-process, and its
+  cache write is atomic (T-944).** The memo is keyed off the on-disk
+  `fetched_at` value, never filesystem mtime, so a test that rewrites the
+  cache file directly is still honored — but N alias resolutions within one
+  delegate run now cost at most one `agy models` subprocess call instead of
+  one per resolution whenever the disk write silently fails (e.g. a
+  read-only vault), which is exactly the scenario T-941 traced back to
+  duplicate subprocess calls breaking CI call-count assertions. The cache
+  write itself goes to a temp file in the same directory then `os.replace()`
+  — the same shape `id_alloc.py` already uses for the ledger — so a crash or
+  concurrent writer mid-write can no longer leave a truncated JSON cache
+  behind.
 
 ### Added
 - **`id_alloc` VOID support, all-prefix `seed`, and automated check/seed hooks (T-916/WO-0045).** A duplicated or retired ledger id can now be explicitly voided via `python3 -m id_alloc void D-173 --reason "..."` instead of remaining permanently flagged as a duplicate — ids are never renumbered (owner decree 2026-07-31), only voided. `id_alloc check` now ignores duplicates that are cleanly terminated by a trailing `VOID` row while still flagging unexplained repetition, and `cmd_next`/gap-detection continue to count voided rows toward the maximum so a retired number is never re-issued. Voiding an id that was never allocated is refused (exit 3, ledger untouched) rather than silently inserting a number nobody actually took. `cmd_seed` already iterated every prefix in `ALLOWED_PREFIXES` generically; verified idempotent (a second run adds zero rows) and, run against a temp copy of the real vault ledger, now closes the gap for every prefix (`ledger_max >= registry_max` holds for B, D, N, R, T after one seed run — T-915 phase A landed first so `seed` can finally see the `R-` ids at all). Added regression coverage reproducing the real `D-173`/`D-174` incident (a legitimate seed row followed by a hand-written duplicate at a suspiciously round timestamp) and asserting the allocator continues past the true ledger maximum rather than re-issuing either id. Two Claude Code hooks keep this current automatically: a `SessionStart` hook (`hooks/id_alloc_check_on_start.py`) that runs `id_alloc check` and surfaces any duplicated/manually-assigned warnings as additional context (the hook itself always exits `0` — only the wrapped `check` call's exit code reflects ledger health), and a `SessionEnd` hook (`hooks/id_alloc_seed_on_end.py`) that quietly runs `id_alloc seed`. Both hooks apply a short subprocess timeout and swallow all errors so a broken ledger or vault path never hangs or hard-fails a session. This is phase B of the three-phase T-915/T-916 split (see the `id_alloc` allocates `R-`... entry above); `max()` still consults `parse_registry()` until T-915 phase B/C removes it.
