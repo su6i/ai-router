@@ -39,27 +39,29 @@ SERVER_ERROR = -32000  # implementation-defined: the delegate call itself failed
 TOOLS = [
     {
         "name": "delegate_research",
-        "description": ("Ask a fact-lookup or live-data question with real web search. "
-                         "DEFAULT is gemini-flash: the NEWEST Gemini flash the agy "
-                         "channel serves (Google AI Pro subscription), resolved live "
-                         "from `agy models`, never pinned to a generation, using its "
-                         "own grounded web-search tool: $0. "
-                         "grok stays reachable but is PAID and must "
-                         "be named explicitly — it routes via xAI's /v1/responses "
-                         "server-side web_search at ~$0.005/search, 3-6 searches per "
-                         "question, so ~$0.02-$0.05 a call. USE THIS INSTEAD of "
-                         "WebSearch/WebFetch or answering from memory whenever the "
-                         "question is: a current fact, a version/license/API check, or "
-                         "doc verification. Never for bulk chat."),
+        "description": (f"Ask a fact-lookup or live-data question with real web search. "
+                         f"DEFAULT is read live from router_defaults.json (currently "
+                         f"{d.router_default('research')}): the NEWEST Gemini flash the agy "
+                         f"channel serves (Google AI Pro subscription), resolved live "
+                         f"from `agy models`, never pinned to a generation, using its "
+                         f"own grounded web-search tool: $0. "
+                         f"grok stays reachable but is PAID and must "
+                         f"be named explicitly — it routes via xAI's /v1/responses "
+                         f"server-side web_search at ~$0.005/search, 3-6 searches per "
+                         f"question, so ~$0.02-$0.05 a call. USE THIS INSTEAD of "
+                         f"WebSearch/WebFetch or answering from memory whenever the "
+                         f"question is: a current fact, a version/license/API check, or "
+                         f"doc verification. Never for bulk chat."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "question": {"type": "string"},
-                "model": {"type": "string", "default": "gemini-flash",
+                "model": {"type": "string",
                           "enum": ["gemini-flash", "agy", "grok", "grok-4.5"],
-                          "description": "router alias; gemini-flash (default, $0, newest flash "
-                                         "generation live) / agy (newest Gemini Pro, $0) or the "
-                                         "PAID grok (4.3) / grok-4.5"},
+                          "description": f"router alias; default is read live from router_defaults.json "
+                                         f"(currently {d.router_default('research')}, $0, newest flash "
+                                         f"generation live) / agy (newest Gemini Pro, $0) or the "
+                                         f"PAID grok (4.3) / grok-4.5"},
                 "max_output_tokens": {"type": "integer", "default": 500, "maximum": 2000,
                                       "description": "grok only; agy is not token-capped"},
                 "search": {"type": "boolean", "default": True,
@@ -84,8 +86,9 @@ TOOLS = [
                          "implementation over ~40 lines, test files, boilerplate, or "
                          "the same mechanical change across 2+ files. Golden rule: "
                          "call it BEFORE reading the target files — pass paths, not "
-                         "contents. Model ladder: agy (Google AI Pro sub, $0, default) "
-                         "-> flash/pro/minimax (PAID, explicit only) when agy fails "
+                         "contents. Model ladder: default model is read live from "
+                         f"router_defaults.json (currently {d.router_default('worker')}) "
+                         "-> flash/pro/minimax (PAID, explicit only) when default fails "
                          "verify. No automatic fallback between them — a paid "
                          "model must be named explicitly. Always "
                          "pass verify (e.g. 'uv run pytest -q') when the repo has "
@@ -102,7 +105,8 @@ TOOLS = [
                 "allow_write": {"type": "string",
                                 "description": "globs, as --allow-write"},
                 "verify": {"type": "string", "default": ""},
-                "model": {"type": "string", "default": "agy"},
+                "model": {"type": "string",
+                          "description": f"router alias; default is read live from router_defaults.json (currently {d.router_default('worker')})"},
                 "retries": {"type": "integer", "default": 1, "maximum": 2},
                 "workdir": {"type": "string",
                             "description": "absolute path of the repo the files live in"},
@@ -285,7 +289,7 @@ def handle_delegate_research(args: dict) -> dict:
     if not isinstance(max_tool_calls, int) or isinstance(max_tool_calls, bool) \
             or not (0 < max_tool_calls <= 20):
         raise ValueError("'max_tool_calls' must be an integer in (0, 20]")
-    model = d.resolve_model(args.get("model", "gemini-flash"))
+    model = d.resolve_model(args.get("model") or d.router_default("research"))
 
     if d.MODELS[model]["provider"] == "agy_cli":
         # agy searches the web only when it is allowed to use its own tools, so
@@ -346,7 +350,7 @@ def handle_delegate_worker(args: dict) -> dict:
     retries = args.get("retries", 1)
     if not isinstance(retries, int) or isinstance(retries, bool) or not (0 <= retries <= 2):
         raise ValueError("'retries' must be an integer in [0, 2]")
-    model = d.resolve_model(args.get("model", "agy"))
+    model = d.resolve_model(args.get("model") or d.router_default("worker"))
 
     with contextlib.redirect_stdout(io.StringIO()):
         summary = d.worker_delegate(
@@ -549,9 +553,9 @@ def handle_request(msg: dict):
         m = args.get("model")
         if not m:
             if tool == "delegate_research":
-                m = "gemini-flash"
+                m = d.router_default("research")
             elif tool == "delegate_worker":
-                m = "agy"
+                m = d.router_default("worker")
             elif tool == "delegate_agent":
                 m = "None"
         print(f"[req {id_}] {method} {tool} model={m}", file=sys.stderr)

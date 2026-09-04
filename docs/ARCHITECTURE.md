@@ -137,7 +137,7 @@ always overrides the classifier.
 
 | Tier | Models | Assigned work |
 |---|---|---|
-| **FREE** | agy (newest Gemini Pro on the Google AI Pro sub — the alias resolves at call time against the live `agy models` catalog, so no generation is pinned in code; `gemini-flash` is the flash-family equivalent) | Trivial: classification, quick factual lookup, format/JSON conversion, first-draft prose, commit-message drafts. |
+| **FREE** | `gemini-flash` — **the default for research AND code since D-233 (2026-09-04)**, resolved at call time against the live `agy models` catalog (today Gemini 3.8 Flash), so no generation is pinned in code; `agy` remains the pro-family alias. The defaults themselves are config, not code: `<data>/router_defaults.json`. | Everything mechanical: classification, factual lookup, format/JSON conversion, tests, boilerplate, first-draft prose, commit-message drafts. Google's published DeepSWE v1.1 (73.7 %) and Terminal-Bench 2.1 (89.4 %) put 3.8 Flash level with Opus 5 — a claim this repo *measures* rather than believes, via the per-run telemetry below. |
 | **SUBSCRIPTION** | codex, copilot | Paid via existing subscriptions, effectively $0 marginal cost. Used via local CLIs (`codex exec`, `copilot`). Tracked in audit.log with premium request counters to prevent quota abuse. Copilot default model is `gpt-5-mini` (0× premium-request multiplier); harder tasks escalate explicitly to `gpt-5` / `claude-sonnet-4.5`. Multipliers are config, not code: `<data>/copilot_multipliers.json`, unknown models bill at `default` (1×); `r cost` cross-checks the ledger against GitHub's billed Copilot **overage** (billing API, `user` scope) — `$0` while inside quota, non-zero once the premium quota is exceeded. |
 | **CHEAP code** | deepseek-flash (default), deepseek-pro | flash: boilerplate, refactors, unit tests, docstrings, SQL, regex. pro: multi-file logic, debugging flash fails at. |
 | **CHEAP reason (prepaid)** | minimax-m3 | Long-form reasoning/analysis, planning drafts, non-code writeups. **Not** clean codegen (verbose `<think>`). Spend prepaid credit first. |
@@ -145,6 +145,16 @@ always overrides the classifier.
 | **ORCHESTRATOR** | **opus-4.8 (me)** | Architecture, task decomposition, delegation decisions, reviewing/​integrating cheap-model output, final judgment. The conductor — not a grunt. |
 | **HEAVY** | fable-5 | Only the hardest reasoning / long-horizon problems where Opus 4.8 is insufficient. More expensive than Opus → used rarely and deliberately. |
 | **EMBEDDINGS** | e5-small (local) | Cache vectors only. Never used for chat. |
+
+**Every run is measured (D-233).** The ledger carries, per call: tokens in/out/cache,
+`latency_s`, `verify_status`, `attempts`, `self_fix_rounds` — plus `cost_usd_equiv`,
+what the call would have cost on the paid API while riding a $0 subscription channel
+(priced from `<data>/model_prices.json`, source URL and fetch date included). That
+number exists for cross-model comparison only: `cost_usd` stays 0.0 for subscription
+channels, and budget caps and the cost report never see the equivalent. Code *quality*
+has no automatic signal, so the layer-2 reviewer appends its own verdict record
+(`--score`, quality 1-5 plus a one-line note), and `--scorecard` joins all of it into
+one row per model.
 
 Escalation ladder for a coding task:
 `agy (default) → deepseek-flash → deepseek-pro → sonnet-5 → opus-4.8 (me) → fable-5`.

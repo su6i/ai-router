@@ -545,6 +545,103 @@ def copilot_premium_multiplier(model_name: str) -> float:
         return 1.0
 
 
+ROUTER_DEFAULTS_SEED = {
+    "worker_model": "gemini-flash",
+    "agent_model": "gemini-flash",
+    "research_model": "gemini-flash",
+}
+
+
+def router_default(kind: str) -> str:
+    path = DATA_DIR / "router_defaults.json"
+    fallback = ROUTER_DEFAULTS_SEED.get(f"{kind}_model", "gemini-flash")
+    try:
+        if not path.exists():
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(ROUTER_DEFAULTS_SEED, indent=2) + "\n")
+        data = json.loads(path.read_text())
+        val = data.get(f"{kind}_model")
+        if isinstance(val, str) and val:
+            return val
+        return fallback
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
+MODEL_PRICES_SEED = {
+    "gemini-3.8-flash": {
+        "in": 0.75, "out": 3.75, "cached_in": 0.075,
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "fetched_at": "2026-09-04",
+        "note": "standard tier, 'through 2026-12-31' pricing column",
+    },
+    "gemini-3.7-flash": {
+        "in": 0.75, "out": 3.75, "cached_in": 0.075,
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "fetched_at": "2026-09-04",
+        "note": "standard tier, 'through 2026-12-31' pricing column",
+    },
+    "gemini-3.1-pro-preview": {
+        "in": 2.00, "out": 12.00, "cached_in": 0.20,
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "fetched_at": "2026-09-04",
+        "note": ("no GA price exists for 3.1 Pro; recorded under the preview id. "
+                 "Deliberately NOT matched by a live 'gemini-3.1-pro-<effort>' "
+                 "call id (its suffix-stripped form is 'gemini-3.1-pro', which "
+                 "does not equal this key) — a 3.1 Pro call gets no equiv rather "
+                 "than a guessed price."),
+    },
+}
+
+_EFFORT_SUFFIX_RE = re.compile(r"-(?:high|medium|low)$")
+
+
+def _price_row_id(model_id: str) -> str:
+    """Strip the trailing -high/-medium/-low effort suffix agy model ids carry,
+    e.g. 'gemini-3.8-flash-high' -> 'gemini-3.8-flash'."""
+    return _EFFORT_SUFFIX_RE.sub("", model_id)
+
+
+def compute_cost_equiv(model_id: str, quota_channel: str | None, pin: int | None,
+                        pout: int | None, cache: int = 0) -> tuple[float | None, str | None]:
+    """What the same token counts would have cost on the paid API, for a call
+    that actually rode a $0 Google AI Pro subscription channel. Returns
+    (None, None) — never a guess — when: the call was not on a
+    'google-ai-pro*' channel, the token counts are unknown (pin/pout is
+    None), or no price row matches the (suffix-stripped) model id. Prices
+    live in DATA_DIR/model_prices.json only, seeded from MODEL_PRICES_SEED on
+    first read (same pattern as copilot_multipliers.json/router_defaults.json)
+    — never a price literal at a call site.
+    """
+    if not quota_channel or not quota_channel.startswith("google-ai-pro"):
+        return None, None
+    if pin is None or pout is None:
+        return None, None
+    row_id = _price_row_id(model_id)
+    path = DATA_DIR / "model_prices.json"
+    try:
+        if not path.exists():
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(MODEL_PRICES_SEED, indent=2) + "\n")
+        data = json.loads(path.read_text())
+    except Exception:  # noqa: BLE001
+        data = MODEL_PRICES_SEED
+    row = data.get(row_id)
+    if not isinstance(row, dict):
+        return None, None
+    try:
+        in_price = float(row["in"])
+        out_price = float(row["out"])
+        cached_price = float(row.get("cached_in", in_price))
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    cache = cache or 0
+    cached_slice = min(cache, pin)
+    uncached_slice = max(pin - cached_slice, 0)
+    cost = uncached_slice / 1e6 * in_price + cached_slice / 1e6 * cached_price + pout / 1e6 * out_price
+    return round(cost, 6), row_id
+
+
 
 def is_channel_enabled(channel: str) -> bool:
     env_disabled = os.environ.get("AI_ROUTER_DISABLE_CHANNELS", "")
@@ -1160,7 +1257,8 @@ def cache_prune():
 
 def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
                   cache, cost, dt_s, cached=False, via=None, cache_miss=None,
-                  web_search_calls=None):
+                  web_search_calls=None, cost_usd_equiv=None,
+                  cost_equiv_basis=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1181,6 +1279,10 @@ def _write_audit(model, echoed, rid, session, project, commit, pin, pout,
         rec["cache_miss"] = cache_miss
     if web_search_calls is not None:
         rec["web_search_calls"] = web_search_calls
+    if cost_usd_equiv is not None:
+        rec["cost_usd_equiv"] = cost_usd_equiv
+    if cost_equiv_basis is not None:
+        rec["cost_equiv_basis"] = cost_equiv_basis
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
 
@@ -1243,10 +1345,19 @@ def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
             um.get("cachedContentTokenCount", 0), None)
 
 
-# agy print-mode timeout for the worker backend. Sized like the CLI's own
-# --print-timeout default (5m) — worker tasks are single-file edits, not
-# long agentic explorations (that's agent_delegate's job).
-AGY_WORKER_TIMEOUT_S = 300
+# agy print-mode timeout for the worker backend, overridable with
+# AI_ROUTER_AGY_WORKER_TIMEOUT_S.
+#
+# Was 300 (the CLI's own --print-timeout default) on the theory that worker
+# tasks are single-file edits. Measured 2026-09-04, T-948: seven consecutive
+# dispatches of the same ~140-line module died at exactly 300s with zero
+# output, while the identical task run straight through the CLI SUCCEEDED at
+# **297.5s** — 48k of those tokens were thinking. The cap was not protecting
+# us from a hung channel, it was cutting off work that was about to land, and
+# a killed print-mode call returns nothing at all: the whole run is lost, not
+# degraded. Reasoning models spend minutes before the first byte, so the
+# budget has to be a multiple of the observed think time, not equal to it.
+AGY_WORKER_TIMEOUT_S = int(os.environ.get("AI_ROUTER_AGY_WORKER_TIMEOUT_S", "900"))
 
 AGY_NO_TOOLS_ADDENDUM = (
     "\n\nIMPORTANT: you are running in headless TEXT-ONLY print mode for "
@@ -1781,6 +1892,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
     spec = MODELS[model]
+    _worker_t0 = time.time()
     if spec["provider"] == "agy_cli":
         # agy authenticates via its own CLI session (Google AI Pro
         # subscription) — there is no env-var API key to check.
@@ -1971,11 +2083,16 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
     # the per-patch delta is a summary-only detail.
     audit_written = written + [(p, sz) for p, sz, _ in patched]
     # agy: $0 by subscription, tokens real — NOT cost_unknown (was a stale zero-tokens bug)
+    _worker_latency_s = time.time() - _worker_t0
+    _worker_eq_cost, _worker_eq_basis = compute_cost_equiv(
+        model, spec.get("quota_channel"), total_pin, total_pout, total_cache)
     _write_worker_audit(model, echoed_model, project, commit, audit_written, rejected,
                         verify_cmd, verify_status, attempt, total_cost, via=via,
                         cost_unknown=False, self_fix_rounds=self_fix_rounds, self_fix_outcome=self_fix_outcome,
                         agy_conversation_id=agy_conversation_id, agy_num_turns=agy_num_turns,
-                        agy_duration_s=agy_duration_s, pin=total_pin, pout=total_pout, cache=total_cache)
+                        agy_duration_s=agy_duration_s, pin=total_pin, pout=total_pout, cache=total_cache,
+                        latency_s=_worker_latency_s, cost_usd_equiv=_worker_eq_cost,
+                        cost_equiv_basis=_worker_eq_basis)
 
     return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                                   verify_max_attempts if verify_cmd else max_attempts,
@@ -1987,7 +2104,8 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
                         verify_cmd, verify_status, attempts, cost, via=None,
                         cost_unknown=False, self_fix_rounds=0, self_fix_outcome="skipped",
                         agy_conversation_id=None, agy_num_turns=None, agy_duration_s=None,
-                        pin=0, pout=0, cache=0):
+                        pin=0, pout=0, cache=0, latency_s=None, cost_usd_equiv=None,
+                        cost_equiv_basis=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -2025,6 +2143,12 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
         rec["agy_num_turns"] = agy_num_turns
     if agy_duration_s is not None:
         rec["agy_duration_s"] = agy_duration_s
+    if latency_s is not None:
+        rec["latency_s"] = latency_s
+    if cost_usd_equiv is not None:
+        rec["cost_usd_equiv"] = cost_usd_equiv
+    if cost_equiv_basis is not None:
+        rec["cost_equiv_basis"] = cost_equiv_basis
     with AUDIT.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
 
@@ -2153,9 +2277,11 @@ def _delegate_inner(prompt: str, model: str, session: str = "", system: str = ""
     if cache_key:
         cache_put(cache_key, model, prompt, answer)
 
+    eq_cost, eq_basis = compute_cost_equiv(model, spec.get("quota_channel"), pin, pout, cache)
     _write_audit(model, echoed, rid, session, project, commit, pin, pout,
                  cache, cost, dt_s, cached=False, via=via, cache_miss=cache_miss,
-                 web_search_calls=web_search_calls)
+                 web_search_calls=web_search_calls, cost_usd_equiv=eq_cost,
+                 cost_equiv_basis=eq_basis)
     return answer
 
 
@@ -2206,7 +2332,7 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
             f"|'minimax' if you accept the spend."
         ) from e
 
-def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None, premium_requests=None):
+def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None, premium_requests=None, latency_s=None, cost_usd_equiv=None, cost_equiv_basis=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -2227,6 +2353,12 @@ def _write_agent_audit(model, echoed, project, commit, files_changed_count, veri
         rec["run_id"] = run_id
     if cost_unknown:
         rec["cost_unknown"] = True
+    if latency_s is not None:
+        rec["latency_s"] = latency_s
+    if cost_usd_equiv is not None:
+        rec["cost_usd_equiv"] = cost_usd_equiv
+    if cost_equiv_basis is not None:
+        rec["cost_equiv_basis"] = cost_equiv_basis
     if via is not None:
         rec["via"] = via
     with AUDIT.open("a") as fh:
@@ -2255,7 +2387,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
 
     if runner == "agy":
         try:
-            model_name = resolve_model(model) if model else latest_agy_model("pro", "high")
+            model_name = resolve_model(model) if model else resolve_model(router_default("agent"))
         except ValueError as e:
             raise ValueError(f"Unknown agy model: {model} ({e})") from e
         provider_model = MODELS.get(model_name)
@@ -2476,7 +2608,14 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     else:
         premium_req = None
             
-    _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id, premium_requests=premium_req)
+    # Tokens are deliberately None here, so this always yields (None, None) for
+    # agent mode: the runners stream stdout to a file instead of asking for
+    # --output-format json, so no usage block is ever parsed. Passing an
+    # invented count to make the column populate would put a fabricated number
+    # in the one table we use to compare models. The call stays so the moment
+    # agent mode learns to report usage, one argument change turns it on.
+    _agent_eq_cost, _agent_eq_basis = compute_cost_equiv(model_name, quota_channel, None, None, 0)
+    _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id, premium_requests=premium_req, latency_s=elapsed, cost_usd_equiv=_agent_eq_cost, cost_equiv_basis=_agent_eq_basis)
 
     if timed_out:
         status = "TIMEOUT — process group killed"
@@ -2941,6 +3080,16 @@ def main():
                     help="push the given pinned Telegram dashboard(s) (edits in place)")
     ap.add_argument("--dashboard-dry-run", choices=["inbox", "tasks", "both"], default=None,
                     help="render the given dashboard(s) to stdout — no Telegram API call")
+    # D-233: a reviewer's verdict is the only signal that measures code QUALITY —
+    # verify_status, attempts and self-fix rounds say a run finished, not that its
+    # output was any good. The layer-2 reviewer records one after every delegation.
+    ap.add_argument("--score", action="store_true",
+                    help="record a reviewer verdict for a delegated run (needs --model, --quality)")
+    ap.add_argument("--quality", type=int, default=None, help="--score: reviewer quality, 1-5")
+    ap.add_argument("--score-note", default="", help="--score: one-line justification")
+    ap.add_argument("--task", default="", help="--score: the T-id this verdict belongs to")
+    ap.add_argument("--scorecard", action="store_true",
+                    help="per-model comparison over the ledger (outcome, tokens, latency, real $, equiv $, quality)")
     a = ap.parse_args()
 
     handler = logging.StreamHandler(sys.stderr)
@@ -2955,6 +3104,22 @@ def main():
     if a.cost:
         since = dt.datetime.now().astimezone().isoformat()[:10] if a.today else a.since
         show_cost(since=since, by=a.by)
+        return
+    if a.score:
+        if not a.model or a.quality is None:
+            sys.exit("❌ --score needs --model and --quality (1-5)")
+        import scorecard
+        try:
+            rec = scorecard.record_review_score(AUDIT, a.model, a.quality, a.score_note, a.task)
+        except ValueError as e:
+            sys.exit(f"❌ {e}")
+        print(f"✅ scored {rec['model_asked']} {rec['quality']}/5"
+              + (f" for {rec['task']}" if rec.get("task") else ""))
+        return
+    if a.scorecard:
+        import scorecard
+        since = dt.datetime.now().astimezone().isoformat()[:10] if a.today else a.since
+        print(scorecard.show_scorecard(AUDIT, since=since))
         return
     if a.cache_prune:
         before, after = cache_prune()
@@ -3087,16 +3252,20 @@ def main():
             sys.exit(f"❌ {e}")
         return
 
-    try:
-        model = resolve_model(a.model or "minimax")
-    except ValueError as e:
-        sys.exit(f"❌ {e}")
-
     if a.files:
+        try:
+            model = resolve_model(a.model or router_default("worker"))
+        except ValueError as e:
+            sys.exit(f"❌ {e}")
         print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries,
                               estimate=a.estimate, allow_full_rewrite=a.allow_full_rewrite,
                               session_key=a.session_key or None, self_fix=not a.no_self_fix))
         return
+
+    try:
+        model = resolve_model(a.model or "minimax")
+    except ValueError as e:
+        sys.exit(f"❌ {e}")
 
     use_cache = not a.no_cache
     answer = delegate(prompt, model, a.session, a.system, use_cache=use_cache, estimate=a.estimate,

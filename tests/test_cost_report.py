@@ -71,3 +71,30 @@ def test_cost_report_since_filtering(tmp_path, capsys):
     
     assert "2.000000" in out
     assert "3.000000" not in out # Excludes the first line
+
+
+def test_equiv_cost_never_leaks_into_the_cost_report(tmp_path, capsys):
+    """`cost_usd_equiv` is a comparison number, not money (D-233).
+
+    A subscription call carries a large equivalent price next to a real
+    `cost_usd` of 0.0. The report — and every budget decision downstream of
+    it — must see only the 0.0. Asserting the totals here is what stops a
+    later refactor from quietly summing the shadow column and reporting spend
+    that never happened.
+    """
+    lines = [
+        {"ts": "2026-09-04T12:00:00+02:00", "model_asked": "gemini-3.8-flash-high",
+         "cost_usd": 0.0, "cost_usd_equiv": 12.5, "cost_equiv_basis": "gemini-3.8-flash",
+         "in": 1000, "out": 500, "cache": 0, "mode": "chat", "cached": False,
+         "quota_channel": "google-ai-pro-gemini"},
+        {"ts": "2026-09-04T12:05:00+02:00", "model_asked": "flash",
+         "cost_usd": 0.25, "in": 100, "out": 50, "cache": 0, "mode": "chat", "cached": False},
+    ]
+    d.AUDIT.write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+    d.show_cost()
+    out = capsys.readouterr().out
+
+    assert "12.5" not in out and "12.500000" not in out
+    total_line = [ln for ln in out.splitlines() if ln.startswith("TOTAL")][0]
+    assert "0.250000" in total_line

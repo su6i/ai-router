@@ -641,11 +641,56 @@ discover and use cheap delegation mid-task without anyone remembering to ask.
 
 | Door | Best For | Default Model | Notes |
 | --- | --- | --- | --- |
-| **`delegate_research`** | Fact lookup, live-data checks, doc verification | `gemini-flash` — newest flash the channel serves, resolved live (grounded search, **$0**) | Triage/lookup is a cheap high-throughput call, so it takes the flash family; code generation stays on the pro family (`agy`). Both are $0 on the Google AI Pro subscription — a quality/latency split, not a cost one. Neither is pinned to a generation. Paid `grok` must now be named explicitly (~$0.02–$0.05/call). |
-| **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | `agy` (free, Google AI Pro sub) | Pass known file paths. Generated code never crosses the wire. |
-| **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | `agy` (Gemini Pro) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
+| **`delegate_research`** | Fact lookup, live-data checks, doc verification | from `router_defaults.json` — `gemini-flash`, the newest flash the channel serves, resolved live (grounded search, **$0**) | Live A/B on one-day-old facts (2026-09-04): flash 3/3 correct at **$0**, `grok` 3/3 at **$0.0536**, `deepseek-v4-flash` cannot search at all. Paid `grok` must be named explicitly (~$0.02–$0.05/call). |
+| **`delegate_worker`** | Known files: mechanical changes, tests, boilerplate | from `router_defaults.json` — `gemini-flash` (D-233) | Pass known file paths. Generated code never crosses the wire. |
+| **`delegate_agent`** | Unknown files: multi-step find+fix, exploration | from `router_defaults.json` — `gemini-flash` (D-233) | Wraps `agy` headless or `codewhale exec`. Returns a short summary. |
 | **`send_to_owner`** | Delivery of files directly to owner's Telegram | N/A | Bypasses context limits, useful for final WO deliverables. |
 | **`dashboard_push`** | Refresh the two pinned Telegram dashboards | N/A | Edits in place; returns a short status line only, never the dashboard body. |
+
+### Defaults are configuration, not code (D-233)
+
+Since 2026-09-04 the default model for all three doors is **Gemini 3.8 Flash**,
+reached through the live alias `gemini-flash` — the newest flash the agy catalog
+serves, never a pinned generation. The defaults themselves live in
+`<vault>/data/router_defaults.json`:
+
+```json
+{"worker_model": "gemini-flash", "agent_model": "gemini-flash", "research_model": "gemini-flash"}
+```
+
+Changing the ladder is a config edit, not a commit. `router_default(kind)` falls back
+to the built-in map when that file is missing or corrupt, so the router never fails
+to start over a defaults file. Explicit `model=` on a call always wins.
+
+### Was the default worth it? — `--scorecard`
+
+A default nobody measures is a guess with a config file in front of it, so every run
+leaves comparable evidence in the ledger: tokens in/out/cache, `latency_s`,
+`verify_status`, `attempts`, `self_fix_rounds` — and `cost_usd_equiv`, **what the same
+call would have cost on the paid API while it actually rode the $0 subscription**.
+Prices come from `<vault>/data/model_prices.json` (Google's published list prices, with
+their source URL and fetch date), never from a literal in the code. `cost_usd_equiv` is
+a comparison number only: `cost_usd` stays 0.0, budget caps and `r cost` never see it.
+
+None of those signals measures whether the code was any *good* — they say a run
+finished. So the reviewer records a verdict of their own:
+
+```bash
+AI_ROUTER_REVIEWER=architect@ai-router \
+  python src/delegate.py --score --model gemini-3.8-flash-high --quality 4 \
+  --score-note "followed the spec, no repairs" --task T-948
+python src/delegate.py --scorecard
+```
+
+Set `AI_ROUTER_REVIEWER`: the verdict is the only subjective field in the ledger, so
+each one is signed (`unattributed` when the variable is unset). This is not
+theoretical — a worker with shell access wrote itself a 4/5 for an unrelated model and
+task while this feature was being built.
+
+`--scorecard` prints one row per model: runs, verify-pass %, avg attempts, self-fix
+rate, avg latency, tokens, real $, equiv $, and average reviewer quality. That table is
+how a claim like "this flash model codes like Opus 5" gets settled here — with our own
+runs, not a vendor's benchmark.
 
 Register it once, user scope, so it's available in every project:
 
