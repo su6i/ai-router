@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -108,6 +109,79 @@ class ProviderError(Exception):
         self.model = model
         self.status = status
         self.short_reason = short_reason
+
+
+# The install dirs `_cli_bin` falls back to when PATH is thin, in search order.
+# Defined once: the resolver walks it and the NOT_FOUND message reports it, and a
+# second copy would let the two drift apart silently.
+_CLI_FALLBACK_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.bun/bin", "/usr/bin")
+
+
+def _cli_bin(name: str) -> str | None:
+    """Resolve the absolute path to an external CLI binary (e.g. "agy", "codex").
+
+    The MCP server that runs this module is spawned by the Claude Code host,
+    not by a login shell, so it does NOT inherit a login PATH. A bare binary
+    name (e.g. `["agy", "-p", ...]` in subprocess.run/Popen) silently resolves
+    to NOT_FOUND in that environment even though the same name works fine in
+    an interactive shell. This resolver is the single source of truth for
+    finding these binaries; every call site must use it instead of relying on
+    the inherited PATH.
+
+    Resolution order, first hit wins:
+      1. env override `AI_ROUTER_<NAME>_BIN` (name upper-cased, e.g.
+         `AI_ROUTER_AGY_BIN` for name="agy") — used as-is only if it points at
+         an existing, executable file; otherwise treated as unset (falls
+         through to the next step rather than erroring).
+      2. `shutil.which(name)` — normal PATH lookup, works when PATH is not
+         thin (e.g. interactive/dev shells).
+      3. a fixed list of common install directories, each checked with
+         `os.access(p, os.X_OK)`: `~/.local/bin`, `/opt/homebrew/bin`,
+         `/usr/local/bin`, `~/.bun/bin`, `/usr/bin`.
+
+    Returns the absolute path as a string, or None when nothing matched in
+    any of the three steps.
+    """
+    env_var = f"AI_ROUTER_{name.upper()}_BIN"
+    override = os.environ.get(env_var)
+    if override and os.path.isfile(override) and os.access(override, os.X_OK):
+        return override
+
+    which_hit = shutil.which(name)
+    if which_hit:
+        return which_hit
+
+    for d in _CLI_FALLBACK_DIRS:
+        candidate = os.path.join(os.path.expanduser(d), name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    return None
+
+
+def _cli_bin_search_dirs() -> list[str]:
+    """The fallback install dirs `_cli_bin` checks, expanded, in search order.
+
+    Exists so error messages and tests can report/assert the exact search
+    list without duplicating it.
+    """
+    return [os.path.expanduser(d) for d in _CLI_FALLBACK_DIRS]
+
+
+def _require_cli_bin(name: str) -> str:
+    """`_cli_bin`, but raises the channel's NOT_FOUND instead of returning None.
+
+    Every call site that cannot proceed without the binary uses this, so the
+    error text — which env var fixes it, which directories were searched — is
+    written once rather than restated per channel.
+    """
+    path = _cli_bin(name)
+    if path is None:
+        env_var = f"AI_ROUTER_{name.upper()}_BIN"
+        raise ProviderError(name, "NOT_FOUND",
+            f"{name} binary not found (checked ${env_var}, PATH, and {_cli_bin_search_dirs()}). "
+            f"Set {env_var} to the {name} binary's absolute path.")
+    return path
 
 # xAI's /v1/responses endpoint reports its OWN billed cost in
 # usage.cost_in_usd_ticks (1 tick = 1e-10 USD) — this is ground truth
@@ -369,7 +443,7 @@ def agy_served_models(max_age_s: int = AGY_CATALOG_TTL_S) -> list[str]:
                      resolved_fetched_at=time.time(), models=cached)
         return cached
     try:
-        r = subprocess.run(["agy", "models"], capture_output=True, text=True,
+        r = subprocess.run([_cli_bin("agy") or "agy", "models"], capture_output=True, text=True,
                            timeout=AGY_CATALOG_TIMEOUT_S, check=False)
         fresh = parse_agy_models(r.stdout) if r.returncode == 0 else []
     except (subprocess.TimeoutExpired, OSError):
@@ -1218,7 +1292,8 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     _LAST_AGY_NUM_TURNS = None
     _LAST_AGY_DURATION_S = None
 
-    cmd = ["agy", "-p", prompt, "--model", model_name, "--mode", "plan",
+    agy_bin = _require_cli_bin("agy")
+    cmd = [agy_bin, "-p", prompt, "--model", model_name, "--mode", "plan",
            "--dangerously-skip-permissions", "--output-format", "json",
            "--print-timeout", f"{timeout_s}s"]
     # No --effort, deliberately. The effort level is already baked into the
@@ -1234,7 +1309,11 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     except subprocess.TimeoutExpired:
         raise ProviderError("agy", "TIMEOUT", f"print mode exceeded {timeout_s}s") from None
     except FileNotFoundError:
-        raise ProviderError("agy", "NOT_FOUND", "agy binary not found in PATH") from None
+        # _require_cli_bin resolved a path above, so reaching here means it was
+        # unlinked between the check and the exec — report it the same way.
+        raise ProviderError("agy", "NOT_FOUND",
+            f"agy binary vanished at {agy_bin} between resolution and exec. "
+            "Set AI_ROUTER_AGY_BIN to the agy binary's absolute path.") from None
 
     if r.returncode != 0:
         reason = (r.stderr or r.stdout or "").strip()[:500]
@@ -2282,7 +2361,8 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         # No --effort here either, same reason as call_agy_print(): the effort
         # level is part of the model id, and agy rejects the flag outright for
         # the Claude ids. `provider_model["api"]` already carries it.
-        cmd = ["agy", "-p", task, "--model", provider_model["api"], "--mode", "accept-edits",
+        agy_bin = _require_cli_bin("agy")
+        cmd = [agy_bin, "-p", task, "--model", provider_model["api"], "--mode", "accept-edits",
                "--dangerously-skip-permissions", "--add-dir", str(project_root),
                "--print-timeout", f"{timeout_s}s"]
     elif runner == "codewhale":
@@ -2297,15 +2377,18 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         # otherwise the model name is sent to whatever provider is active.
         cw_model = "deepseek-v4-flash" if model_name == "flash" else "minimax-m3"
         run_env = {**os.environ, "CODEWHALE_PROVIDER": "deepseek" if model_name == "flash" else "minimax"}
-        cmd = ["codewhale", "-C", str(project_root), "--model", cw_model,
+        codewhale_bin = _require_cli_bin("codewhale")
+        cmd = [codewhale_bin, "-C", str(project_root), "--model", cw_model,
                "exec", "--auto", "--json", "--max-turns", "50", task]
     elif runner == "codex":
         # Workdir flag is -C/--cd per openai/codex docs (grok-verified
         # 2026-07-18); binary not installed here, so this runner is
         # DELIVERED-UNSMOKED until a live `codex exec --help` confirms it.
-        cmd = ["codex", "exec", "--cd", str(project_root), task]
+        codex_bin = _require_cli_bin("codex")
+        cmd = [codex_bin, "exec", "--cd", str(project_root), task]
     elif runner == "copilot":
-        cmd = ["copilot", "-p", task, "--allow-all-tools", "--model", model_name]
+        copilot_bin = _require_cli_bin("copilot")
+        cmd = [copilot_bin, "-p", task, "--allow-all-tools", "--model", model_name]
         
     t0 = time.time()
     timed_out = False
@@ -2367,7 +2450,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
             # --since takes durations like 30m; 1m would miss a long run).
             since = f"{int(elapsed // 60) + 2}m"
             try:
-                r = subprocess.run(["codewhale", "metrics", "--json", "--since", since], capture_output=True, text=True, timeout=5)  # noqa: PLW1510
+                r = subprocess.run([_cli_bin("codewhale") or "codewhale", "metrics", "--json", "--since", since], capture_output=True, text=True, timeout=5)  # noqa: PLW1510
                 if r.returncode == 0:
                     data = json.loads(r.stdout)
                     if "cost_usd" in data:
@@ -2723,7 +2806,6 @@ def route_task(task_note: dict, verify_cmd: str = "") -> str:
     return report
 
 def cmd_channels(enable_channel=None, disable_channel=None):
-    import shutil
     channels_json = DATA_DIR / "channels.json"
     
     if enable_channel or disable_channel:
@@ -2771,13 +2853,13 @@ def cmd_channels(enable_channel=None, disable_channel=None):
         auth_str = data.get(ch, {}).get("notes", "")
         
         if ch in ("agy", "codewhale", "codex", "copilot"):
-            bin_path = shutil.which(ch)
+            bin_path = _cli_bin(ch)
             if bin_path:
                 bin_str = bin_path
                 
                 if ch == "codex":
                     try:
-                        r = subprocess.run(["codex", "login", "status"], capture_output=True, text=True, timeout=2)  # noqa: PLW1510
+                        r = subprocess.run([_cli_bin("codex") or "codex", "login", "status"], capture_output=True, text=True, timeout=2)  # noqa: PLW1510
                         if r.returncode == 0:
                             auth_str = r.stdout.strip().split("\n")[0]
                     except Exception:  # noqa: BLE001, S110
