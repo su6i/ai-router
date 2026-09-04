@@ -716,6 +716,7 @@ def test_worker_session_fresh_persists_id(tmp_path, monkeypatch):
 
 
 def test_worker_session_self_healing(tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
     d._set_session_conversation("stale-session", "bad-conv-id")
     
     calls = []
@@ -776,8 +777,9 @@ def test_worker_sessions_clear_cli(tmp_path):
 
 
 def test_agy_self_fix_triggers_and_sends_short_delta(tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
     captured_argv = []
-    
+
     class FakeCompleted:
         returncode = 0
         stdout = json.dumps({
@@ -822,6 +824,7 @@ def test_agy_self_fix_triggers_and_sends_short_delta(tmp_path, monkeypatch):
 
 
 def test_agy_self_fix_capped_at_one_round(tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
     captured_argv = []
     class FakeCompleted:
         returncode = 0
@@ -854,6 +857,7 @@ def test_agy_self_fix_capped_at_one_round(tmp_path, monkeypatch):
 
 
 def test_agy_self_fix_disabled_via_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
     captured_argv = []
     class FakeCompleted:
         returncode = 0
