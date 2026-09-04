@@ -568,7 +568,7 @@ Channels can be enabled/disabled by the `channels.json` file in the data dir (`~
 
 When nothing matches, the raised error names the env var that would fix it and every directory that was searched. The channel table above reports the exact same path via the same resolver, so the table and the dispatcher can never disagree about where a binary is.
 
-Model ladder: the default worker channel stays `agy` (Gemini 3.1 Pro, Google AI Pro subscription). The `copilot` runner defaults to `gpt-5-mini`, which has a **0× premium-request multiplier** on Copilot Pro — it never consumes the 300 premium requests/month. Escalate harder tasks explicitly with `--model gpt-5` or `--model claude-sonnet-4.5`; those calls are counted against `copilot_premium_requests_month`.
+Model ladder: the default worker channel stays `agy` (newest Gemini Pro on the Google AI Pro subscription, resolved live — no generation is pinned here or in code). The `copilot` runner defaults to `gpt-5-mini`, which has a **0× premium-request multiplier** on Copilot Pro — it never consumes the 300 premium requests/month. Escalate harder tasks explicitly with `--model gpt-5` or `--model claude-sonnet-4.5`; those calls are counted against `copilot_premium_requests_month`.
 
 Premium-request multipliers are **not hardcoded**: they live in `copilot_multipliers.json` in the data dir (seeded on first copilot call), because GitHub changes rates without notice and exposes **no API** for them (personal-plan `seat_info`/usage endpoints are org-only and 404; the internal token exchange rejects CLI tokens — live-checked 2026-07-19). Unknown models bill at the file's `default` (1×) — a model rename can never silently look free. Each call's multiplier is logged as `premium_requests`. As an independent check, `r cost` also queries GitHub's billing API for the **Copilot overage actually billed this month** (requires `gh auth refresh -h github.com -s user` once): within the monthly quota this is `$0`, and a non-zero value means the premium quota was exceeded and real money is being spent — the cue to reconcile `copilot_multipliers.json`.
 
@@ -758,7 +758,7 @@ From `MODELS` in `src/delegate.py` (cost per 1M tokens):
 | `pro` | `deepseek-v4-pro` | DeepSeek | $0.435 / $0.87 | Reasoner — escalation target when `flash` fails or needs deeper reasoning |
 | `grok` | `grok-4.3` | xAI | $1.25 / $2.50 (+ $0.20 cached in) | Second opinion / current-events knowledge — PAID `delegate_research` escape hatch, explicit only (default is `agy`), not for routine work |
 | `grok-4.5` | `grok-4.5` | xAI | $2.00 / $6.00 (+ $0.30 cached in) | Opt-in only — a live A/B found 3.6x the cost of `grok` for equal-or-worse research quality |
-| `agy` | `Gemini 3.1 Pro (High)` | Google AI Pro sub (local `agy`) | $0 / $0 | Default coding worker — mechanical changes, tests, boilerplate |
+| `agy` | newest `gemini-*-pro-high` served (alias, resolved live) | Google AI Pro sub (local `agy`) | $0 / $0 | Default coding worker — mechanical changes, tests, boilerplate |
 
 Priority order and full routing rationale (MiniMax credit-exhaustion
 fallback, why Claude is never in this router, provider vs. subscription-CLI
