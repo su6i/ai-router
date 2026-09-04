@@ -200,3 +200,35 @@ def isolate_vault(tmp_path_factory):
         m.setattr(ingest, "DATA_DIR", data_dir)
 
         yield
+
+
+# External CLI stubs (T-946 CI fix). Host-independent binary resolution:
+# ensures test suite does not depend on host-installed CLIs.
+_CLI_STUB_NAMES = ("agy", "codewhale", "codex", "copilot")
+
+
+@pytest.fixture(scope="session")
+def cli_stubs_dir(tmp_path_factory):
+    """Create directory with executable stub files for external CLIs."""
+    stubs = tmp_path_factory.mktemp("cli_stubs")
+    for name in _CLI_STUB_NAMES:
+        p = stubs / name
+        p.write_text("#!/bin/sh\nexit 0\n")
+        os.chmod(p, 0o755)
+    return stubs
+
+
+@pytest.fixture(autouse=True)
+def stub_cli_bins(cli_stubs_dir, monkeypatch, request):
+    """Point AI_ROUTER_<NAME>_BIN to host-independent stub executables.
+
+    _cli_bin() honours AI_ROUTER_<NAME>_BIN first when it points to an
+    existing executable file. Pointing each CLI to an executable stub ensures
+    resolution succeeds deterministically on any host (e.g. CI runners without
+    agy installed). The stub files are never executed because tests reaching
+    process execution mock subprocess.run.
+    """
+    if "test_delegate_agent" in request.node.nodeid:
+        return
+    for name in _CLI_STUB_NAMES:
+        monkeypatch.setenv(f"AI_ROUTER_{name.upper()}_BIN", str(cli_stubs_dir / name))
