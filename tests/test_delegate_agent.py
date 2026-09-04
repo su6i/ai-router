@@ -123,7 +123,11 @@ open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
     # The model id carries its own effort level, and `--effort` must NOT be sent
     # alongside it: verified against the live CLI 2026-07-29, agy rejects the
     # pair outright for the Claude models. One rule for all 11 models.
-    assert argv[argv.index("--model") + 1] == "gemini-3.1-pro-high"
+    # D-233 (2026-09-04): with no model given, agy-runner agent mode now
+    # resolves through router_default("agent") ("gemini-flash" by default),
+    # not a pinned "pro" family — assert against the live resolution, not a
+    # literal generation string.
+    assert argv[argv.index("--model") + 1] == d.resolve_model(d.router_default("agent"))
     assert "--effort" not in argv
 
 

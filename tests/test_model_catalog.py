@@ -242,3 +242,74 @@ def test_agy_catalog_write_failure_falls_back_without_raising(monkeypatch, tmp_p
     assert not cache_file.exists(), "a failed os.replace must never leave a partial cache file in place"
     leftover_tmp = list(tmp_path.glob(".agy-catalog-*.tmp"))
     assert leftover_tmp == [], f"leftover temp file(s) after failed write: {leftover_tmp}"
+
+
+def test_router_default_absent_creates_file_and_returns_defaults(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(delegate, "DATA_DIR", data_dir)
+    defaults_file = data_dir / "router_defaults.json"
+    assert not defaults_file.exists()
+
+    for kind in ("worker", "agent", "research"):
+        assert delegate.router_default(kind) == "gemini-flash"
+
+    assert defaults_file.exists()
+    content = json.loads(defaults_file.read_text())
+    assert content == {
+        "worker_model": "gemini-flash",
+        "agent_model": "gemini-flash",
+        "research_model": "gemini-flash",
+    }
+
+
+def test_router_default_corrupt_or_wrong_shape_falls_back(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(delegate, "DATA_DIR", data_dir)
+    defaults_file = data_dir / "router_defaults.json"
+
+    # Corrupt JSON
+    defaults_file.write_text("{corrupt json")
+    assert delegate.router_default("worker") == "gemini-flash"
+    assert delegate.router_default("agent") == "gemini-flash"
+    assert delegate.router_default("research") == "gemini-flash"
+
+    # Wrong shape: array
+    defaults_file.write_text("[]")
+    assert delegate.router_default("worker") == "gemini-flash"
+
+    # Wrong shape: non-dict primitive
+    defaults_file.write_text('"invalid"')
+    assert delegate.router_default("worker") == "gemini-flash"
+
+    # Wrong value type
+    defaults_file.write_text(json.dumps({"worker_model": 123}))
+    assert delegate.router_default("worker") == "gemini-flash"
+
+    # Missing key
+    defaults_file.write_text(json.dumps({"other_key": "val"}))
+    assert delegate.router_default("worker") == "gemini-flash"
+
+
+def test_worker_mcp_and_agent_default_resolve_to_newest_flash(monkeypatch):
+    sys.path.insert(0, str(Path(__file__).parent.parent / "mcp"))
+    import server
+
+    newest_flash = delegate.latest_agy_model("flash", "high")
+    assert "flash" in newest_flash
+
+    # 1. Agent-mode default when runner == "agy" and model is None resolves to newest flash
+    agent_default = delegate.resolve_model(delegate.router_default("agent"))
+    assert agent_default == newest_flash
+
+    # 2. Worker MCP handler when model argument is omitted resolves to newest flash
+    worker_calls = []
+
+    def fake_worker_delegate(prompt, model, *args, **kwargs):
+        worker_calls.append(model)
+        return "summary"
+
+    monkeypatch.setattr(delegate, "worker_delegate", fake_worker_delegate)
+    server.handle_delegate_worker({"prompt": "test prompt", "workdir": "/tmp"})
+    assert worker_calls == [newest_flash]
