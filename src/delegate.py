@@ -1416,7 +1416,8 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
         cmd.extend(["--conversation", conversation_id])
     try:
         r = subprocess.run(cmd, cwd=str(project_root), capture_output=True,  # noqa: PLW1510
-                           text=True, timeout=timeout_s + 30)
+                           text=True, timeout=timeout_s + 30,
+                           env={**os.environ, "AI_ROUTER_IN_WORKER": "1"})
     except subprocess.TimeoutExpired:
         raise ProviderError("agy", "TIMEOUT", f"print mode exceeded {timeout_s}s") from None
     except FileNotFoundError:
@@ -2471,7 +2472,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     stdout_fd, stdout_path = tempfile.mkstemp(dir=str(DATA_DIR), prefix="agent_", suffix=".log")
     os.close(stdout_fd)
 
-    run_env = None
+    run_env = {**os.environ, "AI_ROUTER_IN_WORKER": "1"}
     if runner == "agy":
         # agy print mode kills any run whose next response exceeds
         # --print-timeout (default 5m) — size it to our own timeout.
@@ -2508,7 +2509,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         # the provider is chosen via CODEWHALE_PROVIDER (per `auth status`) —
         # otherwise the model name is sent to whatever provider is active.
         cw_model = "deepseek-v4-flash" if model_name == "flash" else "minimax-m3"
-        run_env = {**os.environ, "CODEWHALE_PROVIDER": "deepseek" if model_name == "flash" else "minimax"}
+        run_env["CODEWHALE_PROVIDER"] = "deepseek" if model_name == "flash" else "minimax"
         codewhale_bin = _require_cli_bin("codewhale")
         cmd = [codewhale_bin, "-C", str(project_root), "--model", cw_model,
                "exec", "--auto", "--json", "--max-turns", "50", task]
@@ -3106,6 +3107,10 @@ def main():
         show_cost(since=since, by=a.by)
         return
     if a.score:
+        if os.environ.get("AI_ROUTER_IN_WORKER"):
+            sys.exit("❌ --score refused: this process is running inside a delegated worker "
+                      "session (AI_ROUTER_IN_WORKER is set) — a worker may not grade its own "
+                      "output. Run --score from the reviewing session instead.")
         if not a.model or a.quality is None:
             sys.exit("❌ --score needs --model and --quality (1-5)")
         import scorecard

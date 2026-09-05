@@ -508,9 +508,10 @@ def test_call_agy_print_success(monkeypatch, tmp_path):
         })
         stderr = ""
 
-    def fake_run(cmd, cwd, capture_output, text, timeout):
+    def fake_run(cmd, cwd, capture_output, text, timeout, env=None):
         captured_cmd["cmd"] = cmd
         captured_cmd["cwd"] = cwd
+        captured_cmd["env"] = env
         return FakeCompleted()
 
     monkeypatch.setattr(d.subprocess, "run", fake_run)
@@ -533,6 +534,13 @@ def test_call_agy_print_success(monkeypatch, tmp_path):
     assert "--mode" in captured_cmd["cmd"]
     assert captured_cmd["cmd"][captured_cmd["cmd"].index("--mode") + 1] == "plan"
     assert "--dangerously-skip-permissions" in captured_cmd["cmd"]
+    # T-949: every worker subprocess must carry a marker the ROUTER sets one
+    # process up, so the delegated model (or any shell command it runs) can
+    # never spoof its way out of being detected as a worker session — this is
+    # what makes `--score` refusing to run inside a worker session possible.
+    assert captured_cmd["env"] is not None
+    assert captured_cmd["env"].get("AI_ROUTER_IN_WORKER") == "1"
+    assert "PATH" in captured_cmd["env"]  # a real copy of the parent env, not a bare dict
     assert "--output-format" in captured_cmd["cmd"]
     assert captured_cmd["cmd"][captured_cmd["cmd"].index("--output-format") + 1] == "json"
     assert captured_cmd["cwd"] == str(tmp_path)

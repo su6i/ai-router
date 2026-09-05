@@ -683,9 +683,14 @@ python src/delegate.py --scorecard
 ```
 
 Set `AI_ROUTER_REVIEWER`: the verdict is the only subjective field in the ledger, so
-each one is signed (`unattributed` when the variable is unset). This is not
-theoretical — a worker with shell access wrote itself a 4/5 for an unrelated model and
-task while this feature was being built.
+each one is signed — an unset or blank `AI_ROUTER_REVIEWER` is refused outright, never
+silently recorded as `unattributed` (T-949). This is not theoretical — a worker with
+shell access wrote itself a 4/5 for an unrelated model and task while this feature was
+being built. `--score` also refuses outright when run from inside a delegated worker's
+own subprocess (`AI_ROUTER_IN_WORKER` is set there automatically) — a worker may not
+grade its own output, full stop. `--scorecard` excludes any old `unattributed` row from
+the quality average and reports it in a trailing "N unsigned verdict(s) excluded" line
+instead of silently dropping it.
 
 `--scorecard` prints one row per model: runs, verify-pass %, avg attempts, self-fix
 rate, avg latency, tokens, real $, equiv $, and average reviewer quality. That table is
