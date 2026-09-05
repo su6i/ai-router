@@ -23,7 +23,8 @@ def test_quality_range_constants():
     assert (sc.QUALITY_MIN, sc.QUALITY_MAX) == (1, 5)
 
 
-def test_record_review_score_appends_and_returns_record(tmp_path):
+def test_record_review_score_appends_and_returns_record(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_ROUTER_REVIEWER", "test-reviewer")
     audit_file = tmp_path / "audit.log"
     rec1 = sc.record_review_score(audit_file, model="model-a", quality=4, note="looks good", task="T-100")
     assert rec1["mode"] == "review"
@@ -31,6 +32,7 @@ def test_record_review_score_appends_and_returns_record(tmp_path):
     assert rec1["quality"] == 4
     assert rec1["note"] == "looks good"
     assert rec1["task"] == "T-100"
+    assert rec1["by"] == "test-reviewer"
     assert "ts" in rec1
 
     rec2 = sc.record_review_score(audit_file, model="model-b", quality=5, note="great")
@@ -39,6 +41,7 @@ def test_record_review_score_appends_and_returns_record(tmp_path):
     assert rec2["quality"] == 5
     assert rec2["note"] == "great"
     assert rec2["task"] == ""
+    assert rec2["by"] == "test-reviewer"
     assert "ts" in rec2
 
     lines = audit_file.read_text(encoding="utf-8").strip().splitlines()
@@ -47,7 +50,8 @@ def test_record_review_score_appends_and_returns_record(tmp_path):
     assert json.loads(lines[1]) == rec2
 
 
-def test_record_review_score_creates_parent_dirs(tmp_path):
+def test_record_review_score_creates_parent_dirs(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_ROUTER_REVIEWER", "test-reviewer")
     audit_file = tmp_path / "sub" / "deep" / "dir" / "audit.log"
     assert not audit_file.parent.exists()
     rec = sc.record_review_score(audit_file, model="model-a", quality=3, note="testing dirs")
@@ -129,7 +133,7 @@ def test_absent_column_shows_dash_not_zero(tmp_path):
     assert "0" not in row[equiv_idx]
 
 
-def test_review_records_feed_quality_only_not_run_count(tmp_path):
+def test_review_records_feed_quality_only_not_run_count(tmp_path, monkeypatch):
     audit_file = _write_ledger(
         tmp_path / "audit.log",
         [
@@ -144,6 +148,7 @@ def test_review_records_feed_quality_only_not_run_count(tmp_path):
                 "quality": 2,
                 "note": "needs work",
                 "ts": "2026-09-01T11:00:00",
+                "by": "reviewer-x",
             },
         ],
     )
@@ -159,6 +164,7 @@ def test_review_records_feed_quality_only_not_run_count(tmp_path):
     assert "(n=1)" in row_before[quality_idx]
     avg_before = float(row_before[quality_idx].split()[0])
 
+    monkeypatch.setenv("AI_ROUTER_REVIEWER", "reviewer-y")
     sc.record_review_score(audit_file, model="test-model", quality=5, note="much better now")
 
     out_after = sc.show_scorecard(audit_file)

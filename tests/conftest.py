@@ -97,6 +97,19 @@ def no_live_telegram(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+# T-949: AI_ROUTER_REVIEWER (the reviewing session's identity) and
+# AI_ROUTER_IN_WORKER (the delegated-worker marker) are both plausibly set in
+# a real dev/CI shell -- the reviewing session sets AI_ROUTER_REVIEWER for
+# real --score calls. A test that relies on either being ABSENT must not
+# inherit whatever the host happens to have (same T-946 class as
+# no_live_telegram above); each test controls these two explicitly via its
+# own monkeypatch.setenv/delenv.
+@pytest.fixture(autouse=True)
+def no_host_score_guard_env(monkeypatch):
+    for var in ("AI_ROUTER_REVIEWER", "AI_ROUTER_IN_WORKER"):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def reset_e5_singleton():
     """Undo the process-wide model cache between tests.

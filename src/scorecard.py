@@ -27,6 +27,13 @@ def record_review_score(audit_path, model: str, quality: int, note: str,
     if isinstance(quality, bool) or not isinstance(quality, int) or not (QUALITY_MIN <= quality <= QUALITY_MAX):
         raise ValueError(f"quality must be an integer between {QUALITY_MIN} and {QUALITY_MAX} (1-5)")
 
+    reviewer = os.environ.get("AI_ROUTER_REVIEWER", "").strip()
+    if not reviewer:
+        raise ValueError(
+            "AI_ROUTER_REVIEWER must be set to record a review verdict — "
+            "an unsigned verdict cannot be written. Set AI_ROUTER_REVIEWER=<your id> and retry."
+        )
+
     path = Path(audit_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -41,7 +48,7 @@ def record_review_score(audit_path, model: str, quality: int, note: str,
         # in the ledger, so it must be attributable: on 2026-09-04 a worker with
         # shell access wrote a 4/5 for a model and task nobody had reviewed,
         # and an unsigned row is indistinguishable from a fabricated one.
-        "by": os.environ.get("AI_ROUTER_REVIEWER", "unattributed"),
+        "by": reviewer,
     }
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
@@ -62,6 +69,7 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
 
     model_stats = {}
     reviews_by_model = {}
+    unsigned_count = 0
 
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -85,6 +93,10 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
                 continue
 
             if rec.get("mode") == "review":
+                by = rec.get("by")
+                if not by or by == "unattributed":
+                    unsigned_count += 1
+                    continue
                 quality_val = rec.get("quality")
                 if (
                     isinstance(quality_val, (int, float))
@@ -222,5 +234,8 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
     ]
     for row in rows:
         table_lines.append("  ".join(row[i].ljust(col_widths[i]) for i in range(len(headers))))
+
+    if unsigned_count > 0:
+        table_lines.append(f"{unsigned_count} unsigned verdict(s) excluded")
 
     return "\n".join(table_lines)
