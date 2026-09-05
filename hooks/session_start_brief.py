@@ -263,14 +263,15 @@ def _pointer_tail(slug: str) -> str:
     return (f"Fallback sources (read only if the brief above is insufficient): "
             f"{hd} (SESSION.md) and latest handoff {last}.")
 
-def build_additional_context(cwd: str) -> str:
+def build_additional_context(cwd: str, data: dict | None = None) -> str:
     slug = repo_slug(cwd)
+    block0 = _transcript_block(data or {}, cwd)
     block1 = _todo_open_items_block(slug)
     block2 = _get_continuity_block(slug)
     block3 = _inbox_block(slug)
     block4 = _pointer_tail(slug)
     
-    blocks = [b for b in (block1, block2, block3, block4) if b]
+    blocks = [b for b in (block0, block1, block2, block3, block4) if b]
     joined = "\n\n".join(blocks)
     
     if len(joined) > TOTAL_CAP:
@@ -278,10 +279,53 @@ def build_additional_context(cwd: str) -> str:
         if block2:
             new_len = max(0, len(block2) - overflow)
             block2 = block2[:new_len]
-            blocks = [b for b in (block1, block2, block3, block4) if b]
+            blocks = [b for b in (block0, block1, block2, block3, block4) if b]
             joined = "\n\n".join(blocks)
             
     return joined[:TOTAL_CAP]
+
+def _transcript_block(data: dict, cwd: str) -> str:
+    """Where THIS session's raw JSONL log lives, and the previous one's.
+
+    After a /clear the agent keeps only what SESSION.md happened to capture.
+    Everything else — the exact command that failed, the number nobody wrote
+    down — is still in the raw transcript, so the path has to arrive in
+    context automatically. Asking the agent to remember where it lives has
+    already failed repeatedly; this block is the systemic fix.
+    """
+    path = data.get("transcript_path") or ""
+    sid = data.get("session_id") or ""
+    proj_dir = None
+
+    if path:
+        proj_dir = Path(path).parent
+    else:
+        # Fall back to the on-disk layout: ~/.claude/projects/<cwd with every
+        # non-alphanumeric char replaced by ->/<session-id>.jsonl — verified
+        # against the real directory, where "/@-" becomes "---".
+        slug = re.sub(r"[^A-Za-z0-9]", "-", cwd or os.getcwd())
+        proj_dir = Path.home() / ".claude" / "projects" / slug
+        if sid:
+            path = str(proj_dir / f"{sid}.jsonl")
+
+    lines = ["## Raw transcript (not in SESSION.md — grep it before saying you don't know)"]
+    if path:
+        lines.append(f"this session : {path}")
+
+    try:
+        others = sorted((f for f in proj_dir.glob("*.jsonl") if str(f) != path),
+                        key=lambda f: f.stat().st_mtime, reverse=True)
+        if others:
+            prev = others[0]
+            when = dt.datetime.fromtimestamp(prev.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"previous     : {prev}  ({when})")
+    except Exception:
+        pass
+
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)[:600]
+
 
 def main():
     try:
@@ -296,7 +340,7 @@ def main():
             cwd = os.getcwd()
             
         try:
-            ctx = build_additional_context(cwd)
+            ctx = build_additional_context(cwd, data)
         except Exception:
             ctx = ""
             
