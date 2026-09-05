@@ -824,7 +824,7 @@ distinction): `STRATEGY.md` and `ROLES.md` in
 ### Secret hygiene
 
 - API keys never travel in URLs (e.g., passed via headers like `x-api-key`), and every error message the MCP server sends over the wire is scrubbed (`key=` query params and any loaded key values are redacted).
-- **Stale server caveat**: MCP server processes are long-lived — a session started before a router update keeps running the OLD code until that session restarts. After a router merge, restart open agent sessions (or `/mcp` reconnect) to pick up fixes.
+- **Stale server caveat**: MCP server processes are long-lived — a session started before a router update keeps running the OLD code until that session restarts. `mcp/server.py` now detects this itself (T-950): at startup it fingerprints (mtime+size, no hashing) `src/delegate.py` and every other `src/` module it imports, and on every `tools/call` it re-checks that fingerprint. On a mismatch, every successful tool response gets an unmissable `⚠️ STALE CODE WARNING` appended, naming the changed file(s) and stating plainly that the call ran against the old in-memory code, not what's on disk. There is no `claude mcp restart` command — the fix is to reconnect the server from the `/mcp` menu, or start a fresh Claude Code session, after any edit to a file the server imports from `src/`.
 
 ## Status
 

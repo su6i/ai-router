@@ -475,3 +475,55 @@ def test_agy_alias_is_not_flash(monkeypatch):
 
     assert "-pro-" in d.resolve_model("agy")
     assert "-flash-" in d.resolve_model("gemini-flash")
+
+
+def test_stale_source_fingerprint_changes_when_file_changes(tmp_path, monkeypatch):
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import server
+
+    fake_src = tmp_path / "fakesrc"
+    fake_src.mkdir()
+    for name in server._WATCHED_SRC_MODULES:
+        (fake_src / f"{name}.py").write_text("x = 1\n")
+    monkeypatch.setattr(server, "_SRC_DIR", fake_src)
+
+    fp_before = server._fingerprint_sources()
+    assert len(fp_before) == len(server._WATCHED_SRC_MODULES)
+
+    target = fake_src / "delegate.py"
+    target.write_text(target.read_text() + "extra_line = True\n")
+
+    fp_after = server._fingerprint_sources()
+    assert fp_after != fp_before
+    assert fp_after[str(target)] != fp_before[str(target)]
+
+
+def test_stale_source_warning_appears_only_on_mismatch(tmp_path, monkeypatch):
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import server
+
+    fake_src = tmp_path / "fakesrc2"
+    fake_src.mkdir()
+    for name in server._WATCHED_SRC_MODULES:
+        (fake_src / f"{name}.py").write_text("x = 1\n")
+    monkeypatch.setattr(server, "_SRC_DIR", fake_src)
+    monkeypatch.setattr(server, "_STARTUP_FINGERPRINT", server._fingerprint_sources())
+
+    def fake_handler(args):
+        return server._text_result("clean result")
+    monkeypatch.setitem(server.TOOL_HANDLERS, "send_note", fake_handler)
+
+    resp_clean = server.handle_tools_call(1, {"name": "send_note", "arguments": {}})
+    text_clean = resp_clean["result"]["content"][0]["text"]
+    assert "STALE CODE WARNING" not in text_clean
+    assert resp_clean["result"]["isError"] is False
+
+    target = fake_src / "delegate.py"
+    target.write_text(target.read_text() + "changed = True\n")
+
+    resp_stale = server.handle_tools_call(2, {"name": "send_note", "arguments": {}})
+    text_stale = resp_stale["result"]["content"][0]["text"]
+    assert "STALE CODE WARNING" in text_stale
+    assert "delegate.py" in text_stale
