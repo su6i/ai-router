@@ -26,6 +26,57 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import delegate as d
 
+
+# --- Stale-code detection (T-950) ----------------------------------------
+# This server process holds these modules in memory as of the moment it was
+# spawned. If a file changes on disk afterward (e.g. mid-session edit), the
+# running process keeps executing the OLD code with no visible sign to the
+# caller -- a tool result can report a confident "verified" against code that
+# no longer exists on disk. Detected cheaply (mtime+size stat only, no
+# hashing, no filesystem watcher) and surfaced loudly in the tool result
+# rather than attempting an unsafe runtime hot-reload.
+_WATCHED_SRC_MODULES = ["delegate", "sessions_index", "skills_index",
+                        "rules_index", "code_index", "dashboards"]
+_SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+
+
+def _fingerprint_sources() -> dict:
+    """Return {absolute file path: (mtime_ns, size)} for each watched module
+    file that currently exists on disk."""
+    fingerprint = {}
+    for _name in _WATCHED_SRC_MODULES:
+        _path = _SRC_DIR / f"{_name}.py"
+        try:
+            _st = _path.stat()
+        except OSError:
+            continue
+        fingerprint[str(_path)] = (_st.st_mtime_ns, _st.st_size)
+    return fingerprint
+
+
+_STARTUP_FINGERPRINT = _fingerprint_sources()
+
+
+def _stale_source_files() -> list:
+    """Return sorted basenames of watched files whose mtime or size differs
+    from what was recorded at server startup."""
+    _current = _fingerprint_sources()
+    _changed = []
+    for _path, _started in _STARTUP_FINGERPRINT.items():
+        if _current.get(_path) != _started:
+            _changed.append(Path(_path).name)
+    return sorted(_changed)
+
+
+STALE_CODE_WARNING_TEMPLATE = (
+    "\n\n⚠️ STALE CODE WARNING: {files} changed on disk after this MCP server "
+    "process started. This tool call ran against the OLD in-memory code, NOT "
+    "what is on disk now -- do not treat this result as a verification of "
+    "current code. There is no `claude mcp restart` command. Reconnect the "
+    "server from the /mcp menu, or start a fresh Claude session, then retry."
+)
+
+
 PROTOCOL_VERSION = "2025-11-25"
 SERVER_NAME = "ai-router-mcp"
 SERVER_VERSION = "0.1.0"
@@ -536,6 +587,12 @@ def handle_tools_call(id_, params: dict):
         return _rpc_error(id_, SERVER_ERROR, str(e.code) if e.code else "delegate exited")
     except Exception as e:  # noqa: BLE001 — fail loud over the wire, never swallow
         return _rpc_error(id_, SERVER_ERROR, f"{type(e).__name__}: {e}")
+    stale = _stale_source_files()
+    if stale:
+        warning = STALE_CODE_WARNING_TEMPLATE.format(files=", ".join(stale))
+        for _block in result.get("content", []):
+            if _block.get("type") == "text":
+                _block["text"] = _block["text"] + warning
     return _rpc_result(id_, result)
 
 
