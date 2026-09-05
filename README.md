@@ -68,8 +68,18 @@ this injected only a pointer telling the agent to go read that project's
 paid a full premium-context read to find a handful of open items.
 
 `hooks/session_start_brief.py` replaces the pointer with a retrieved brief,
-assembled from four blocks (hard cap 4500 chars total):
+assembled from five blocks (hard cap 4500 chars total):
 
+0. **Raw transcript pointer** — the absolute path of this session's
+   `~/.claude/projects/<slug>/<session-id>.jsonl` log, plus the previous
+   session's. After a `/clear` the agent keeps only what `SESSION.md`
+   happened to capture; everything else — the command that actually failed,
+   the number nobody wrote down — is still in the raw transcript, and an
+   agent that does not know the path answers "I don't know what you mean".
+   Taken from the hook payload's `transcript_path`/`session_id`, falling
+   back to the on-disk layout (every non-alphanumeric char in the cwd
+   becomes `-`). Emitted first so it survives cap truncation, which trims
+   block 2.
 1. **Open items** — the `## <repo>` section of the central `TODO.md`, filtered to
    only `[ ]` and `[~]` (open/in-progress) checkbox lines.
 2. **Retrieved continuity (RAG)** — the top chunks from the `session_chunks`
