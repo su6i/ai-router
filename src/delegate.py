@@ -55,6 +55,8 @@ import httpx
 HTTP_TIMEOUT = 180
 VERIFY_TIMEOUT = 600
 GIT_TIMEOUT = 3
+CODE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".go", ".rs"}
+DEFAULT_MAX_FILES_PER_RUN = 8
 SQLITE_TIMEOUT = 5
 CACHE_MAX_ROWS = 5000
 CACHE_MAX_AGE_DAYS = 90
@@ -1772,6 +1774,73 @@ def run_verify(cmd: str, cwd: Path):
     return ok, output, time.time() - t0, returncode
 
 
+def _targets_look_like_code(files_arg: str, allow_write_arg: str) -> bool:
+    """True when a declared write target (from EITHER --files or
+    --allow-write — allow_write_arg is the actual write-permission boundary,
+    so a broad glob there counts just as much as a literal path in --files)
+    carries one of CODE_EXTENSIONS, OR when there is no declared target at
+    all (delegate_agent's open-ended workdir has no --files/--allow-write —
+    the safe default there is "assume code", since agent mode exists
+    specifically for multi-step coding tasks over unknown files).
+
+    A glob with no literal extension (e.g. "docs/**", "src/**") proves
+    nothing either way per the DoD's literal "matches a code extension"
+    wording, so it is not itself treated as code — but it also does not
+    clear a run that has a genuine code-extension candidate alongside it.
+    """
+    candidates = [f.strip() for f in (files_arg or "").split(",") if f.strip()]
+    candidates += [p.strip() for p in (allow_write_arg or "").split(",") if p.strip()]
+    if not candidates:
+        return True
+    return any(Path(c).suffix in CODE_EXTENSIONS for c in candidates)
+
+
+def _resolve_max_files_per_run(max_files: int | None) -> int:
+    if max_files is not None:
+        return max_files
+    try:
+        return int(os.environ.get("AI_ROUTER_MAX_FILES_PER_RUN", DEFAULT_MAX_FILES_PER_RUN))
+    except ValueError:
+        return DEFAULT_MAX_FILES_PER_RUN
+
+
+def _enforce_verify_and_cap(files_arg: str, allow_write_arg: str, verify_cmd: str,
+                             no_verify_reason: str | None, max_files: int | None) -> None:
+    """T-954 mechanical pre-call gate. MUST be the first thing a delegation
+    entry point does — before check_budget, before resolve_model, before any
+    provider call. Raises ValueError (never sys.exit — callers already catch
+    ValueError and turn it into a clean CLI/MCP error) so the cost of a
+    rejected run is exactly zero tokens.
+    """
+    if no_verify_reason is not None and not no_verify_reason.strip():
+        raise ValueError(
+            "--no-verify-reason was given but is empty/whitespace — give a "
+            "real reason or drop the flag entirely."
+        )
+
+    if not verify_cmd and (no_verify_reason is None or not no_verify_reason.strip()):
+        if _targets_look_like_code(files_arg, allow_write_arg):
+            raise ValueError(
+                "this delegation would write code with no --verify given (T-954: "
+                "an unverified code run is a delegation whose only quality signal "
+                "is the worker's own claim). Pass --verify \"<test command>\" "
+                "(e.g. 'uv run pytest -q'), or if this really is a docs/text-only "
+                "run, pass --no-verify-reason \"<why verify is unnecessary>\"."
+            )
+
+    rel_files = [f.strip() for f in (files_arg or "").split(",") if f.strip()]
+    cap = _resolve_max_files_per_run(max_files)
+    if len(rel_files) > cap:
+        raise ValueError(
+            f"{len(rel_files)} files requested in one delegation, over the cap of "
+            f"{cap} (AI_ROUTER_MAX_FILES_PER_RUN env var, or --max-files to "
+            f"override this one call). Split the work into smaller, "
+            f"independently-verifiable dispatches — a flash-class model loses "
+            f"the thread across large fan-outs (rule 070 evidence: Arix Sense "
+            f"0005, 13 blocking defects)."
+        )
+
+
 def _get_channel_system_prompt(model: str) -> str:
     if model in ("flash", "pro", "deepseek"):
         channel = "deepseek"
@@ -1889,7 +1958,8 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                      verify_cmd: str, retries: int, project_root: Path | None = None,
                      via: str | None = None, estimate: bool = False,
                      allow_full_rewrite: bool = False, session_key: str | None = None,
-                     resume: bool = True, self_fix: bool = True) -> str:
+                     resume: bool = True, self_fix: bool = True,
+                     no_verify_reason: str | None = None) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
     spec = MODELS[model]
@@ -2093,7 +2163,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                         agy_conversation_id=agy_conversation_id, agy_num_turns=agy_num_turns,
                         agy_duration_s=agy_duration_s, pin=total_pin, pout=total_pout, cache=total_cache,
                         latency_s=_worker_latency_s, cost_usd_equiv=_worker_eq_cost,
-                        cost_equiv_basis=_worker_eq_basis)
+                        cost_equiv_basis=_worker_eq_basis, no_verify_reason=no_verify_reason)
 
     return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                                   verify_max_attempts if verify_cmd else max_attempts,
@@ -2106,7 +2176,7 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
                         cost_unknown=False, self_fix_rounds=0, self_fix_outcome="skipped",
                         agy_conversation_id=None, agy_num_turns=None, agy_duration_s=None,
                         pin=0, pout=0, cache=0, latency_s=None, cost_usd_equiv=None,
-                        cost_equiv_basis=None):
+                        cost_equiv_basis=None, no_verify_reason=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -2122,6 +2192,9 @@ def _write_worker_audit(model, echoed, project, commit, written, rejected,
         "files_written": [p for p, _ in written],
         "files_rejected": [p for p, _ in rejected],
         "verify_cmd": verify_cmd, "verify_status": verify_status,
+        "verify_present": verify_status != "SKIPPED",
+        "no_verify_reason": no_verify_reason,
+        "files_written_count": len(written),
         "attempts": attempts,
         "self_fix_rounds": self_fix_rounds,
         "self_fix_outcome": self_fix_outcome,
@@ -2158,7 +2231,9 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
                      verify_cmd: str, retries: int, project_root: Path | None = None,
                      via: str | None = None, estimate: bool = False,
                      allow_full_rewrite: bool = False, session_key: str | None = None,
-                     resume: bool = True, self_fix: bool = True) -> str:
+                     resume: bool = True, self_fix: bool = True,
+                     no_verify_reason: str | None = None, max_files: int | None = None) -> str:
+    _enforce_verify_and_cap(files_arg, allow_write_arg, verify_cmd, no_verify_reason, max_files)
     # Resolve here, not only in the CLI: `agy` stopped being a MODELS key when
     # the catalog was opened (it is now an ALIAS for gemini-3.1-pro-high), and
     # callers that bypass the CLI — the MCP server above all — hand us the raw
@@ -2172,7 +2247,7 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
         raise ValueError(f"All candidates disabled (last tried: {ch})")
 
     try:
-        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate, allow_full_rewrite, session_key, resume, self_fix)
+        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate, allow_full_rewrite, session_key, resume, self_fix, no_verify_reason=no_verify_reason)
     except ProviderError as e:
         # Owner decree 2026-07-27: silent escalation from a $0 channel to a
         # PAID one is exactly the "silent overspend" this project bans. No
@@ -2333,7 +2408,7 @@ def delegate(prompt: str, model: str, session: str = "", system: str = "",
             f"|'minimax' if you accept the spend."
         ) from e
 
-def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None, premium_requests=None, latency_s=None, cost_usd_equiv=None, cost_equiv_basis=None):
+def _write_agent_audit(model, echoed, project, commit, files_changed_count, verify_status, cost_usd, cost_unknown, quota_channel, via=None, runner=None, exit_code=None, run_id=None, premium_requests=None, latency_s=None, cost_usd_equiv=None, cost_equiv_basis=None, no_verify_reason=None):
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -2344,6 +2419,9 @@ def _write_agent_audit(model, echoed, project, commit, files_changed_count, veri
         "runner": runner,
         "files_changed_count": files_changed_count,
         "verify_status": verify_status,
+        "verify_present": verify_status != "SKIPPED",
+        "no_verify_reason": no_verify_reason,
+        "files_written_count": files_changed_count,
         "quota_channel": quota_channel,
     }
     if premium_requests is not None:
@@ -2366,7 +2444,7 @@ def _write_agent_audit(model, echoed, project, commit, files_changed_count, veri
         fh.write(json.dumps(rec) + "\n")
 
 
-def agent_delegate(task: str, runner: str = "agy", model: str | None = None, workdir: str | Path | None = None, verify_cmd: str = "", via: str | None = None, estimate: bool = False, timeout_s: int = 600) -> str:
+def agent_delegate(task: str, runner: str = "agy", model: str | None = None, workdir: str | Path | None = None, verify_cmd: str = "", via: str | None = None, estimate: bool = False, timeout_s: int = 600, no_verify_reason: str | None = None) -> str:
     import signal
     import tempfile
 
@@ -2429,6 +2507,8 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         print(f"  Quota channel: {quota_channel}")
         check_budget(project, None, print_estimate=True, model_spec=spec)
         return "estimate only"
+
+    _enforce_verify_and_cap("", "", verify_cmd, no_verify_reason, None)
 
     check_budget(project, None, model_spec=spec)
 
@@ -2616,7 +2696,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
     # in the one table we use to compare models. The call stays so the moment
     # agent mode learns to report usage, one argument change turns it on.
     _agent_eq_cost, _agent_eq_basis = compute_cost_equiv(model_name, quota_channel, None, None, 0)
-    _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id, premium_requests=premium_req, latency_s=elapsed, cost_usd_equiv=_agent_eq_cost, cost_equiv_basis=_agent_eq_basis)
+    _write_agent_audit(model_name, model_name, project, commit, len(files_changed), verify_status, cost_usd, cost_unknown, quota_channel, via=via, runner=runner, exit_code=exit_code, run_id=run_id, premium_requests=premium_req, latency_s=elapsed, cost_usd_equiv=_agent_eq_cost, cost_equiv_basis=_agent_eq_basis, no_verify_reason=no_verify_reason)
 
     if timed_out:
         status = "TIMEOUT — process group killed"
@@ -3052,6 +3132,11 @@ def main():
                          "worker is allowed to write; no flag = no writes")
     ap.add_argument("--verify", default="",
                     help="worker mode: shell command run after writing (never guessed)")
+    ap.add_argument("--no-verify-reason", default=None,
+                     help="explicit, logged reason for running with no --verify "
+                          "(docs/text-only runs only; empty/whitespace is rejected)")
+    ap.add_argument("--max-files", type=int, default=None,
+                     help="override AI_ROUTER_MAX_FILES_PER_RUN (default 8) for this one call")
     ap.add_argument("--retries", type=int, default=1,
                     help="worker mode: verify-failure retries (default 1, max 2)")
     ap.add_argument("--no-self-fix", action="store_true",
@@ -3252,7 +3337,7 @@ def main():
         # Raw a.model (None when unset): each runner has its own default, and
         # a resolved chat default like "minimax" is meaningless to agy.
         try:
-            print(agent_delegate(prompt, runner=a.runner, model=a.model, workdir=Path.cwd(), verify_cmd=a.verify, estimate=a.estimate, timeout_s=timeout))
+            print(agent_delegate(prompt, runner=a.runner, model=a.model, workdir=Path.cwd(), verify_cmd=a.verify, estimate=a.estimate, timeout_s=timeout, no_verify_reason=a.no_verify_reason))
         except ValueError as e:
             sys.exit(f"❌ {e}")
         return
@@ -3264,7 +3349,8 @@ def main():
             sys.exit(f"❌ {e}")
         print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries,
                               estimate=a.estimate, allow_full_rewrite=a.allow_full_rewrite,
-                              session_key=a.session_key or None, self_fix=not a.no_self_fix))
+                              session_key=a.session_key or None, self_fix=not a.no_self_fix,
+                              no_verify_reason=a.no_verify_reason, max_files=a.max_files))
         return
 
     try:

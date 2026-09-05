@@ -156,6 +156,18 @@ has no automatic signal, so the layer-2 reviewer appends its own verdict record
 (`--score`, quality 1-5 plus a one-line note), and `--scorecard` joins all of it into
 one row per model.
 
+**T-954: verify is mandatory, mechanically.** A `delegate_worker`/`delegate_agent`
+call that would write a code file (`.py .js .ts .tsx .jsx .sh .go .rs`) and carries
+no `--verify` aborts BEFORE the provider is ever called — a rejected run costs zero
+tokens. The one escape hatch is an explicit, logged `--no-verify-reason "<text>"`
+(empty/whitespace rejected); docs/text-only runs need neither. A per-delegation file
+cap (default 8, `AI_ROUTER_MAX_FILES_PER_RUN` / `--max-files`) aborts the same way
+before the call — a flash-class model loses the thread across large fan-outs (rule
+070 evidence: Arix Sense 0005, 13 blocking defects). The ledger records
+`verify_present`, `no_verify_reason`, and `files_written_count` per run, and
+`--scorecard` surfaces a `%unverified` column per model so an unverified run stays
+visible in the comparison D-233 exists to produce.
+
 Escalation ladder for a coding task:
 `agy (default) → deepseek-flash → deepseek-pro → sonnet-5 → opus-4.8 (me) → fable-5`.
 Each step only if the previous output fails review.

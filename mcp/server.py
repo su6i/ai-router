@@ -161,6 +161,10 @@ TOOLS = [
                 "retries": {"type": "integer", "default": 1, "maximum": 2},
                 "workdir": {"type": "string",
                             "description": "absolute path of the repo the files live in"},
+                "no_verify_reason": {"type": "string",
+                                     "description": "escape hatch: explicit reason to skip --verify on a docs/text-only run; empty/whitespace is rejected"},
+                "max_files": {"type": "integer",
+                              "description": "override the default 8-file-per-run cap for this call"},
             },
             "required": ["prompt", "workdir"],
         },
@@ -177,6 +181,8 @@ TOOLS = [
                 "runner": {"type": "string", "default": "agy"},
                 "verify": {"type": "string", "default": ""},
                 "timeout": {"type": "integer", "default": 600, "maximum": 1800},
+                "no_verify_reason": {"type": "string",
+                                     "description": "escape hatch: explicit reason to skip --verify; empty/whitespace is rejected"},
             },
             "required": ["prompt", "workdir"],
         },
@@ -406,7 +412,8 @@ def handle_delegate_worker(args: dict) -> dict:
     with contextlib.redirect_stdout(io.StringIO()):
         summary = d.worker_delegate(
             prompt, model, args.get("files", ""), args.get("allow_write", ""),
-            args.get("verify", ""), retries, project_root=Path(workdir), via="mcp")
+            args.get("verify", ""), retries, project_root=Path(workdir), via="mcp",
+            no_verify_reason=args.get("no_verify_reason"), max_files=args.get("max_files"))
     return _text_result(summary)
 
 
@@ -428,7 +435,7 @@ def handle_delegate_agent(args: dict) -> dict:
     with contextlib.redirect_stdout(io.StringIO()):
         summary = d.agent_delegate(
             prompt, runner=runner, model=model, workdir=workdir, verify_cmd=verify,
-            via="mcp", timeout_s=timeout)
+            via="mcp", timeout_s=timeout, no_verify_reason=args.get("no_verify_reason"))
     return _text_result(summary)
 
 def handle_rules_lookup(args: dict) -> dict:

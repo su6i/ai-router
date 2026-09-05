@@ -460,6 +460,18 @@ python3 src/delegate.py --model flash \
   write; no flag means no writes.
 - `--verify` — caller-supplied shell command run after writing (never
   guessed).
+- `--no-verify-reason "<text>"` — T-954: `--verify` is now MANDATORY for any
+  run that would write a code file (`.py .js .ts .tsx .jsx .sh .go .rs`,
+  checked against both `--files` and `--allow-write`); a code-writing run
+  with neither `--verify` nor this flag aborts before the model is ever
+  called, at zero token cost. Give a real reason — empty/whitespace is
+  rejected. Docs/text-only runs (every declared file/pattern has a non-code
+  extension) need neither flag. `delegate_agent` has no per-file target list
+  at all, so it is always treated as code-writing and needs one of the two.
+- `--max-files <n>` — T-954: per-delegation file-count cap, default 8
+  (`AI_ROUTER_MAX_FILES_PER_RUN` env var, overridable per call with this
+  flag). Over the cap the run aborts before the model call — split the work
+  into smaller dispatches instead.
 - `--retries` — verify-failure retries (default 1, max 2); the worker gets
   the verify output back and one more attempt per retry.
 - `--session-key <key>` — `agy` channel only: resume the SAME `agy`
@@ -702,8 +714,9 @@ grade its own output, full stop. `--scorecard` excludes any old `unattributed` r
 the quality average and reports it in a trailing "N unsigned verdict(s) excluded" line
 instead of silently dropping it.
 
-`--scorecard` prints one row per model: runs, verify-pass %, avg attempts, self-fix
-rate, avg latency, tokens, real $, equiv $, and average reviewer quality. That table is
+`--scorecard` prints one row per model: runs, verify-pass %, %unverified, avg attempts,
+self-fix rate, avg latency, tokens, real $, equiv $, and average reviewer quality. That
+table is
 how a claim like "this flash model codes like Opus 5" gets settled here — with our own
 runs, not a vendor's benchmark.
 

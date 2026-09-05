@@ -87,6 +87,7 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
             if not model:
                 continue
             model = str(model)
+            mode = rec.get("mode")
 
             day_str = str(rec.get("ts", ""))[:10]
             if since and day_str < since:
@@ -108,6 +109,8 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
 
             stats = model_stats.setdefault(model, {
                 "runs": 0,
+                "code_runs": 0,
+                "unverified_count": 0,
                 "verify_pass": 0,
                 "verify_total": 0,
                 "attempts_sum": 0.0,
@@ -134,6 +137,17 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
                     stats["verify_total"] += 1
                     if v_status_upper == "PASS":
                         stats["verify_pass"] += 1
+
+            if mode in ("worker", "agent"):
+                stats["code_runs"] += 1
+                verify_present = rec.get("verify_present")
+                if verify_present is None:
+                    # Backward compat for a pre-T-954 ledger row: it has no
+                    # verify_present key at all, but its verify_status field
+                    # already tells us the same thing (SKIPPED == unverified).
+                    verify_present = isinstance(v_status, str) and v_status.upper() in ("PASS", "FAIL")
+                if not verify_present:
+                    stats["unverified_count"] += 1
 
             att = rec.get("attempts")
             if att is not None and isinstance(att, (int, float)) and not isinstance(att, bool):
@@ -178,13 +192,15 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
         return "(no scorecard data yet)"
 
     headers = [
-        "model", "runs", "verify_pass", "avg_attempts", "self_fix_rate",
+        "model", "runs", "verify_pass", "%unverified", "avg_attempts", "self_fix_rate",
         "avg_latency_s", "in_tokens", "out_tokens", "real_usd", "equiv_usd", "quality"
     ]
     rows = []
     for m in sorted(all_models):
         s = model_stats.get(m, {
             "runs": 0,
+            "code_runs": 0,
+            "unverified_count": 0,
             "verify_pass": 0,
             "verify_total": 0,
             "attempts_sum": 0.0,
@@ -207,6 +223,7 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
         col_model = m
         col_runs = str(s["runs"])
         col_verify = f"{(s['verify_pass'] / s['verify_total'] * 100):.1f}%" if s["verify_total"] > 0 else "-"
+        col_unverified = f"{(s['unverified_count'] / s['code_runs'] * 100):.1f}%" if s["code_runs"] > 0 else "-"
         col_attempts = f"{(s['attempts_sum'] / s['attempts_count']):.2f}" if s["attempts_count"] > 0 else "-"
         col_self_fix = (
             f"{(s['self_fix_rounds_triggered'] / s['self_fix_rounds_total'] * 100):.1f}%"
@@ -221,7 +238,7 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
         col_quality = f"{(sum(q_list) / len(q_list)):.2f} (n={len(q_list)})" if q_list else "-"
 
         rows.append([
-            col_model, col_runs, col_verify, col_attempts, col_self_fix,
+            col_model, col_runs, col_verify, col_unverified, col_attempts, col_self_fix,
             col_latency, col_in, col_out, col_real, col_equiv, col_quality
         ])
 

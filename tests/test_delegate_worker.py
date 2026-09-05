@@ -254,7 +254,7 @@ def test_worker_delegate_protocol_failure_reprompts_then_exits(tmp_path, monkeyp
     with pytest.raises(SystemExit):
         d.worker_delegate(
             "add foo()", "test-gemini", files_arg="src/foo.py", allow_write_arg="src/**",
-            verify_cmd="", retries=1, project_root=tmp_path)
+            verify_cmd="true", retries=1, project_root=tmp_path)
 
 
 def test_worker_delegate_no_allow_write_rejects_all(tmp_path, monkeypatch):
@@ -263,7 +263,7 @@ def test_worker_delegate_no_allow_write_rejects_all(tmp_path, monkeypatch):
 
     out = d.worker_delegate(
         "add foo()", "test-gemini", files_arg="src/foo.py", allow_write_arg="",
-        verify_cmd="", retries=1, project_root=tmp_path)
+        verify_cmd="true", retries=1, project_root=tmp_path)
 
     assert not (tmp_path / "src" / "foo.py").exists()
     assert "files written : (none)" in out
@@ -625,7 +625,7 @@ def test_worker_delegate_agy_model_needs_no_env_key(tmp_path, monkeypatch):
 
     out = d.worker_delegate(
         "add foo()", "gemini-3.1-pro-high", files_arg="src/foo.py", allow_write_arg="src/**",
-        verify_cmd="", retries=1, project_root=tmp_path)
+        verify_cmd="true", retries=1, project_root=tmp_path)
 
     assert (tmp_path / "src" / "foo.py").read_text() == "def foo():\n    return 1\n"
     assert "files written : src/foo.py" in out
@@ -639,7 +639,7 @@ def test_worker_delegate_agy_records_cost_unknown_false(tmp_path, monkeypatch):
 
     d.worker_delegate(
         "add foo()", "gemini-3.1-pro-high", files_arg="src/foo.py", allow_write_arg="src/**",
-        verify_cmd="", retries=1, project_root=tmp_path)
+        verify_cmd="true", retries=1, project_root=tmp_path)
 
     lines = d.AUDIT.read_text().strip().splitlines()
     rec = json.loads(lines[0])
@@ -660,7 +660,7 @@ def test_worker_delegate_no_fallback_on_provider_error(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="No automatic paid fallback"):
         d.worker_delegate(
             "add foo()", "test-gemini", files_arg="src/foo.py", allow_write_arg="src/**",
-            verify_cmd="", retries=1, project_root=tmp_path)
+            verify_cmd="true", retries=1, project_root=tmp_path)
 
 
 # ---- WORKER SESSIONS ---------------------------------------------------------
@@ -689,7 +689,7 @@ def test_worker_session_resume_sends_conversation_id(tmp_path, monkeypatch):
     monkeypatch.setattr(d.subprocess, "run", fake_run)
     
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
-                      verify_cmd="", retries=1, project_root=tmp_path, session_key="my-session")
+                      verify_cmd="true", retries=1, project_root=tmp_path, session_key="my-session")
                       
     assert "--conversation" in captured_argv
     assert captured_argv[captured_argv.index("--conversation") + 1] == "conv-999"
@@ -717,7 +717,7 @@ def test_worker_session_fresh_persists_id(tmp_path, monkeypatch):
     monkeypatch.setattr(d.subprocess, "run", fake_run)
     
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
-                      verify_cmd="", retries=1, project_root=tmp_path, session_key="fresh-session")
+                      verify_cmd="true", retries=1, project_root=tmp_path, session_key="fresh-session")
                       
     assert "--conversation" not in captured_argv
     assert d._get_session_conversation("fresh-session") == "new-conv-777"
@@ -752,7 +752,7 @@ def test_worker_session_self_healing(tmp_path, monkeypatch):
     monkeypatch.setattr(d.subprocess, "run", fake_run)
     
     out = d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
-                            verify_cmd="", retries=1, project_root=tmp_path, session_key="stale-session")
+                            verify_cmd="true", retries=1, project_root=tmp_path, session_key="stale-session")
 
     # fake_run intercepts every subprocess.run call, including the git
     # commands project_info() issues before/after the agy call — filter down
@@ -1029,7 +1029,7 @@ def test_agy_ledger_carries_conversation_id_and_turns(tmp_path, monkeypatch):
     monkeypatch.setattr(d.subprocess, "run", lambda *a, **k: FakeCompleted())
 
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
-                      verify_cmd="", retries=1, project_root=tmp_path)
+                      verify_cmd="true", retries=1, project_root=tmp_path)
 
     rec = json.loads(d.AUDIT.read_text().strip().splitlines()[-1])
     assert rec["agy_conversation_id"] == "conv-turns-test"
@@ -1047,7 +1047,7 @@ def test_non_agy_ledger_has_no_agy_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "call_gemini", fake_caller([response]))
 
     d.worker_delegate("add foo()", "test-gemini", files_arg="src/foo.py", allow_write_arg="src/**",
-                      verify_cmd="", retries=1, project_root=tmp_path)
+                      verify_cmd="true", retries=1, project_root=tmp_path)
 
     rec = json.loads(d.AUDIT.read_text().strip().splitlines()[-1])
     assert "agy_conversation_id" not in rec

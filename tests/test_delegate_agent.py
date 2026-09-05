@@ -66,7 +66,7 @@ else:
     # The fake codewhale will create changed.py
 
     
-    out = d.agent_delegate("do something", runner="codewhale", model="flash", workdir=tmp_path)
+    out = d.agent_delegate("do something", runner="codewhale", model="flash", workdir=tmp_path, verify_cmd="true")
     
     assert "runner        : codewhale (flash)" in out
     assert "status        : COMPLETED" in out
@@ -88,7 +88,7 @@ def test_agent_timeout_kills_process(isolated_paths, tmp_path):
 import time
 time.sleep(10)
 """)
-    out = d.agent_delegate("sleep", runner="agy", workdir=tmp_path, timeout_s=1)
+    out = d.agent_delegate("sleep", runner="agy", workdir=tmp_path, timeout_s=1, verify_cmd="true")
     assert "TIMEOUT" in out
 
 
@@ -100,7 +100,7 @@ if "metrics" in sys.argv:
 else:
     print("codewhale stdout")
 """)
-    out = d.agent_delegate("do something", runner="codewhale", workdir=tmp_path)
+    out = d.agent_delegate("do something", runner="codewhale", workdir=tmp_path, verify_cmd="true")
     assert "cost          : unknown" in out
     lines = d.AUDIT.read_text().strip().splitlines()
     assert json.loads(lines[0])["cost_unknown"] is True
@@ -115,7 +115,7 @@ def test_agent_agy_gets_print_timeout_and_default_model(isolated_paths, tmp_path
 import json, sys
 open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
 """)
-    out = d.agent_delegate("task", runner="agy", workdir=tmp_path, timeout_s=120)
+    out = d.agent_delegate("task", runner="agy", workdir=tmp_path, timeout_s=120, verify_cmd="true")
     assert "COMPLETED" in out
     argv = json.loads(argv_log.read_text())
     assert "--print-timeout" in argv
@@ -141,7 +141,7 @@ def test_agent_agy_skips_permission_prompts(isolated_paths, tmp_path):
 import json, sys
 open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
 """)
-    out = d.agent_delegate("task", runner="agy", workdir=tmp_path, timeout_s=120)
+    out = d.agent_delegate("task", runner="agy", workdir=tmp_path, timeout_s=120, verify_cmd="true")
     assert "COMPLETED" in out
     argv = json.loads(argv_log.read_text())
     assert "--dangerously-skip-permissions" in argv
@@ -156,7 +156,7 @@ def test_agent_exit0_but_zero_files_is_unverified(isolated_paths, tmp_path):
 print("Done. Created the file and committed as 5bcd074. No git command failed.")
 """)
     _git_init_ignoring_router_data(tmp_path)
-    out = d.agent_delegate("write hello.txt", runner="agy", workdir=tmp_path)
+    out = d.agent_delegate("write hello.txt", runner="agy", workdir=tmp_path, no_verify_reason="testing the unverified-completion branch on purpose")
     assert "UNVERIFIED" in out
     assert "0 files changed" in out
     # honest audit: zero files recorded despite the runner's self-report
@@ -172,7 +172,7 @@ open("hello.txt", "w").write("HELLO")
 print("wrote hello.txt")
 """)
     _git_init_ignoring_router_data(tmp_path)
-    out = d.agent_delegate("write hello.txt", runner="agy", workdir=tmp_path)
+    out = d.agent_delegate("write hello.txt", runner="agy", workdir=tmp_path, verify_cmd="true")
     assert "UNVERIFIED" not in out
     assert "files changed : 1 files" in out
 
@@ -188,7 +188,7 @@ print("Created hello.txt.")
 """)
     work = tmp_path / "work"
     work.mkdir()
-    out = d.agent_delegate("write hello.txt", runner="agy", workdir=work)
+    out = d.agent_delegate("write hello.txt", runner="agy", workdir=work, verify_cmd="true")
     assert (work / "hello.txt").read_text() == "HELLO_FROM_AGY"
     assert "files changed : 1 files" in out
     assert "UNVERIFIED" not in out
@@ -207,7 +207,7 @@ open({str(argv_log)!r}, "w").write(json.dumps(sys.argv))
 """)
     work = tmp_path / "work"
     work.mkdir()
-    d.agent_delegate("task", runner="agy", workdir=work, timeout_s=120)
+    d.agent_delegate("task", runner="agy", workdir=work, timeout_s=120, verify_cmd="true")
     argv = json.loads(argv_log.read_text())
     assert "--add-dir" in argv
     assert argv[argv.index("--add-dir") + 1] == str(work)
@@ -219,7 +219,7 @@ import sys
 print("Error: timeout waiting for response")
 sys.exit(1)
 """)
-    out = d.agent_delegate("task", runner="agy", workdir=tmp_path)
+    out = d.agent_delegate("task", runner="agy", workdir=tmp_path, verify_cmd="true")
     assert "FAILED (exit 1)" in out
     assert "COMPLETED" not in out
     rec = json.loads(d.AUDIT.read_text().strip().splitlines()[0])
@@ -228,7 +228,7 @@ sys.exit(1)
 
 def test_agent_claude_models_banned(isolated_paths, tmp_path):
     with pytest.raises(ValueError, match="banned"):
-        d.agent_delegate("task", runner="agy", model="Claude Sonnet 4.5", workdir=tmp_path)
+        d.agent_delegate("task", runner="agy", model="Claude Sonnet 4.5", workdir=tmp_path, verify_cmd="true")
 
 
 def test_agent_daily_call_cap_aborts(isolated_paths, tmp_path):
@@ -236,17 +236,17 @@ def test_agent_daily_call_cap_aborts(isolated_paths, tmp_path):
 print("ok")
 """)
     d.BUDGETS.write_text(json.dumps({"daily_calls": {"google-ai-pro-gemini": 1}}))
-    out = d.agent_delegate("first", runner="agy", workdir=tmp_path)
+    out = d.agent_delegate("first", runner="agy", workdir=tmp_path, verify_cmd="true")
     assert "COMPLETED" in out
     with pytest.raises(SystemExit) as e:
-        d.agent_delegate("second", runner="agy", workdir=tmp_path)
+        d.agent_delegate("second", runner="agy", workdir=tmp_path, verify_cmd="true")
     assert "google-ai-pro" in str(e.value)
 
 def test_channel_registry_disabled_aborts(isolated_paths, tmp_path):
     d.DATA_DIR.mkdir(parents=True, exist_ok=True)
     (d.DATA_DIR / "channels.json").write_text(json.dumps({"agy": {"enabled": False}}))
     with pytest.raises(ValueError, match="All candidates disabled"):
-        d.agent_delegate("task", runner="agy", workdir=tmp_path)
+        d.agent_delegate("task", runner="agy", workdir=tmp_path, verify_cmd="true")
 
 
 def test_channel_registry_env_override(isolated_paths, tmp_path, monkeypatch):
@@ -261,7 +261,7 @@ def test_channel_registry_env_override(isolated_paths, tmp_path, monkeypatch):
 def test_agent_codex_argv(isolated_paths, tmp_path):
     argv_log = tmp_path / "argv.json"
     create_fake_bin(isolated_paths, "codex", f"#!/usr/bin/env python3\nimport sys, json\nopen({str(argv_log)!r}, 'w').write(json.dumps(sys.argv))\n")
-    out = d.agent_delegate("mytask", runner="codex", workdir=tmp_path)
+    out = d.agent_delegate("mytask", runner="codex", workdir=tmp_path, verify_cmd="true")
     assert "COMPLETED" in out
     argv = json.loads(argv_log.read_text())
     assert argv[1:3] == ["exec", "--cd"]
@@ -272,7 +272,7 @@ def test_agent_codex_argv(isolated_paths, tmp_path):
 def test_agent_copilot_argv_and_premium(isolated_paths, tmp_path):
     argv_log = tmp_path / "argv.json"
     create_fake_bin(isolated_paths, "copilot", f"#!/usr/bin/env python3\nimport sys, json\nopen({str(argv_log)!r}, 'w').write(json.dumps(sys.argv))\n")
-    out = d.agent_delegate("mytask", runner="copilot", workdir=tmp_path)
+    out = d.agent_delegate("mytask", runner="copilot", workdir=tmp_path, verify_cmd="true")
     assert "COMPLETED" in out
     argv = json.loads(argv_log.read_text())
     assert argv[1] == "-p"
@@ -288,7 +288,7 @@ def test_agent_copilot_argv_and_premium(isolated_paths, tmp_path):
 def test_agent_copilot_escalated_model_counts_premium(isolated_paths, tmp_path):
     argv_log = tmp_path / "argv.json"
     create_fake_bin(isolated_paths, "copilot", f"#!/usr/bin/env python3\nimport sys, json\nopen({str(argv_log)!r}, 'w').write(json.dumps(sys.argv))\n")
-    out = d.agent_delegate("mytask", runner="copilot", model="claude-sonnet-4.5", workdir=tmp_path)
+    out = d.agent_delegate("mytask", runner="copilot", model="claude-sonnet-4.5", workdir=tmp_path, verify_cmd="true")
     assert "COMPLETED" in out
     argv = json.loads(argv_log.read_text())
     assert argv[argv.index("--model") + 1] == "claude-sonnet-4.5"
@@ -299,7 +299,7 @@ def test_agent_copilot_escalated_model_counts_premium(isolated_paths, tmp_path):
 
 def test_agent_copilot_seeds_multiplier_config(isolated_paths, tmp_path):
     create_fake_bin(isolated_paths, "copilot", "#!/usr/bin/env python3\nprint('ok')\n")
-    d.agent_delegate("mytask", runner="copilot", workdir=tmp_path)
+    d.agent_delegate("mytask", runner="copilot", workdir=tmp_path, verify_cmd="true")
     cfg = json.loads((d.DATA_DIR / "copilot_multipliers.json").read_text())
     assert cfg["default"] == 1
     assert cfg["models"]["gpt-5-mini"] == 0
@@ -310,8 +310,8 @@ def test_agent_copilot_multiplier_from_config_not_hardcoded(isolated_paths, tmp_
     d.DATA_DIR.mkdir(parents=True, exist_ok=True)
     (d.DATA_DIR / "copilot_multipliers.json").write_text(
         json.dumps({"default": 2, "models": {"gpt-5-mini": 0.25}}))
-    d.agent_delegate("mytask", runner="copilot", workdir=tmp_path)
-    d.agent_delegate("other task", runner="copilot", model="brand-new-model", workdir=tmp_path)
+    d.agent_delegate("mytask", runner="copilot", workdir=tmp_path, verify_cmd="true")
+    d.agent_delegate("other task", runner="copilot", model="brand-new-model", workdir=tmp_path, verify_cmd="true")
     recs = [json.loads(line) for line in d.AUDIT.read_text().strip().splitlines()]
     # config overrides beat any built-in seed value
     assert recs[0]["premium_requests"] == 0.25

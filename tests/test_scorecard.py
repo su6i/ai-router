@@ -292,3 +292,73 @@ def test_equiv_cost_column_sums_separately_from_real_cost(tmp_path):
     equiv_only_row = rows_by_model["model-equiv-only"]
     assert equiv_only_row[real_idx] == "-"
     assert equiv_only_row[equiv_idx] == "0.006000"
+
+
+def test_unverified_percentage_counts_only_code_runs(tmp_path):
+    audit_file = _write_ledger(
+        tmp_path / "audit.log",
+        [
+            {
+                "model_asked": "model-y",
+                "mode": "worker",
+                "verify_status": "PASS",
+                "verify_present": True,
+                "ts": "2026-09-01T10:00:00",
+            },
+            {
+                "model_asked": "model-y",
+                "mode": "worker",
+                "verify_status": "SKIPPED",
+                "verify_present": False,
+                "ts": "2026-09-01T11:00:00",
+            },
+            {
+                "model_asked": "model-y",
+                "mode": "agent",
+                "verify_status": "SKIPPED",
+                "verify_present": False,
+                "ts": "2026-09-01T12:00:00",
+            },
+            {
+                "model_asked": "model-y",
+                "cost_usd": 0.01,
+                "ts": "2026-09-01T13:00:00",
+            },
+        ],
+    )
+    out = sc.show_scorecard(audit_file)
+    lines = out.splitlines()
+    headers = [c.strip() for c in lines[0].split("  ") if c.strip()]
+    row = [c.strip() for c in lines[2].split("  ") if c.strip()]
+
+    assert row[headers.index("model")] == "model-y"
+    assert row[headers.index("runs")] == "4"
+    assert row[headers.index("%unverified")] == "66.7%"
+
+
+def test_unverified_percentage_backward_compat_old_ledger_row(tmp_path):
+    audit_file = _write_ledger(
+        tmp_path / "audit.log",
+        [
+            {
+                "model_asked": "model-legacy",
+                "mode": "worker",
+                "verify_status": "SKIPPED",
+                "ts": "2026-09-01T10:00:00",
+            },
+            {
+                "model_asked": "model-legacy",
+                "mode": "worker",
+                "verify_status": "PASS",
+                "ts": "2026-09-01T11:00:00",
+            },
+        ],
+    )
+    out = sc.show_scorecard(audit_file)
+    lines = out.splitlines()
+    headers = [c.strip() for c in lines[0].split("  ") if c.strip()]
+    row = [c.strip() for c in lines[2].split("  ") if c.strip()]
+
+    assert row[headers.index("model")] == "model-legacy"
+    assert row[headers.index("runs")] == "2"
+    assert row[headers.index("%unverified")] == "50.0%"

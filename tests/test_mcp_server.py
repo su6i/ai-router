@@ -183,7 +183,8 @@ def test_tools_list_exposes_exactly_tools(server_proc):
 
     worker = next(t for t in tools if t["name"] == "delegate_worker")
     assert set(worker["inputSchema"]["properties"]) == {
-        "prompt", "files", "allow_write", "verify", "model", "retries", "workdir"}
+        "prompt", "files", "allow_write", "verify", "model", "retries", "workdir",
+        "no_verify_reason", "max_files"}
 
 
 def test_tools_call_delegate_research_returns_capped_answer_with_cost(tmp_path):
@@ -254,6 +255,7 @@ def test_tools_call_delegate_worker_defaults_to_agy(tmp_path):
                                 "arguments": {"prompt": "add bar()",
                                               "files": "src/bar.py",
                                               "allow_write": "src/**",
+                                              "verify": "true",
                                               "workdir": str(workdir)}}})
         resp = _recv(proc)
         assert "error" not in resp

@@ -29,7 +29,10 @@ def test_context_discipline_agent_delegate_prompt(monkeypatch, tmp_path):
     class MockPopen:
         def __init__(self, args, **kwargs):
             passed_args.extend(args)
+            self.args = args
             self.returncode = 0
+        def poll(self):
+            return 0
         def wait(self, timeout=None):
             return 0
         def __enter__(self):
@@ -47,7 +50,7 @@ def test_context_discipline_agent_delegate_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "DATA_DIR", tmp_path)
     monkeypatch.setattr(d, "check_budget", lambda *a, **k: None)
     
-    d.agent_delegate("agent task", runner="agy", workdir=tmp_path)
+    d.agent_delegate("agent task", runner="agy", workdir=tmp_path, verify_cmd="true")
     
     idx = passed_args.index("-p")
     task_arg = passed_args[idx + 1]
