@@ -222,7 +222,9 @@ TOOLS = [
                 "path_prefix": {"type": "string", "default": "",
                                 "description": "Path-prefix filter within the searched repo, e.g. 'src/'. NOT a repo selector."},
                 "repo": {"type": "string", "default": "",
-                         "description": "Explicit repo to search. If omitted, inferred from CWD."}
+                         "description": "Explicit repo to search. If omitted, inferred from CWD."},
+                "all_repos": {"type": "boolean", "default": False,
+                              "description": "Search every configured repo instead of just one; each result is prefixed with its repo name."},
             },
             "required": ["query"],
         },
@@ -488,6 +490,7 @@ def handle_code_lookup(args: dict) -> dict:
     a.k = k
     a.graph = bool(args.get("graph"))
     a.repo = args.get("path_prefix", "")
+    a.all_repos = bool(args.get("all_repos"))
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):

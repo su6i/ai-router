@@ -130,7 +130,7 @@ def handle_receipt(file_path_str: str, collection_arg: str | None = None):
             col = "skills"
         elif "rules" in s_path or path.suffix == ".mdc":
             col = "rules"
-        elif path.suffix in (".py", ".js", ".ts", ".go", ".rs"):
+        elif path.suffix in code_index.CODE_EXT_LANG:
             col = "code"
         else:
             col = "sessions"
@@ -217,7 +217,11 @@ def main():
         mod = modules[col]
         t0 = time.time()
         try:
-            stats = mod.ingest(force=args.force)
+            # "code" sweeps every configured repo root (T-953), not just cwd's
+            # repo -- code_index.sweep() budgets/resumes across repos and
+            # isolates one bad repo from the rest; every other collection
+            # still ingests its single (cwd-scoped) corpus via ingest().
+            stats = code_index.sweep(force=args.force) if col == "code" else mod.ingest(force=args.force)
             duration = time.time() - t0
             
             _update_state(col, stats)
@@ -231,6 +235,13 @@ def main():
                 "duration_s": round(duration, 2),
                 "status": "ok"
             }
+            # code_index.sweep() additionally reports how many repos it swept
+            # and how many it had to skip -- surface both so a sweep with
+            # partial repo failures is visible without failing the run
+            # (DoD: the launchd sweep must keep exiting 0).
+            if "repos_seen" in stats:
+                res["repos_seen"] = stats["repos_seen"]
+                res["repos_failed"] = stats["repos_failed"]
             if args.json_out:
                 print(json.dumps(res))
             else:

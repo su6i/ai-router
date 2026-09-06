@@ -14,7 +14,31 @@ from tree_sitter import Language, Parser
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, project_info
+import delegate
 from rules_index import get_model
+
+
+def _project_info_for(repo_path: Path):
+    """Repo identity for the multi-repo sweep: always the directory's own
+    basename -- never the git remote URL.
+
+    The remote URL is not a safe identity source here: two different
+    checkouts can point at the same remote (e.g. parsi-rtl-test's origin is
+    a stale copy of parsi-rtl's) and would then collide under one
+    code_chunks.repo value, with each ingest's --force GC step deleting the
+    other's chunks (T-953 defect: parsi-rtl-test missing entirely).
+    get_repo_roots() already guarantees each swept root is a distinct
+    sibling directory, so its basename is unique and stable -- and it
+    matches the casing people actually use (was "arix" from the lowercase
+    remote vs the real "Arix" directory).
+    """
+    def git(*a):
+        try:
+            r = subprocess.run(["git", *a], cwd=repo_path, capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+    return (repo_path.name, git("rev-parse", "--short", "HEAD") or None)
 
 def init_db(conn):
     with conn.cursor() as cur:
@@ -57,6 +81,77 @@ def init_db(conn):
             );
         """)
     conn.commit()
+
+
+def _default_repo_roots() -> list[Path]:
+    """Every git checkout directly under $HOME/@-github/ (the DoD default)."""
+    base = Path.home() / "@-github"
+    if not base.is_dir():
+        return []
+    return sorted(p for p in base.iterdir() if p.is_dir() and (p / ".git").exists())
+
+
+def get_repo_roots() -> list[Path]:
+    """Repo roots to sweep, read from <vault>/data/code_repo_roots.json.
+
+    Adding/removing a repo is a config edit, not a commit. Accepts either
+    {"roots": ["/abs/path", ...]} or a bare JSON list of path strings.
+    Missing file, unreadable file, or invalid JSON all fall back to
+    _default_repo_roots() (logged to stderr on a parse/read error, silent
+    on a simply-missing file — a missing config is the normal/default case).
+    Non-existent paths in the config are silently dropped.
+    """
+    cfg_path = delegate.DATA_DIR / "code_repo_roots.json"
+    if cfg_path.exists():
+        try:
+            data = json.loads(cfg_path.read_text("utf-8"))
+            roots = data["roots"] if isinstance(data, dict) else data
+            paths = [Path(r).expanduser() for r in roots]
+            return [p for p in paths if p.is_dir()]
+        except Exception as e:
+            print(f"code_index: bad {cfg_path}, falling back to default roots: {e}", file=sys.stderr)
+    return _default_repo_roots()
+
+
+_EXCLUDE_DIR_PARTS = {"node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".git"}
+
+
+def _is_excluded(rel_path: str) -> bool:
+    """Vendored/generated paths to skip even if git-tracked (defense in depth)."""
+    parts = Path(rel_path).parts
+    if any(part in _EXCLUDE_DIR_PARTS for part in parts):
+        return True
+    return rel_path.endswith(".min.js")
+
+
+# Extensions this indexer treats as "code" (T-953 scope: .py .js .ts .tsx
+# .jsx .sh .go .rs). Only .py and .sh get real AST-based chunking, via the
+# tree-sitter grammars vendored in this repo (tree_sitter_python,
+# tree_sitter_bash). Grammars for the rest (tree-sitter-javascript /
+# -typescript / -go / -rust) would be new dependencies needing owner
+# approval, so those extensions fall back to chunk_generic()'s coarser
+# whole-file splitting instead of AST-aware function/class chunks. That
+# still makes the file searchable, which it was not at all before this fix
+# (T-953 defects #1/#2: portfolio, parsi-rtl, parsi-rtl-test are 100%
+# js/ts and were silently skipped in full).
+CODE_EXT_LANG = {
+    ".py": "python",
+    ".sh": "bash",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".go": "go",
+    ".rs": "rust",
+}
+_TREE_SITTER_EXTS = {".py", ".sh"}
+CODE_GLOBS = tuple(f"*{ext}" for ext in CODE_EXT_LANG)
+
+
+def _lang_for_path(rel_path: str) -> str | None:
+    """The CODE_EXT_LANG language tag for a file, or None if its extension
+    is not indexed as code at all."""
+    return CODE_EXT_LANG.get(Path(rel_path).suffix)
 
 # Tree-sitter parsers
 PY_LANG = Language(tspython.language())
@@ -153,6 +248,40 @@ def chunk_node(root_node, lang, tokenizer, source_bytes, parent_symbol=None):
 
     return chunks
 
+def chunk_generic(source_bytes: bytes) -> list[dict]:
+    """Whole-file chunking for languages with no tree-sitter grammar in this
+    repo (js/jsx/ts/tsx/go/rust). No symbol/parent_symbol extraction --
+    coarser than the AST-based python/bash path, but it makes the file
+    searchable at all, which it was not before. Splits on ~400-token
+    (chars//3) line boundaries so a large file still yields more than one
+    embeddable chunk.
+    """
+    text = source_bytes.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if not lines:
+        return []
+    chunks = []
+    buf = []
+    start = 1
+    for i, line in enumerate(lines, start=1):
+        buf.append(line)
+        if len("\n".join(buf)) // 3 > 400:
+            chunks.append({
+                "symbol": None, "parent_symbol": None,
+                "start_line": start, "end_line": i,
+                "text": "\n".join(buf),
+            })
+            buf = []
+            start = i + 1
+    if buf:
+        chunks.append({
+            "symbol": None, "parent_symbol": None,
+            "start_line": start, "end_line": len(lines),
+            "text": "\n".join(buf),
+        })
+    return chunks
+
+
 def cmd_chunk_files(paths):
     """Chunk the given files and print {path: [chunk, ...]} as JSON.
 
@@ -164,12 +293,28 @@ def cmd_chunk_files(paths):
     """
     out = {}
     for rel in paths:
-        lang = 'python' if rel.endswith('.py') else 'bash'
+        ext = Path(rel).suffix
         try:
             source_bytes = Path(rel).read_bytes()
-            parser = get_parser(PY_LANG if lang == 'python' else BASH_LANG)
-            tree = parser.parse(source_bytes)
-            chunks = [c for c in chunk_node(tree.root_node, lang, None, source_bytes) if c['text'].strip()]
+            if ext in _TREE_SITTER_EXTS:
+                lang = CODE_EXT_LANG[ext]
+                parser = get_parser(PY_LANG if ext == '.py' else BASH_LANG)
+                tree = parser.parse(source_bytes)
+                chunks = [c for c in chunk_node(tree.root_node, lang, None, source_bytes) if c['text'].strip()]
+                if not chunks:
+                    # No function_definition/class_definition node in the
+                    # file (a top-level script, not a library of defs) --
+                    # fall back to the same whole-file chunker used for
+                    # languages with no tree-sitter grammar here, so real
+                    # top-level code is still searchable instead of
+                    # contributing 0 chunks (T-953 follow-up: this is what
+                    # was silently swallowing e.g. polycast's
+                    # experiments/gemini/scripts/*.py). A file with 0 bytes
+                    # of real content still yields 0 chunks either way --
+                    # chunk_generic() returns [] for an empty file.
+                    chunks = [c for c in chunk_generic(source_bytes) if c['text'].strip()]
+            else:
+                chunks = [c for c in chunk_generic(source_bytes) if c['text'].strip()]
         except Exception as e:
             print(f"Failed to process {rel}: {e}", file=sys.stderr)
             continue
@@ -231,9 +376,36 @@ def extract_python_calls(source):
     Visitor().visit(tree)
     return calls
 
-def ingest(force: bool = False) -> dict:
+
+def _ingested_key(repo_name: str, rel_path: str) -> str:
+    """ingested_files.file_path key for a (repo, path) pair.
+
+    ingested_files' real primary key is (collection, file_path) with no
+    repo column at all -- fine for rules/skills/sessions, each a single
+    fixed corpus, but not for code once many independent repos share it:
+    two repos' "src/__init__.py" collided under the same bare key, so
+    whichever repo ingested second silently inherited the first's hash
+    (breaking the incremental skip check) and a --force rebuild's GC step
+    (`NOT (file_path = ANY(indexed_paths))`, scoped to repo_path's OWN
+    files) deleted every OTHER repo's rows outright, because nothing in
+    the query said "and only this repo's rows" (found via T-953 follow-up
+    audit: ingested_files WHERE collection='code' held ~57 rows after a
+    27-repo --force sweep that should have left ~1000+). Prefixing the
+    repo name here -- instead of migrating the shared table, which 3 other
+    modules also CREATE TABLE IF NOT EXISTS against -- fixes both without
+    touching rules_index.py/skills_index.py/sessions_index.py at all.
+    """
+    return f"{repo_name}::{rel_path}"
+
+
+def ingest(force: bool = False, repo_path: Path | None = None) -> dict:
     load_env()
-    repo_name, commit = project_info()
+    if repo_path is None:
+        repo_path = Path.cwd()
+        repo_name, commit = project_info()
+    else:
+        repo_path = Path(repo_path)
+        repo_name, commit = _project_info_for(repo_path)
     if not repo_name:
         repo_name = "ai-router"
     if not commit:
@@ -242,9 +414,8 @@ def ingest(force: bool = False) -> dict:
     dsn = os.environ.get("POSTGRES_DSN")
     if not dsn:
         raise RuntimeError("POSTGRES_DSN not set")
-        
-    repo_path = Path.cwd()
-    stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0}
+
+    stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0, "files_failed": 0}
     
     with psycopg.connect(dsn) as conn:
         init_db(conn)
@@ -261,16 +432,16 @@ def ingest(force: bool = False) -> dict:
         if indexed_commit and indexed_commit != "unknown" and indexed_commit != commit:
             try:
                 res = subprocess.run(["git", "diff", "--name-only", f"{indexed_commit}..HEAD"],
-                                     capture_output=True, text=True, check=True)
+                                     cwd=repo_path, capture_output=True, text=True, check=True)
                 changed_files = res.stdout.splitlines()
-                target_files = [Path(f) for f in changed_files if Path(f).exists() and (f.endswith('.py') or f.endswith('.sh'))]
+                target_files = [repo_path / f for f in changed_files if (repo_path / f).exists() and _lang_for_path(f) and not _is_excluded(f)]
                 # Vanished files
-                vanished = [f for f in changed_files if not Path(f).exists()]
+                vanished = [f for f in changed_files if not (repo_path / f).exists()]
                 if vanished:
                     with conn.cursor() as cur:
                         cur.execute("DELETE FROM code_chunks WHERE repo = %s AND path = ANY(%s) RETURNING id", (repo_name, vanished))
                         stats["chunks_deleted"] += len(cur.fetchall())
-                        cur.execute("DELETE FROM ingested_files WHERE collection = 'code' AND file_path = ANY(%s)", (vanished,))
+                        cur.execute("DELETE FROM ingested_files WHERE collection = 'code' AND file_path = ANY(%s)", ([_ingested_key(repo_name, f) for f in vanished],))
             except subprocess.CalledProcessError:
                 # fallback to all
                 pass
@@ -279,10 +450,14 @@ def ingest(force: bool = False) -> dict:
             # full rebuild / fallback
             target_files = []
             try:
-                res = subprocess.run(["git", "ls-files", "--", "*.py", "*.sh"], cwd=repo_path, capture_output=True, text=True, check=True)
-                target_files = [repo_path / f for f in res.stdout.splitlines() if (repo_path / f).exists()]
-            except subprocess.CalledProcessError:
-                pass
+                res = subprocess.run(["git", "ls-files", "--", *CODE_GLOBS], cwd=repo_path, capture_output=True, text=True, check=True)
+                target_files = [repo_path / f for f in res.stdout.splitlines() if (repo_path / f).exists() and not _is_excluded(f)]
+            except subprocess.CalledProcessError as e:
+                # Not a real git repo (or otherwise unreadable) -- log so
+                # this is distinguishable from "genuinely 0 code files",
+                # then continue with target_files empty; the repo is
+                # skipped, not the whole sweep (WO DoD #5).
+                print(f"code_index: {repo_path} is not readable as a git repo, skipping: {e.stderr.strip() if e.stderr else e}", file=sys.stderr)
                 
         if not target_files and not force:
             # nothing changed
@@ -305,13 +480,19 @@ def ingest(force: bool = False) -> dict:
             except ValueError:
                 rel_path = str(filepath)
 
-            lang = 'python' if rel_path.endswith('.py') else 'bash'
-            source = filepath.read_text('utf-8')
-            file_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            lang = _lang_for_path(rel_path) or "unknown"
+            try:
+                source = filepath.read_text('utf-8')
+                file_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            except Exception as e:
+                print(f"code_index: skipping unreadable file {filepath}: {e}", file=sys.stderr)
+                stats.setdefault("files_failed", 0)
+                stats["files_failed"] += 1
+                continue
 
             if not force:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT content_hash FROM ingested_files WHERE collection = 'code' AND file_path = %s", (rel_path,))
+                    cur.execute("SELECT content_hash FROM ingested_files WHERE collection = 'code' AND file_path = %s", (_ingested_key(repo_name, rel_path),))
                     row = cur.fetchone()
                     if row and row[0] == file_hash:
                         stats["skipped"] += 1
@@ -346,7 +527,7 @@ def ingest(force: bool = False) -> dict:
                         continue
                         
                     try:
-                        header = f"{lang} {c['symbol']} in {rel_path}"
+                        header = f"{lang} {c['symbol'] or 'module'} in {rel_path}"
                         emb = model.embed([chunk_text], prefix=f"{header}\npassage: ")[0].tolist()
                     except Exception as e:
                         print(f"Embedding failed: {e}", file=sys.stderr)
@@ -374,7 +555,7 @@ def ingest(force: bool = False) -> dict:
                     "INSERT INTO ingested_files (collection, file_path, content_hash, updated_at) "
                     "VALUES ('code', %s, %s, CURRENT_TIMESTAMP) "
                     "ON CONFLICT (collection, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash, updated_at = CURRENT_TIMESTAMP",
-                    (rel_path, file_hash)
+                    (_ingested_key(repo_name, rel_path), file_hash)
                 )
 
             # Update call graph for Python
@@ -400,7 +581,20 @@ def ingest(force: bool = False) -> dict:
                 indexed_paths = [str(f.resolve().relative_to(repo_path.resolve())) for f in target_files]
                 cur.execute("DELETE FROM code_chunks WHERE repo = %s AND NOT (path = ANY(%s)) RETURNING id", (repo_name, indexed_paths))
                 stats["chunks_deleted"] += len(cur.fetchall())
-                cur.execute("DELETE FROM ingested_files WHERE collection = 'code' AND NOT (file_path = ANY(%s))", (indexed_paths,))
+
+                # ingested_files has no repo column (see _ingested_key) --
+                # "NOT IN indexed_paths" alone would delete every OTHER
+                # repo's rows too. Fetch this repo's own keys by prefix in
+                # Python (not SQL LIKE: a repo name containing "_", e.g.
+                # research_toolkit, is a wildcard to LIKE) and delete only
+                # the ones that actually vanished from this repo.
+                prefix = f"{repo_name}::"
+                cur.execute("SELECT file_path FROM ingested_files WHERE collection = 'code'")
+                existing_keys = [r[0] for r in cur.fetchall() if r[0].startswith(prefix)]
+                current_keys = {_ingested_key(repo_name, p) for p in indexed_paths}
+                stale_keys = [k for k in existing_keys if k not in current_keys]
+                if stale_keys:
+                    cur.execute("DELETE FROM ingested_files WHERE collection = 'code' AND file_path = ANY(%s)", (stale_keys,))
             
             cur.execute("UPDATE code_chunks SET repo_commit = %s WHERE repo = %s", (commit, repo_name))
             cur.execute("SELECT count(*) FROM code_chunks WHERE repo = %s", (repo_name,))
@@ -410,6 +604,85 @@ def ingest(force: bool = False) -> dict:
 
         conn.commit()
     return stats
+
+
+def sweep(force: bool = False, budget_seconds: float | None = None) -> dict:
+    """Ingest every configured repo root (get_repo_roots()), one at a time.
+
+    Used by the `rag_ingest.py --collection code` sweep (the launchd job
+    com.ai-router.rag-sweep). Must always be safe to call repeatedly and
+    must never let one bad repo or a long cold repo starve the rest:
+    - Per-repo failure isolation: any exception from ingest() for one repo
+      (bad encoding, no git, broken symlink, permissions, etc.) is logged
+      to stderr and that repo is skipped; the sweep continues with the
+      next repo. The ONE exception is psycopg.OperationalError (Postgres
+      itself unreachable) -- that is not a per-repo problem, so it is
+      re-raised immediately so the caller (rag_ingest.py) can report the
+      real outage instead of it looking like 30+ repo failures.
+    - Time budget: stops starting new repos once `budget_seconds` has
+      elapsed since the sweep started (default: env var
+      RAG_CODE_SWEEP_BUDGET_S if set, else 1500 seconds -- comfortably
+      under the 30-minute launchd interval). A repo already in progress
+      finishes; the NEXT repo is what gets deferred.
+    - Resume: repos are visited in a fixed order, round-robin-rotated by
+      an index persisted in <vault>/data/code_sweep_state.json
+      ({"next_index": N}) so a run that hits the budget resumes with the
+      repos it didn't get to last time, instead of starving the same
+      tail of the list forever. Missing/corrupt state file starts at 0.
+    """
+    load_env()
+    if budget_seconds is None:
+        budget_seconds = float(os.environ.get("RAG_CODE_SWEEP_BUDGET_S", 1500))
+
+    import time
+    roots = get_repo_roots()
+    state_path = delegate.DATA_DIR / "code_sweep_state.json"
+    try:
+        state = json.loads(state_path.read_text("utf-8")) if state_path.exists() else {}
+    except Exception:
+        state = {}
+    start_idx = (state.get("next_index", 0) % len(roots)) if roots else 0
+    order = roots[start_idx:] + roots[:start_idx]
+
+    t0 = time.time()
+    total = {
+        "repos_seen": 0, "repos_failed": 0, "files_seen": 0,
+        "chunks_written": 0, "chunks_deleted": 0, "skipped": 0,
+        "failures": {},
+    }
+    processed = 0
+    for root in order:
+        if time.time() - t0 > budget_seconds:
+            break
+        try:
+            stats = ingest(force=force, repo_path=root)
+            for k in ("files_seen", "chunks_written", "chunks_deleted", "skipped"):
+                total[k] += stats.get(k, 0)
+        except psycopg.OperationalError:
+            raise
+        except Exception as e:
+            total["repos_failed"] += 1
+            total["failures"][str(root)] = str(e)
+            print(f"code_index: skipping repo {root}: {e}", file=sys.stderr)
+        finally:
+            total["repos_seen"] += 1
+            processed += 1
+
+    delegate.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    next_index = ((start_idx + processed) % len(roots)) if roots else 0
+    state_path.write_text(json.dumps({"next_index": next_index}), "utf-8")
+
+    dsn = os.environ.get("POSTGRES_DSN")
+    if dsn:
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM code_chunks")
+                total["total_chunks"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'code'")
+                total["total_docs"] = cur.fetchone()[0]
+
+    return total
+
 
 def cmd_reindex(args):
     try:
@@ -421,13 +694,18 @@ def cmd_reindex(args):
 
 def cmd_search(args, repo: str | None = None):
     load_env()
-    if repo:
-        repo_name = repo
-        commit = None
+    all_repos = getattr(args, "all_repos", False)
+    if not all_repos:
+        if repo:
+            repo_name = repo
+            commit = None
+        else:
+            repo_name, commit = project_info()
+            if not repo_name:
+                repo_name = "ai-router"
     else:
-        repo_name, commit = project_info()
-        if not repo_name:
-            repo_name = "ai-router"
+        repo_name = None
+        commit = None
     
     dsn = os.environ.get("POSTGRES_DSN")
     if not dsn:
@@ -442,21 +720,31 @@ def cmd_search(args, repo: str | None = None):
     
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT repo_commit FROM code_chunks WHERE repo = %s LIMIT 1", (repo_name,))
-            row = cur.fetchone()
-            if row and commit and row[0] != commit:
-                print(f"Warning: code index is stale. Index commit: {row[0]}, Current commit: {commit}", file=sys.stderr)
+            if not all_repos:
+                cur.execute("SELECT repo_commit FROM code_chunks WHERE repo = %s LIMIT 1", (repo_name,))
+                row = cur.fetchone()
+                if row and commit and row[0] != commit:
+                    print(f"Warning: code index is stale. Index commit: {row[0]}, Current commit: {commit}", file=sys.stderr)
                 
-            repo_filter = ""
-            params = [repo_name, str(q_emb), k]
-            if args.repo:
-                repo_filter = "AND path LIKE %s"
-                params.insert(1, f"{args.repo}%")
+            if all_repos:
+                if args.repo:
+                    where_clause = "WHERE path LIKE %s"
+                    params = [f"{args.repo}%", str(q_emb), k]
+                else:
+                    where_clause = ""
+                    params = [str(q_emb), k]
+            else:
+                where_clause = "WHERE repo = %s"
+                params = [repo_name]
+                if args.repo:
+                    where_clause += " AND path LIKE %s"
+                    params.append(f"{args.repo}%")
+                params.extend([str(q_emb), k])
                 
             cur.execute(f"""
-                SELECT id, path, start_line, end_line, symbol, chunk 
+                SELECT id, path, start_line, end_line, symbol, chunk, repo 
                 FROM code_chunks 
-                WHERE repo = %s {repo_filter}
+                {where_clause}
                 ORDER BY embedding <=> %s::vector 
                 LIMIT %s
             """, params)
@@ -467,7 +755,7 @@ def cmd_search(args, repo: str | None = None):
                 hit_ids = [r[0] for r in results]
                 # Fetch 1-hop callers
                 cur.execute("""
-                    SELECT cc.id, cc.path, cc.start_line, cc.end_line, cc.symbol, cc.chunk
+                    SELECT cc.id, cc.path, cc.start_line, cc.end_line, cc.symbol, cc.chunk, cc.repo
                     FROM code_edges ce
                     JOIN code_chunks cc ON ce.caller_id = cc.id
                     WHERE ce.resolved_id = ANY(%s)
@@ -476,7 +764,7 @@ def cmd_search(args, repo: str | None = None):
                 
                 # Fetch 1-hop callees
                 cur.execute("""
-                    SELECT cc.id, cc.path, cc.start_line, cc.end_line, cc.symbol, cc.chunk
+                    SELECT cc.id, cc.path, cc.start_line, cc.end_line, cc.symbol, cc.chunk, cc.repo
                     FROM code_edges ce
                     JOIN code_chunks cc ON ce.resolved_id = cc.id
                     WHERE ce.caller_id = ANY(%s)
@@ -493,8 +781,12 @@ def cmd_search(args, repo: str | None = None):
     total_chars = 0
     for r in results:
         path, start_line, end_line, symbol, chunk = r[1], r[2], r[3], r[4], r[5]
+        repo_col = r[6] if len(r) > 6 else (repo_name or "")
         s = symbol if symbol else "unknown"
-        prefix = f"{path}:{start_line}-{end_line} [{s}]"
+        if all_repos:
+            prefix = f"[{repo_col}] {path}:{start_line}-{end_line} [{s}]"
+        else:
+            prefix = f"{path}:{start_line}-{end_line} [{s}]"
         item = f"{prefix}\n{chunk}\n"
         if total_chars + len(item) > 8000:  # ~2k tokens
             break
@@ -516,6 +808,7 @@ def main():
     p_search.add_argument("-k", type=int, default=5)
     p_search.add_argument("--graph", action="store_true")
     p_search.add_argument("--repo")
+    p_search.add_argument("--all-repos", action="store_true")
     
     p_chunk = subparsers.add_parser("chunk-files")
     p_chunk.add_argument("paths", nargs="*")
