@@ -9,6 +9,7 @@ import re
 # Import delegate under ONE module identity ("delegate")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, _agent_projects_root  # noqa: E402
+from jalaali import translate_digits, normalize_stored_date  # noqa: E402
 from rules_index import chunk_markdown, get_model  # noqa: E402
 
 def init_db(conn):
@@ -68,26 +69,44 @@ def find_session_files(agent_projects: Path) -> list[Path]:
     return sorted(target_files)
 
 def _extract_date(heading: str, text: str, filename: str) -> str | None:
+    heading = translate_digits(heading) if heading else heading
+    text = translate_digits(text) if text else text
+    filename = translate_digits(filename) if filename else filename
+
     if heading:
         m = re.search(r'(\d{4}-\d{2}-\d{2})', heading)
         if m:
-            return m.group(1)
+            res = normalize_stored_date(m.group(1))
+            if res:
+                return res
         m = re.search(r'(\d{4}-\d{2})', heading)
         if m:
-            return m.group(1)
-    m = re.search(r'(?:date|Date):\s*["\']?(\d{4}-\d{2}-\d{2})["\']?', text)
-    if m:
-        return m.group(1)
-    m = re.search(r'(\d{4}-\d{2}-\d{2})', filename)
-    if m:
-        return m.group(1)
-    m = re.search(r'(\d{4}\d{2}\d{2})', filename)
-    if m:
-        dstr = m.group(1)
-        return f"{dstr[:4]}-{dstr[4:6]}-{dstr[6:8]}"
-    m = re.search(r'(\d{4}-\d{2})', filename)
-    if m:
-        return m.group(1)
+            res = normalize_stored_date(m.group(1))
+            if res:
+                return res
+    if text:
+        m = re.search(r'(?:date|Date):\s*["\']?(\d{4}-\d{2}-\d{2})["\']?', text)
+        if m:
+            res = normalize_stored_date(m.group(1))
+            if res:
+                return res
+    if filename:
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', filename)
+        if m:
+            res = normalize_stored_date(m.group(1))
+            if res:
+                return res
+        m = re.search(r'(\d{4}\d{2}\d{2})', filename)
+        if m:
+            dstr = m.group(1)
+            res = normalize_stored_date(f"{dstr[:4]}-{dstr[4:6]}-{dstr[6:8]}")
+            if res:
+                return res
+        m = re.search(r'(\d{4}-\d{2})', filename)
+        if m:
+            res = normalize_stored_date(m.group(1))
+            if res:
+                return res
     return None
 
 def ingest(force: bool = False, target_file: Path | None = None) -> dict:
@@ -275,6 +294,35 @@ def cmd_search(args):
         
     print("\n---\n".join(out))
 
+def cmd_backfill_dates(args):
+    load_env()
+
+    dsn = os.environ.get("POSTGRES_DSN")
+    if not dsn:
+        print("Error: POSTGRES_DSN not set.", file=sys.stderr)
+        sys.exit(1)
+
+    repo_counts = {}
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, repo, date FROM session_chunks WHERE date IS NOT NULL")
+            rows = cur.fetchall()
+            for row_id, repo, date_val in rows:
+                new_date = normalize_stored_date(date_val)
+                if new_date != date_val:
+                    cur.execute(
+                        "UPDATE session_chunks SET date = %s WHERE id = %s",
+                        (new_date, row_id)
+                    )
+                    repo_counts[repo] = repo_counts.get(repo, 0) + 1
+        conn.commit()
+
+    if not repo_counts:
+        print("No rows changed.")
+    else:
+        for repo in sorted(repo_counts.keys()):
+            print(f"{repo}: {repo_counts[repo]} rows changed")
+
 def main():
     parser = argparse.ArgumentParser(description="Sessions index and search")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
@@ -287,12 +335,16 @@ def main():
     parser_search.add_argument("query", help="Search query")
     parser_search.add_argument("-k", type=int, default=5, help="Number of results")
     
+    subparsers.add_parser("backfill-dates")
+
     args = parser.parse_args()
     try:
         if args.cmd == "reindex":
             cmd_reindex(args)
         elif args.cmd == "search":
             cmd_search(args)
+        elif args.cmd == "backfill-dates":
+            cmd_backfill_dates(args)
     except psycopg.OperationalError:
         sys.exit("❌ Postgres not reachable — start it first: colima start")
 

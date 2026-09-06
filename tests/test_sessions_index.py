@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 import psycopg
 import pytest
+import re
 
 # Setup path so imports work
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -317,5 +318,83 @@ def test_sweep_does_not_evict_hook_ingested_file(monkeypatch, tmp_path):
             
     assert count2 == count1
     assert count2 > 0
+
+
+def test_extract_date_normalisation():
+    # 1. Heading with Persian-Indic full-date digits normalizes to ISO
+    res1 = si._extract_date("## ۲۰۲۶-۰۹-۰۵ session note", "", "test.md")
+    assert res1 == "2026-09-05"
+
+    # 2. Heading with Jalali date converts to Gregorian ISO equivalent
+    res2 = si._extract_date("## ۱۴۰۵-۰۴-۰۱ jalaali session", "", "test.md")
+    assert res2 == "2026-06-22"
+
+    # 3. Heading with garbage numbers that don't form a valid date falls through to None
+    res3 = si._extract_date("## 9999-99-99 invalid date", "", "test.md")
+    assert res3 is None
+
+    # Fall-through to next real match in cascade (e.g. text date:)
+    res4 = si._extract_date("## 9999-99-99 invalid date", "date: 2026-08-15\ncontent", "test.md")
+    assert res4 == "2026-08-15"
+
+
+@pytest.mark.skipif(not has_pg, reason="Missing Postgres")
+def test_cmd_backfill_dates(capsys):
+    dsn = os.environ.get("POSTGRES_DSN")
+    with psycopg.connect(dsn) as conn:
+        si.init_db(conn)
+        with conn.cursor() as cur:
+            # Insert fixtures with Persian-digit, Jalali, and existing ISO dates
+            cur.execute(
+                "INSERT INTO session_chunks (repo, path, heading, start_line, chunk, chunk_sha, date, embedding) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector) RETURNING id",
+                ("repo-bf", "p1.md", "## Heading", 1, "test text 1", "sha1", "۲۰۲۶-۰۹-۰۵", str([0.0] * 384))
+            )
+            id1 = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO session_chunks (repo, path, heading, start_line, chunk, chunk_sha, date, embedding) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector) RETURNING id",
+                ("repo-bf", "p2.md", "## Heading", 1, "test text 2", "sha2", "۱۴۰۵-۰۴-۰۱", str([0.0] * 384))
+            )
+            id2 = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO session_chunks (repo, path, heading, start_line, chunk, chunk_sha, date, embedding) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector) RETURNING id",
+                ("repo-bf2", "p3.md", "## Heading", 1, "test text 3", "sha3", "2026-09-05", str([0.0] * 384))
+            )
+            id3 = cur.fetchone()[0]
+        conn.commit()
+
+    class Args:
+        pass
+
+    # Run first time
+    si.cmd_backfill_dates(Args())
+    captured = capsys.readouterr()
+    assert "repo-bf: 2 rows changed" in captured.out
+
+    # Check updated values
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, date FROM session_chunks WHERE id IN (%s, %s, %s)", (id1, id2, id3))
+            row_dict = dict(cur.fetchall())
+            assert row_dict[id1] == "2026-09-05"
+            assert row_dict[id2] == "2026-06-22"
+            assert row_dict[id3] == "2026-09-05"
+
+    # Run second time (idempotency)
+    si.cmd_backfill_dates(Args())
+    captured2 = capsys.readouterr()
+    assert "No rows changed." in captured2.out
+
+    # Regression guard across ALL rows in session_chunks
+    iso_date_re = re.compile(r"^\d{4}-\d{2}(-\d{2})?$")
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT date FROM session_chunks WHERE date IS NOT NULL")
+            all_dates = [r[0] for r in cur.fetchall()]
+            for d in all_dates:
+                assert iso_date_re.match(d) is not None, f"Non-ISO date found in session_chunks: {d}"
+
 
 
