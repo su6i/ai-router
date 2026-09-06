@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, _agent_projects_root  # noqa: E402
 from jalaali import translate_digits, normalize_stored_date  # noqa: E402
 from rules_index import chunk_markdown, get_model  # noqa: E402
+from repo_identity import validate_repo_name, InvalidRepoIdentity
 
 def init_db(conn):
     with conn.cursor() as cur:
@@ -116,7 +117,7 @@ def ingest(force: bool = False, target_file: Path | None = None) -> dict:
     if not dsn:
         raise RuntimeError("POSTGRES_DSN not set")
         
-    stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0}
+    stats = {"files_seen": 0, "chunks_written": 0, "chunks_deleted": 0, "skipped": 0, "invalid_repo": 0}
         
     agent_projects = _agent_projects_root()
     
@@ -141,7 +142,14 @@ def ingest(force: bool = False, target_file: Path | None = None) -> dict:
             except ValueError:
                 rel_path = str(filepath)
                 repo_name = filepath.parent.name
-            
+
+            try:
+                validate_repo_name(repo_name, roots=[agent_projects_resolved])
+            except InvalidRepoIdentity as e:
+                print(f"sessions_index: skipping {filepath} — invalid repo identity: {e}", file=sys.stderr)
+                stats["invalid_repo"] += 1
+                continue
+
             all_indexed_paths.append(rel_path)
 
             text = filepath.read_text("utf-8", errors="ignore")

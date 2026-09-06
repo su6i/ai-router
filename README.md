@@ -171,7 +171,7 @@ Requires `AI_ROUTER_BOT_TOKEN` (the project's own dedicated bot, `@su6i_ai_route
 
 ### ID Allocation
 
-`ai-router` provides a concurrency-safe atomic ID allocator to prevent collisions across parallel sessions. Allowed prefixes are sourced from `<vault>/PREFIXES.tsv` (resolved via `AGENT_MEMORY_DIR` alongside the ledger). If the file is absent, it falls back to a hardcoded set (`D-`, `T-`, `N-`, `B-`, `R-`) so the tool keeps working fully offline. An unknown prefix is refused with a message naming the source file. (`W-` was retired in favor of `R-` — research finding, per T-014.)
+`ai-router` provides a concurrency-safe atomic ID allocator to prevent collisions across parallel sessions. Allowed prefixes are sourced from `<vault>/PREFIXES.tsv` (resolved via `AGENT_MEMORY_DIR` alongside the ledger). If the file is absent, it falls back to a hardcoded set (`D-`, `T-`, `N-`, `B-`, `R-`) so the tool keeps working fully offline. An unknown prefix is refused with a message naming the source file. (`W-` was retired in favor of `R-` — research finding, per T-014.) The `next`/`void` positional (`prefix`/`id`) rejects a value starting with `-` — a stray `--` before it would otherwise hand a flag straight through as the positional's literal value.
 The allocator uses an append-only TSV ledger backed by OS-level file locking. State lives in the vault (`~/.local/share/agent-projects/_memory/ID-LEDGER.tsv`, override with `AGENT_MEMORY_DIR`).
 
 `next`'s number comes **only** from the locked ledger — `REGISTRY-IDS.md` is
@@ -360,6 +360,15 @@ digit dates and Jalali (Solar Hijri) dates are normalised to that shape on inges
 never left as a raw non-Latin or Jalali string — string comparisons across repos would otherwise
 silently misorder. `uv run --directory <repo> python src/sessions_index.py backfill-dates` is a
 one-shot, idempotent migration for rows indexed before this normalisation existed.
+
+Every ingest path (`sessions_index.py`, `code_index.py`) validates the `repo` identity it is about
+to write through `src/repo_identity.py` before inserting — a name that is empty, `.`/`..`, contains
+a path separator, or starts with `-` (the shape of a CLI flag mistakenly consumed as a positional
+argument) is rejected outright rather than silently indexed. `uv run --directory <repo> python
+src/cleanup_invalid_repos.py [--dry-run]` re-checks every distinct `repo` value already in
+`session_chunks`/`code_chunks`/`skill_chunks`/`rules_chunks` against the same rule and purges only
+the ones that fail it — a one-shot, idempotent cleanup for rows written before this validation
+existed.
 
 ```bash
 # Query the sessions index (returns top 5 chunks by default)
