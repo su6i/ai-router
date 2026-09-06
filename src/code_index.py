@@ -14,6 +14,7 @@ from tree_sitter import Language, Parser
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from delegate import load_env, project_info
+from repo_identity import validate_repo_name, reject_flag_like, InvalidRepoIdentity  # noqa: F401 (InvalidRepoIdentity re-exported as code_index.InvalidRepoIdentity for callers)
 import delegate
 from rules_index import get_model
 
@@ -408,6 +409,7 @@ def ingest(force: bool = False, repo_path: Path | None = None) -> dict:
         repo_name, commit = _project_info_for(repo_path)
     if not repo_name:
         repo_name = "ai-router"
+    validate_repo_name(repo_name)
     if not commit:
         commit = "unknown"
 
@@ -811,7 +813,7 @@ def main():
     p_search.add_argument("--all-repos", action="store_true")
     
     p_chunk = subparsers.add_parser("chunk-files")
-    p_chunk.add_argument("paths", nargs="*")
+    p_chunk.add_argument("paths", nargs="*", type=reject_flag_like)
 
     args = parser.parse_args()
     try:

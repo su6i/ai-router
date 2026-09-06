@@ -355,3 +355,21 @@ def test_no_prefixes_tsv_falls_back_to_builtin(isolated_paths):
     assert res.stdout.strip() == "D-001"
     assert "falling back to builtin default prefixes" in res.stderr
 
+
+def test_next_rejects_flag_like_prefix(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["id_alloc", "next", "--", "--help", "--intent", "x"])
+    with pytest.raises(SystemExit) as exc:
+        id_alloc.main()
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    assert "--help" in captured.err
+
+
+def test_void_rejects_flag_like_id(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["id_alloc", "void", "--", "--oops", "--reason", "x"])
+    with pytest.raises(SystemExit) as exc:
+        id_alloc.main()
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    assert "--oops" in captured.err
+

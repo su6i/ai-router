@@ -397,4 +397,31 @@ def test_cmd_backfill_dates(capsys):
                 assert iso_date_re.match(d) is not None, f"Non-ISO date found in session_chunks: {d}"
 
 
+@pytest.mark.skipif(not (has_pg and has_model), reason="Missing Postgres or e5 model")
+def test_reject_flag_like_repo_name(monkeypatch, tmp_path):
+    agent_root = tmp_path / "agent-projects"
+    agent_root.mkdir()
+
+    bad_repo = agent_root / "--bad-flag" / "workspace"
+    bad_repo.mkdir(parents=True)
+    (bad_repo / "SESSION.md").write_text("## Session\nBad flag session text.\n")
+
+    good_repo = agent_root / "good-repo" / "workspace"
+    good_repo.mkdir(parents=True)
+    (good_repo / "SESSION.md").write_text("## Session\nGood session text.\n")
+
+    monkeypatch.setattr(si, "_agent_projects_root", lambda: agent_root)
+
+    res = si.ingest(force=True)
+    assert res["invalid_repo"] == 1
+    assert res["files_seen"] == 1
+
+    if has_pg:
+        dsn = os.environ.get("POSTGRES_DSN")
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM session_chunks WHERE repo = '--bad-flag'")
+                assert cur.fetchone()[0] == 0
+
+
 

@@ -815,3 +815,15 @@ def test_default_search_output_unchanged_without_all_repos(monkeypatch, capsys):
 
     assert captured.out.startswith("path1.py:1-100 [func_1]\n")
     assert not captured.out.startswith("[")
+
+
+def test_ingest_rejects_flag_like_repo_name(monkeypatch, tmp_path):
+    monkeypatch.setattr(ci, "_project_info_for", lambda p: ("--bad-flag", None))
+    with pytest.raises(ci.InvalidRepoIdentity):
+        ci.ingest(force=True, repo_path=tmp_path)
+
+
+def test_chunk_files_rejects_flag_like_path():
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        ci.reject_flag_like("--looks-like-a-flag")

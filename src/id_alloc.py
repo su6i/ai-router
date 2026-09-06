@@ -7,6 +7,8 @@ import re
 import sys
 import tempfile
 
+from repo_identity import reject_flag_like
+
 # An ID counts only when it is the identifier OF a registry row, never when it is
 # merely mentioned inside one. Prose examples live in blockquotes ("> ... `T-0900`")
 # and sentences, so anchoring to the row shape is what kills the poisoning (N-031).
@@ -317,7 +319,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     parser_next = subparsers.add_parser("next")
-    parser_next.add_argument("prefix")
+    parser_next.add_argument("prefix", type=reject_flag_like)
     parser_next.add_argument("--intent", required=True)
     parser_next.add_argument("--who", default="unknown")
     
@@ -326,7 +328,7 @@ def main():
     subparsers.add_parser("seed")
 
     parser_void = subparsers.add_parser("void")
-    parser_void.add_argument("id")
+    parser_void.add_argument("id", type=reject_flag_like)
     parser_void.add_argument("--reason", required=True)
     parser_void.add_argument("--who", default="unknown")
     
