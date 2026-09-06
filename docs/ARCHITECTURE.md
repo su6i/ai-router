@@ -163,7 +163,14 @@ tokens. The one escape hatch is an explicit, logged `--no-verify-reason "<text>"
 (empty/whitespace rejected); docs/text-only runs need neither. A per-delegation file
 cap (default 8, `AI_ROUTER_MAX_FILES_PER_RUN` / `--max-files`) aborts the same way
 before the call — a flash-class model loses the thread across large fan-outs (rule
-070 evidence: Arix Sense 0005, 13 blocking defects). The ledger records
+070 evidence: Arix Sense 0005, 13 blocking defects). A second cap bounds the
+*bytes* those files carry (default 400 KB, `AI_ROUTER_MAX_INPUT_BYTES_PER_RUN` /
+`--max-input-bytes`), because a file count is not a size — T-959. What that cap
+does NOT bound, stated plainly: ledger analysis of the 2026-09-06 agy quota burn
+found each dispatch on its own `conversation_id`, so the multi-million-token runs
+grew inside a single conversation from agy's own agentic file exploration, not
+from the payload we hand it. Bounding that needs a per-run token circuit breaker,
+which these caps are not. The ledger records
 `verify_present`, `no_verify_reason`, and `files_written_count` per run, and
 `--scorecard` surfaces a `%unverified` column per model so an unverified run stays
 visible in the comparison D-233 exists to produce.

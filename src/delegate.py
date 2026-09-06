@@ -57,6 +57,15 @@ VERIFY_TIMEOUT = 600
 GIT_TIMEOUT = 3
 CODE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".go", ".rs"}
 DEFAULT_MAX_FILES_PER_RUN = 8
+# T-959. The file cap alone does not bound a delegation: two files are enough
+# to send megabytes when one of them is src/delegate.py. Ledger evidence
+# 2026-09-06 — ten runs burned 93% of two days of agy quota, and the cause was
+# input size, not retries: `in` per run went from a historical 100-400k tokens
+# to 1.9M and 2.75M, which agy then replayed as cache (one run: 49.8M cache
+# tokens). Two of those runs wrote no files at all and still burned 27M and
+# 19M. 400 KB is roughly 100k tokens, at the top of the range that used to
+# leave half the weekly quota unspent.
+DEFAULT_MAX_INPUT_BYTES_PER_RUN = 400_000
 SQLITE_TIMEOUT = 5
 CACHE_MAX_ROWS = 5000
 CACHE_MAX_AGE_DAYS = 90
@@ -1804,8 +1813,20 @@ def _resolve_max_files_per_run(max_files: int | None) -> int:
         return DEFAULT_MAX_FILES_PER_RUN
 
 
+def _resolve_max_input_bytes_per_run(max_input_bytes: int | None) -> int:
+    if max_input_bytes is not None:
+        return max_input_bytes
+    try:
+        return int(os.environ.get("AI_ROUTER_MAX_INPUT_BYTES_PER_RUN",
+                                  DEFAULT_MAX_INPUT_BYTES_PER_RUN))
+    except ValueError:
+        return DEFAULT_MAX_INPUT_BYTES_PER_RUN
+
+
 def _enforce_verify_and_cap(files_arg: str, allow_write_arg: str, verify_cmd: str,
-                             no_verify_reason: str | None, max_files: int | None) -> None:
+                             no_verify_reason: str | None, max_files: int | None,
+                             project_root: Path | None = None,
+                             max_input_bytes: int | None = None) -> None:
     """T-954 mechanical pre-call gate. MUST be the first thing a delegation
     entry point does — before check_budget, before resolve_model, before any
     provider call. Raises ValueError (never sys.exit — callers already catch
@@ -1839,6 +1860,37 @@ def _enforce_verify_and_cap(files_arg: str, allow_write_arg: str, verify_cmd: st
             f"the thread across large fan-outs (rule 070 evidence: Arix Sense "
             f"0005, 13 blocking defects)."
         )
+
+    # Input-size cap (T-959). Files are read from disk by the worker, so their
+    # on-disk size is what actually reaches the provider. stat() only — never
+    # read the files here, or the gate costs what it is trying to save.
+    byte_cap = _resolve_max_input_bytes_per_run(max_input_bytes)
+    if byte_cap > 0 and rel_files:
+        root = Path(project_root) if project_root else Path.cwd()
+        sized = []
+        for rel in rel_files:
+            fp = Path(rel)
+            if not fp.is_absolute():
+                fp = root / rel
+            try:
+                sized.append((rel, fp.stat().st_size))
+            except OSError:
+                # A path that does not exist yet is a file the worker will
+                # create. It contributes nothing to the input.
+                continue
+        total = sum(n for _, n in sized)
+        if total > byte_cap:
+            worst = ", ".join(f"{r} ({n // 1024} KB)"
+                              for r, n in sorted(sized, key=lambda x: -x[1])[:3])
+            raise ValueError(
+                f"this delegation would send {total // 1024} KB of files to the "
+                f"worker, over the cap of {byte_cap // 1024} KB "
+                f"(AI_ROUTER_MAX_INPUT_BYTES_PER_RUN env var, or --max-input-bytes "
+                f"to override this one call). Largest: {worst}. Split the work, or "
+                f"quote the few relevant lines in the prompt instead of passing the "
+                f"whole file — T-959: input size, not retry count, is what burned "
+                f"93% of two days of agy quota on 2026-09-06."
+            )
 
 
 def _get_channel_system_prompt(model: str) -> str:
@@ -2232,8 +2284,10 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
                      via: str | None = None, estimate: bool = False,
                      allow_full_rewrite: bool = False, session_key: str | None = None,
                      resume: bool = True, self_fix: bool = True,
-                     no_verify_reason: str | None = None, max_files: int | None = None) -> str:
-    _enforce_verify_and_cap(files_arg, allow_write_arg, verify_cmd, no_verify_reason, max_files)
+                     no_verify_reason: str | None = None, max_files: int | None = None,
+                     max_input_bytes: int | None = None) -> str:
+    _enforce_verify_and_cap(files_arg, allow_write_arg, verify_cmd, no_verify_reason,
+                            max_files, project_root, max_input_bytes)
     # Resolve here, not only in the CLI: `agy` stopped being a MODELS key when
     # the catalog was opened (it is now an ALIAS for gemini-3.1-pro-high), and
     # callers that bypass the CLI — the MCP server above all — hand us the raw
@@ -3137,6 +3191,9 @@ def main():
                           "(docs/text-only runs only; empty/whitespace is rejected)")
     ap.add_argument("--max-files", type=int, default=None,
                      help="override AI_ROUTER_MAX_FILES_PER_RUN (default 8) for this one call")
+    ap.add_argument("--max-input-bytes", type=int, default=None,
+                     help="override AI_ROUTER_MAX_INPUT_BYTES_PER_RUN (default 400000) "
+                          "for this one call; 0 disables the input-size cap")
     ap.add_argument("--retries", type=int, default=1,
                     help="worker mode: verify-failure retries (default 1, max 2)")
     ap.add_argument("--no-self-fix", action="store_true",
@@ -3350,7 +3407,8 @@ def main():
         print(worker_delegate(prompt, model, a.files, a.allow_write, a.verify, a.retries,
                               estimate=a.estimate, allow_full_rewrite=a.allow_full_rewrite,
                               session_key=a.session_key or None, self_fix=not a.no_self_fix,
-                              no_verify_reason=a.no_verify_reason, max_files=a.max_files))
+                              no_verify_reason=a.no_verify_reason, max_files=a.max_files,
+                              max_input_bytes=a.max_input_bytes))
         return
 
     try:

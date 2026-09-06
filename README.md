@@ -472,6 +472,13 @@ python3 src/delegate.py --model flash \
   (`AI_ROUTER_MAX_FILES_PER_RUN` env var, overridable per call with this
   flag). Over the cap the run aborts before the model call — split the work
   into smaller dispatches instead.
+- `--max-input-bytes <n>` — T-959: per-delegation cap on the total on-disk
+  size of the declared files, default 400000
+  (`AI_ROUTER_MAX_INPUT_BYTES_PER_RUN` env var; `0` disables). The file-count
+  cap does not bound a run — two files reach megabytes when one is a 157 KB
+  module. Files are `stat()`ed, never read; a declared path that does not
+  exist yet is one the worker will create and counts as nothing. The error
+  names the three largest files so "split the work" is actionable.
 - `--retries` — verify-failure retries (default 1, max 2); the worker gets
   the verify output back and one more attempt per retry.
 - `--session-key <key>` — `agy` channel only: resume the SAME `agy`
