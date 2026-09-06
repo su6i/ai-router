@@ -77,6 +77,56 @@ can never enter the index). Both paths are idempotent; a second run is a
 no-op. Queries print a one-line stale-index warning when
 `repo_commit != HEAD`.
 
+## Invocation gate (T-952)
+
+Indexing content nobody consults is wasted work, and consulting was in fact
+close to zero: `hooks/code_lookup_gate.py` used to register only on `Read`,
+so `Grep`, `Glob`, and any `Bash` invocation of `cat`/`grep`/`sed -n`/`find`
+walked straight past it — auto mode routes most exploratory reads through
+`Bash`, so the gate almost never fired.
+
+**Gated tools**: `Read` (unchanged: files over
+`AI_ROUTER_CODE_LOOKUP_GATE_MAX_BYTES`, default 8192 bytes), `Grep`, `Glob`
+(every call — these are inherently repo-wide), and `Bash` when its leading
+utility is `cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, `ag`, or
+`find … -name`/`-iname`, and only when the first pipeline segment (not
+something downstream of a `|`) targets a path inside a git repo.
+
+**Not gated, by design** — under-matching is intentional, since a false
+positive here taxes every turn in every repo:
+- `git log --grep=...` (and any other command whose leading utility isn't
+  itself one of the gated ones — a later flag spelling "grep" never counts)
+- a heredoc or here-string (`<<`, `<<<`) — the utility reads inline text
+  handed to it by the shell, not a file on disk
+- anything downstream of a pipe whose source isn't the filesystem
+  (`history | grep foo`)
+- `grep`/etc. run over another command's output (`git diff | grep TODO`)
+- `Write`/`Edit`, MCP tool calls, and files the agent itself wrote or
+  edited earlier in the same session (scanned from the transcript tail)
+
+**Empty-index pass-through**: before blocking, the gate checks whether the
+target repo actually has rows in `code_chunks` (`_repo_has_chunks`) and
+lets the call through, once, if it does not — sending an agent to an empty
+index is worse than not gating at all. This check only runs immediately
+before a block would otherwise be issued (never on the cheap/free paths),
+and fails toward "let it through" on any DB problem (missing
+`POSTGRES_DSN`, connection error, timeout) rather than blocking on an
+unproven index.
+
+**Bypass**: a deliberate second attempt on the exact same call always
+passes — the gate marks each `(session, tool, target)` it has already
+warned about and never blocks it twice. Set `AI_ROUTER_LOOKUP_GATE=off` to
+disable every matcher outright (kill switch, checked before anything else
+runs). Every decision (block, pass, empty-index, kill-switch-skipped calls
+excepted) is appended as one JSON line to
+`$AI_ROUTER_LOOKUP_GATE_LOG` (default: `<tempdir>/code-lookup-gate.log`) —
+`{"repo", "tool", "target", "decision"}` — so the gate's real hit/miss rate
+is measurable instead of assumed.
+
+Registered in `~/.claude/settings.json` as two `PreToolUse` hook entries
+(matchers `Read|Grep|Glob` and `Bash`, both invoking this same script) —
+that file is owner-owned and not edited by this repo's tooling.
+
 ## When it pays off
 
 Honest economics (carried over from the wo-0012 appendix): code retrieval
