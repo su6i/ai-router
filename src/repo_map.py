@@ -34,7 +34,13 @@ def generate_repo_map(cwd="."):
                 m = py_def_re.match(line) or py_class_re.match(line)
             else:
                 m = sh_func_re.match(line)
-            if m:
+            if m and not m.group(1).startswith("_"):
+                # Private (leading-underscore) helpers are internal
+                # implementation detail, not the module's entry points --
+                # excluding them keeps the map's fixed character budget
+                # (see the 4000-char cap below) spent on symbols an agent
+                # would actually look for, instead of getting eaten by
+                # whichever file happens to have the most private helpers.
                 symbols.append(m.group(1))
         
         if symbols:
