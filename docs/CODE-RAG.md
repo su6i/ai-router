@@ -107,3 +107,63 @@ Retrieval quality spot-checks (live):
 `r code "where is the budget cap checked"` → top-1
 `src/delegate.py:338-346 [check_budget._check]`; `--graph` additionally
 pulls the true callers `check_budget` and `test_budget_abort`.
+
+## Multi-repo ingestion (T-953)
+
+Before this, `code_index.py` hardcoded `root = Path(__file__).resolve().parent.parent`
+— it only ever indexed ai-router's own checkout, so an agent working in any
+other repo had no code memory at all. Every repo under `$HOME/@-github/` is
+now indexed into the same `code_chunks` table, discriminated by `repo`.
+
+**Repo roots come from config, not from a path constant.** `get_repo_roots()`
+reads `<vault>/data/code_repo_roots.json` (`{"roots": ["/abs/path", ...]}`, a
+bare JSON list is also accepted). Adding or removing a repo from the sweep is
+a config edit, never a commit. A missing, unreadable, or invalid config falls
+back to `_default_repo_roots()` — every directory directly under
+`$HOME/@-github/` that contains a `.git` — which is the default with no
+config file present at all.
+
+**Exclusions.** `_is_excluded()` skips `node_modules/`, `.venv/`, `venv/`,
+`dist/`, `build/`, `__pycache__/`, `.git/`, and `*.min.js` even if a repo
+happens to have committed one of those paths — defense in depth on top of
+`git ls-files` only ever seeing tracked files in the first place. As before,
+only `*.py`/`*.sh` are chunked (no new tree-sitter grammar was added in this
+change — a repo with only JS/TS/Go/Rust sources contributes 0 chunks today,
+which shows up honestly as `files_seen: 0` rather than mis-parsing those
+files as Python or Bash).
+
+**Per-repo isolation and failure isolation.** `ingest(force, repo_path=...)`
+now takes an explicit repo root instead of always using `Path.cwd()`; every
+DB read/write it does is scoped to that repo's name (derived from that
+root's own git remote/toplevel, not the caller's cwd). `sweep()` calls
+`ingest()` once per configured root and catches any exception per repo
+(bad encoding, no git, broken symlink, permission-denied directory, ...),
+logging and moving on to the next repo — one bad repo never aborts the
+sweep. The one exception that is deliberately NOT swallowed is
+`psycopg.OperationalError`: Postgres being down is not a per-repo problem,
+so it propagates so the caller reports the real outage instead of it
+looking like 30-odd unrelated repo failures. A single unreadable file inside
+an otherwise-good repo is isolated at an even finer grain — `ingest()`
+skips just that file (logged, `files_failed` counted) and keeps indexing the
+rest of the repo.
+
+**Sweep budget and resume.** `sweep(budget_seconds=...)` (env
+`RAG_CODE_SWEEP_BUDGET_S`, default 1500s) stops starting new repos once the
+budget is spent — a repo already in progress finishes, but the next one is
+deferred. Which repo to resume from is persisted round-robin in
+`<vault>/data/code_sweep_state.json` (`{"next_index": N}`), so a cold repo
+that eats the whole 30-minute launchd window on one run does not starve the
+same tail of the repo list on every subsequent run — the next sweep picks up
+where the last one left off. `src/rag_ingest.py --collection code` calls
+`sweep()` (not the single-repo `ingest()`) precisely so the launchd job
+`com.ai-router.rag-sweep` gets this behavior; `r code --reindex`/`--rebuild`
+(and `--receipt`'s single-file ingest) still call `ingest()` directly,
+scoped to the cwd's own repo, unchanged.
+
+**Cross-repo search.** `r code --all-repos "<query>"` (and the `code_lookup`
+MCP tool's `all_repos: true` argument) searches every repo's chunks instead
+of just the cwd-inferred one, and prefixes each hit with its repo name
+(`[repo] path:start-end [symbol]`) — this labelling is what makes a snippet
+written in one repo findable and reusable from another. Default behavior
+(no `--all-repos`) is unchanged: one repo, no prefix, same output format as
+before this change.

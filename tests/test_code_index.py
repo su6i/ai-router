@@ -276,3 +276,270 @@ def test_file_discovery_ignores_untracked(monkeypatch, tmp_path):
     
     assert "tracked.py" in read_files
     assert "untracked.py" not in read_files
+
+
+def test_get_repo_roots_config_override(monkeypatch, tmp_path):
+    import json
+    import delegate
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(delegate, "DATA_DIR", data_dir)
+
+    repo_a = tmp_path / "repoA"
+    repo_b = tmp_path / "repoB"
+    repo_a.mkdir()
+    repo_b.mkdir()
+
+    cfg_file = data_dir / "code_repo_roots.json"
+    cfg_file.write_text(
+        json.dumps({
+            "roots": [
+                str(repo_a),
+                str(repo_b),
+                str(tmp_path / "does_not_exist"),
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    roots = ci.get_repo_roots()
+    assert roots == [repo_a, repo_b]
+    assert (tmp_path / "does_not_exist") not in roots
+
+
+def test_get_repo_roots_default_scans_home_github(monkeypatch, tmp_path):
+    import delegate
+
+    empty_data_dir = tmp_path / "empty_data"
+    empty_data_dir.mkdir()
+    monkeypatch.setattr(delegate, "DATA_DIR", empty_data_dir)
+    monkeypatch.setattr(ci.Path, "home", lambda: tmp_path)
+
+    github_dir = tmp_path / "@-github"
+    repo1 = github_dir / "repo1"
+    (repo1 / ".git").mkdir(parents=True)
+    not_a_repo = github_dir / "not_a_repo"
+    not_a_repo.mkdir(parents=True)
+    repo2 = github_dir / "repo2"
+    (repo2 / ".git").mkdir(parents=True)
+
+    roots = ci.get_repo_roots()
+    assert roots == [repo1, repo2]
+    assert not_a_repo not in roots
+
+
+def test_is_excluded():
+    excluded_paths = [
+        "node_modules/foo.js",
+        "a/.venv/b.py",
+        "venv/x.py",
+        "dist/bundle.js",
+        "build/out.py",
+        "__pycache__/x.pyc",
+        "vendor/.git/config",
+        "lib/jquery.min.js",
+    ]
+    for path_str in excluded_paths:
+        assert ci._is_excluded(path_str) is True, f"Expected {path_str} to be excluded"
+
+    included_paths = [
+        "src/code_index.py",
+        "tests/test_foo.py",
+        "README.md",
+    ]
+    for path_str in included_paths:
+        assert ci._is_excluded(path_str) is False, f"Expected {path_str} not to be excluded"
+
+
+def test_sweep_one_repo_failure_does_not_abort_others(monkeypatch):
+    repo_a = Path("/fake/repoA")
+    repo_b = Path("/fake/repoB")
+    repo_c = Path("/fake/repoC")
+    roots = [repo_a, repo_b, repo_c]
+
+    monkeypatch.setattr(ci, "get_repo_roots", lambda: roots)
+
+    def mock_ingest(force=False, repo_path=None):
+        if repo_path == repo_b:
+            raise RuntimeError("boom")
+        return {"files_seen": 1, "chunks_written": 1, "chunks_deleted": 0, "skipped": 0}
+
+    monkeypatch.setattr(ci, "ingest", mock_ingest)
+    monkeypatch.setattr(ci, "load_env", lambda: None)
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
+
+    result = ci.sweep(force=False)
+
+    assert result["repos_seen"] == 3
+    assert result["repos_failed"] == 1
+    assert "boom" in result["failures"][str(repo_b)]
+    assert result["files_seen"] == 2
+    assert result["chunks_written"] == 2
+
+
+def test_sweep_reraises_on_postgres_down(monkeypatch):
+    monkeypatch.setattr(ci, "get_repo_roots", lambda: [Path("/fake/repoA")])
+
+    def mock_ingest(force=False, repo_path=None):
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(ci, "ingest", mock_ingest)
+    monkeypatch.setattr(ci, "load_env", lambda: None)
+
+    with pytest.raises(psycopg.OperationalError, match="connection refused"):
+        ci.sweep(force=False)
+
+
+def test_sweep_budget_and_resume(monkeypatch):
+    import json
+    import delegate
+
+    roots = [
+        Path("/fake/repo0"),
+        Path("/fake/repo1"),
+        Path("/fake/repo2"),
+        Path("/fake/repo3"),
+    ]
+    monkeypatch.setattr(ci, "get_repo_roots", lambda: roots)
+
+    called_repos = []
+
+    def mock_ingest(force=False, repo_path=None):
+        called_repos.append(repo_path)
+        return {}
+
+    monkeypatch.setattr(ci, "ingest", mock_ingest)
+    monkeypatch.setattr(ci, "load_env", lambda: None)
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
+
+    # Budget of -1 ensures immediate budget trip before any repo is processed
+    ci.sweep(force=False, budget_seconds=-1)
+
+    assert called_repos == []
+    state_file = delegate.DATA_DIR / "code_sweep_state.json"
+    assert state_file.exists()
+    state = json.loads(state_file.read_text("utf-8"))
+    assert state.get("next_index") == 0
+
+    # Normal budget runs all 4 repos
+    ci.sweep(force=False, budget_seconds=1500)
+
+    assert called_repos == roots
+    state = json.loads(state_file.read_text("utf-8"))
+    assert state.get("next_index") == 0
+
+
+def test_all_repos_search_labels_each_hit_by_repo(monkeypatch, capsys):
+    class FakeArgs:
+        query = "test"
+        k = 5
+        graph = False
+        repo = ""
+        all_repos = True
+
+    class FakeModel:
+        def embed(self, texts, prefix=""):
+            import numpy as np
+            return np.array([[0.0] * 384])
+
+    monkeypatch.setattr(ci, "get_model", FakeModel)
+
+    rows = [
+        (1, "a.py", 1, 5, "f1", "short chunk text", "ai-router"),
+        (2, "b.py", 1, 5, "f2", "short chunk text", "Arix"),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, *args, **kwargs):
+            pass
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return rows
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(psycopg, "connect", lambda dsn: FakeConn())
+    monkeypatch.setattr(os, "environ", {"POSTGRES_DSN": "dummy"})
+
+    ci.cmd_search(FakeArgs())
+    captured = capsys.readouterr()
+
+    assert "[ai-router]" in captured.out
+    assert "[Arix]" in captured.out
+    assert "[ai-router] a.py:1-5 [f1]" in captured.out
+    assert "[Arix] b.py:1-5 [f2]" in captured.out
+    assert "\na.py:1-5 [f1]" not in captured.out
+    assert not captured.out.startswith("a.py:1-5 [f1]")
+
+
+def test_default_search_output_unchanged_without_all_repos(monkeypatch, capsys):
+    class FakeArgs:
+        query = "test"
+        k = 5
+        graph = False
+        repo = ""
+        # all_repos attribute intentionally omitted to test getattr fallback
+
+    class FakeModel:
+        def embed(self, texts, prefix=""):
+            import numpy as np
+            return np.array([[0.0] * 384])
+
+    monkeypatch.setattr(ci, "get_model", FakeModel)
+
+    rows = [
+        (1, "path1.py", 1, 100, "func_1", "short chunk text"),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, *args, **kwargs):
+            pass
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return rows
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(psycopg, "connect", lambda dsn: FakeConn())
+    monkeypatch.setattr(os, "environ", {"POSTGRES_DSN": "dummy"})
+
+    ci.cmd_search(FakeArgs())
+    captured = capsys.readouterr()
+
+    assert captured.out.startswith("path1.py:1-100 [func_1]\n")
+    assert not captured.out.startswith("[")

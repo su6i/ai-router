@@ -371,7 +371,9 @@ This is exposed to MCP hosts via the `rules_lookup` tool by passing `collection:
 Phase 3b indexes **code** the way `r rules` indexes text: git-tracked
 `*.py`/`*.sh` files are chunked at function/class/method boundaries
 (tree-sitter AST), embedded with the same local e5-small model, and stored in
-pgvector next to a static call graph. Full design and honest economics:
+pgvector next to a static call graph. The index spans **every repo under
+`$HOME/@-github/`** (T-953), not just this checkout — `code_chunks.repo`
+discriminates. Full design and honest economics:
 [`docs/CODE-RAG.md`](docs/CODE-RAG.md).
 
 ```bash
@@ -381,16 +383,30 @@ r code "where is the budget cap checked" -k 5
 # --graph adds 1-hop callers/callees of each hit
 r code "budget cap abort" --graph
 
-# Incremental reindex (only files changed since the indexed commit)
+# Search every indexed repo instead of just this one; hits are repo-labelled
+r code "retry with backoff" --all-repos
+
+# Incremental reindex of THIS repo (only files changed since the indexed commit)
 r code --reindex
 
-# Full rebuild
+# Full rebuild of THIS repo
 r code --rebuild
 ```
 
 A one-line stale-index warning is printed when the index commit differs from
-`HEAD`. The same retrieval is exposed to MCP hosts as the `code_lookup` tool
-("use this instead of exploratory file reads").
+`HEAD` (single-repo mode only). The same retrieval is exposed to MCP hosts as
+the `code_lookup` tool ("use this instead of exploratory file reads"), which
+takes the equivalent `all_repos` argument.
+
+**Adding/removing a repo from the sweep is a config edit, not a commit:**
+list its absolute path in `<vault>/data/code_repo_roots.json`
+(`{"roots": ["/abs/path", ...]}`); with no config file present, every git
+checkout directly under `$HOME/@-github/` is swept by default. The sweep
+(`src/rag_ingest.py --collection code`, run by the launchd job
+`com.ai-router.rag-sweep`) costs **$0** — embeddings are local ONNX — and
+isolates one bad or slow repo from the rest; see
+[`docs/CODE-RAG.md`](docs/CODE-RAG.md#multi-repo-ingestion-t-953) for the
+failure-isolation and budget/resume details.
 
 ### RAG index & auto-ingest
 
