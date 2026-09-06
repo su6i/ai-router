@@ -143,22 +143,75 @@ searchable at all — before this fix a 100%-JS/TS repo (`portfolio`,
 #1/#2), which is worse than coarse chunking.
 
 **The only file that legitimately yields 0 chunks is one with 0 bytes of
-real (non-whitespace) content.** The AST chunker only emits a chunk for a
-`function_definition`/`class_definition` node, so a pure top-level `.py`/
-`.sh` script (imports + calls, no functions) used to walk to nothing —
-this is what was silently swallowing all 29 of `polycast`'s
-`experiments/gemini/scripts/*.py` and 4 `.sh` scripts elsewhere (T-953
-follow-up audit). `cmd_chunk_files()` now falls back to `chunk_generic()`
-(the same whole-file/~400-token-block chunker used for js/ts/go/rust)
-whenever the AST walk for a `.py`/`.sh` file finds zero `def`/`class`
-nodes, so real top-level code is searchable at whole-file granularity
-instead of being invisible. A file whose content is entirely empty or pure
-whitespace still — correctly — produces 0 chunks: confirmed against
-several 0-byte `__init__.py` files in `Arix` and `cisco-manager`, there is
-nothing to embed. The file is always hashed and recorded in
-`ingested_files` regardless of chunk count, so a 0-chunk file is not
-silently skipped — it is chunked with a genuinely empty result and never
-re-chunked until its content changes.
+real (non-whitespace) content — Category A below.** The AST chunker only
+emits a chunk for a `function_definition`/`class_definition` node, so a
+pure top-level `.py`/`.sh` script (imports + calls, no functions) used to
+walk to nothing — this is what was silently swallowing all 29 of
+`polycast`'s `experiments/gemini/scripts/*.py` and 4 `.sh` scripts
+elsewhere (T-953 Category B, a real bug — see below).
+`cmd_chunk_files()` now falls back to `chunk_generic()` (the same
+whole-file/~400-token-block chunker used for js/ts/go/rust) whenever the
+AST walk for a `.py`/`.sh` file finds zero `def`/`class` nodes, so real
+top-level code is searchable at whole-file granularity instead of being
+invisible. A file whose content is entirely empty or pure whitespace
+still — correctly — produces 0 chunks: confirmed against several 0-byte
+`__init__.py` files in `Arix` and `cisco-manager`, there is nothing to
+embed. The file is always hashed and recorded in `ingested_files`
+regardless of chunk count, so a 0-chunk file is not silently skipped — it
+is chunked with a genuinely empty result and never re-chunked until its
+content changes.
+
+**Per-repo file counts will always trail `git ls-files` by some amount —
+this is Category A, correct by design, not a gap to keep chasing.** The
+T-953 follow-up audit found `Arix` at 196/201 tracked files and
+`research_toolkit` at 78/90, and traced every missing file by hand: each
+one is empty or near-empty (0–~200 bytes — a version string, a one-line
+docstring comment, or truly 0 bytes), overwhelmingly `__init__.py`. There
+is no content to chunk (see the paragraph above) and, below a couple
+hundred bytes, no file has room for a real function or class definition
+either. **Audit method for a future re-check:** for a given repo, compare
+`(tracked files) − (files with ≥1 code_chunks row)` against
+`find <repo> -type f \( -name '*.py' -o -name '*.sh' \) -size -200c | wc -l`
+(adjust the glob to whatever extensions that repo uses) run through
+`git check-ignore`/`git ls-files` to keep it to tracked files. If the
+shortfall is less than or equal to that sub-200-byte count, it is Category
+A and does not need investigating further; if it exceeds it, that is
+Category B — a real bug — and the first thing to check is whether the
+excess files actually have `def`/`class` nodes that the chunker is
+somehow still missing (they should not, after the fallback above, but this
+is the fast way to notice if that regresses).
+
+**Cross-repo bookkeeping collisions (`ingested_files`) — a second real bug
+found in the same follow-up audit.** `ingested_files`'s primary key is
+`(collection, file_path)` with no `repo` column at all: fine for
+`rules`/`skills`/`sessions`, each a single fixed corpus, but multiple code
+repos share plenty of identical relative paths (`__init__.py`,
+`install.sh`, `main.py`, ...). Before the fix, two repos with the same
+relative path silently shared one hash row — breaking the incremental
+skip-check for one of them — and a `--force` rebuild's GC step
+(`DELETE ... WHERE collection='code' AND NOT (file_path = ANY(this_repo's
+paths))`) deleted every *other* repo's `ingested_files` rows outright,
+since none of their paths were in "this repo's paths" either (this is why
+a 27-repo `--force` sweep left `ingested_files` holding ~57 rows for the
+`code` collection instead of ~1000+). `_ingested_key(repo, path)` now
+prefixes every key with `"<repo>::"`; the GC step fetches this repo's own
+keys by prefix in Python (not SQL `LIKE` — a repo name containing `_`,
+e.g. `research_toolkit`, is a wildcard to `LIKE`) and deletes only the
+ones that actually vanished from that repo. This bug never corrupted
+`code_chunks` itself (already correctly scoped by its own `repo` column)
+— it only corrupted the incremental skip-check and GC bookkeeping in
+`ingested_files`. The separate reason an early T-953 measurement showed
+13,282 chunks and the final count is 10,151 (see "Final numbers" below) is
+the **repo-identity fix** two sections up: before it, `Arix`'s and
+`research_toolkit`'s directories were indexed twice each, once under the
+old git-remote-derived label (`arix`, `research-toolkit`, 3,354 chunks
+combined) and once under the corrected directory-basename label (`Arix`,
+`research_toolkit`). The stale old-label rows were deleted by hand
+(`DELETE FROM code_chunks WHERE repo = ANY('{arix,research-toolkit}')`)
+once the corrected labels were confirmed to hold the real, current data —
+a one-time cleanup, not something `ingest()`/`sweep()` do automatically,
+since a repo's own GC step only ever touches its own `repo` value and by
+design never reaches across to a differently-labeled duplicate of itself.
 
 **Per-repo isolation and failure isolation.** `ingest(force, repo_path=...)`
 now takes an explicit repo root instead of always using `Path.cwd()`; every
@@ -176,15 +229,21 @@ when run from inside a checkout is unchanged (still remote-derived, matching
 the rest of the ledger's project tagging) — only the multi-repo sweep's
 `_project_info_for()` changed. `sweep()` calls
 `ingest()` once per configured root and catches any exception per repo
-(bad encoding, no git, broken symlink, permission-denied directory, ...),
-logging and moving on to the next repo — one bad repo never aborts the
-sweep. The one exception that is deliberately NOT swallowed is
-`psycopg.OperationalError`: Postgres being down is not a per-repo problem,
-so it propagates so the caller reports the real outage instead of it
-looking like 30-odd unrelated repo failures. A single unreadable file inside
-an otherwise-good repo is isolated at an even finer grain — `ingest()`
-skips just that file (logged, `files_failed` counted) and keeps indexing the
-rest of the repo.
+(bad encoding, broken symlink, permission-denied directory, ...), logging
+and moving on to the next repo — one bad repo never aborts the sweep. A
+repo whose `.git` is not a real git repository at all is caught one level
+lower, inside `ingest()`'s own `git ls-files` call (`CalledProcessError`),
+logged (`code_index: <path> is not readable as a git repo, skipping: ...`)
+the same way, and treated as 0 files rather than propagating — verified
+directly: a repo whose `.git/HEAD` is garbage sits ahead of a real repo in
+a 2-repo sweep, the broken one logs and is skipped, and the real repo's
+row count in `code_chunks` is unchanged before and after. The one
+exception that is deliberately NOT swallowed is `psycopg.OperationalError`:
+Postgres being down is not a per-repo problem, so it propagates so the
+caller reports the real outage instead of it looking like 30-odd unrelated
+repo failures. A single unreadable file inside an otherwise-good repo is
+isolated at an even finer grain — `ingest()` skips just that file (logged,
+`files_failed` counted) and keeps indexing the rest of the repo.
 
 **Sweep budget and resume.** `sweep(budget_seconds=...)` (env
 `RAG_CODE_SWEEP_BUDGET_S`, default 1500s) stops starting new repos once the
@@ -206,3 +265,13 @@ of just the cwd-inferred one, and prefixes each hit with its repo name
 written in one repo findable and reusable from another. Default behavior
 (no `--all-repos`) is unchanged: one repo, no prefix, same output format as
 before this change.
+
+**Final numbers (real cold `--force` ingest, all fixes applied, measured
+against the live DB, not estimated):** 24 repos, 10,151 chunks, 1,133 files
+recorded in `ingested_files` (of which 1,080 have ≥1 chunk — the rest are
+Category A above). Per-repo file coverage against `git ls-files`:
+`polycast` 49/49 (was 20/49 pre-fix), `portfolio` 95/95 (was 0/95),
+`parsi-rtl` 6/6 and `parsi-rtl-test` 8/8 (both were 0/6, 0/8),
+`agent-constitution` 31/31, `Arix` 196/201 and `research_toolkit` 78/90
+(both Category A — see the audit-method paragraph above). No repo in the
+sweep has an unexplained gap.

@@ -563,6 +563,44 @@ def test_project_info_for_matches_directory_casing(tmp_path):
     assert name == "Arix"
 
 
+def test_ingest_broken_git_repo_logs_and_returns_cleanly(monkeypatch, tmp_path, capsys):
+    # T-953 DoD #5 names "no git" as a failure mode the sweep must isolate.
+    # A directory whose .git is garbage (not a real repo) must not raise --
+    # it should log to stderr (previously silent) and come back with 0
+    # files, so sweep() never even needs its own except-block for this case.
+    broken = tmp_path / "broken-repo"
+    (broken / ".git").mkdir(parents=True)
+    (broken / ".git" / "HEAD").write_text("not a real git repo")
+
+    monkeypatch.setattr(ci, "_project_info_for", lambda p: ("broken-repo", None))
+    monkeypatch.setenv("POSTGRES_DSN", "dummy")
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, query, args=None):
+            self.last_query = query
+        def fetchone(self):
+            if self.last_query.startswith("SELECT repo_commit"):
+                return None
+            return (0,)  # count(*) queries
+        def fetchall(self): return []
+
+    class FakeConn:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def cursor(self): return FakeCursor()
+        def commit(self): pass
+
+    monkeypatch.setattr(psycopg, "connect", lambda dsn: FakeConn())
+
+    stats = ci.ingest(force=False, repo_path=broken)
+
+    captured = capsys.readouterr()
+    assert "is not readable as a git repo, skipping" in captured.err
+    assert stats["files_seen"] == 0
+
+
 def test_is_excluded():
     excluded_paths = [
         "node_modules/foo.js",

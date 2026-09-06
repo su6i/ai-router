@@ -452,8 +452,12 @@ def ingest(force: bool = False, repo_path: Path | None = None) -> dict:
             try:
                 res = subprocess.run(["git", "ls-files", "--", *CODE_GLOBS], cwd=repo_path, capture_output=True, text=True, check=True)
                 target_files = [repo_path / f for f in res.stdout.splitlines() if (repo_path / f).exists() and not _is_excluded(f)]
-            except subprocess.CalledProcessError:
-                pass
+            except subprocess.CalledProcessError as e:
+                # Not a real git repo (or otherwise unreadable) -- log so
+                # this is distinguishable from "genuinely 0 code files",
+                # then continue with target_files empty; the repo is
+                # skipped, not the whole sweep (WO DoD #5).
+                print(f"code_index: {repo_path} is not readable as a git repo, skipping: {e.stderr.strip() if e.stderr else e}", file=sys.stderr)
                 
         if not target_files and not force:
             # nothing changed
