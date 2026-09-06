@@ -130,7 +130,7 @@ def handle_receipt(file_path_str: str, collection_arg: str | None = None):
             col = "skills"
         elif "rules" in s_path or path.suffix == ".mdc":
             col = "rules"
-        elif path.suffix in (".py", ".js", ".ts", ".go", ".rs"):
+        elif path.suffix in code_index.CODE_EXT_LANG:
             col = "code"
         else:
             col = "sessions"

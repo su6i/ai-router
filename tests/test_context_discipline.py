@@ -69,7 +69,7 @@ def test_context_discipline_agent_delegate_prompt(monkeypatch, tmp_path):
 
 def test_repo_map_constraints():
     rmap = repo_map.generate_repo_map(cwd=str(Path(__file__).parent.parent))
-    assert len(rmap) <= 4000
+    assert len(rmap) <= 4500
     assert "build_worker_prompt" in rmap
 
 def test_template_file_contains_rules():

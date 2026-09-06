@@ -9,7 +9,7 @@ embedder, plus a static call graph. Exposed as `r code` (CLI) and
 
 ```mermaid
 graph TD
-    A[Tracked source files<br/>git ls-files *.py *.sh] -->|"chunk-files child process<br/>(tree-sitter only)"| B(AST chunks:<br/>function / class / method)
+    A[Tracked source files<br/>git ls-files *.py *.sh *.js *.ts *.tsx *.jsx *.go *.rs] -->|"chunk-files child process<br/>(tree-sitter for .py/.sh,<br/>generic whole-file for the rest)"| B(AST chunks: function/class/method<br/>+ generic ~400-tok blocks for other langs)
     B -->|JSON over stdout| C[Parent process]
     C -->|"synthetic header + passage:"| D[E5 ONNX embedder<br/>intfloat/multilingual-e5-small]
     C -->|stdlib ast| G[code_edges<br/>caller → callee]
@@ -72,10 +72,10 @@ The `intfloat/multilingual-e5-small` model is loaded via ONNX Runtime as a proce
 re-chunks only changed files, upserts by `chunk_hash` (unchanged chunks are
 re-stamped, not re-embedded), deletes chunks of vanished files/symbols, then
 stamps the new `repo_commit`. `--rebuild` re-discovers everything via
-`git ls-files -- '*.py' '*.sh'` (tracked files only — vendored/venv paths
-can never enter the index). Both paths are idempotent; a second run is a
-no-op. Queries print a one-line stale-index warning when
-`repo_commit != HEAD`.
+`git ls-files -- '*.py' '*.sh' '*.js' '*.jsx' '*.ts' '*.tsx' '*.go' '*.rs'`
+(`CODE_GLOBS` — tracked files only, vendored/venv paths can never enter the
+index). Both paths are idempotent; a second run is a no-op. Queries print a
+one-line stale-index warning when `repo_commit != HEAD`.
 
 ## When it pays off
 
@@ -126,16 +126,55 @@ config file present at all.
 **Exclusions.** `_is_excluded()` skips `node_modules/`, `.venv/`, `venv/`,
 `dist/`, `build/`, `__pycache__/`, `.git/`, and `*.min.js` even if a repo
 happens to have committed one of those paths — defense in depth on top of
-`git ls-files` only ever seeing tracked files in the first place. As before,
-only `*.py`/`*.sh` are chunked (no new tree-sitter grammar was added in this
-change — a repo with only JS/TS/Go/Rust sources contributes 0 chunks today,
-which shows up honestly as `files_seen: 0` rather than mis-parsing those
-files as Python or Bash).
+`git ls-files` only ever seeing tracked files in the first place.
+
+**Multi-language chunking.** `CODE_EXT_LANG` maps every extension this
+indexer treats as code: `.py .sh .js .jsx .ts .tsx .go .rs`. Only `.py` and
+`.sh` get real AST-based chunking through the tree-sitter grammars vendored
+in this repo (`tree_sitter_python`, `tree_sitter_bash`) — function/class
+boundaries, symbol names, the oversized-def splitter. Grammars for the rest
+(`tree-sitter-javascript`/`-typescript`/`-go`/`-rust`) are new dependencies
+that need explicit owner approval and were out of scope for this fix, so
+those extensions go through `chunk_generic()` instead: the whole file is
+split into ~400-token line-blocks with no symbol/parent extraction
+(`symbol: null`). Coarser than the AST path, but it makes the file
+searchable at all — before this fix a 100%-JS/TS repo (`portfolio`,
+`parsi-rtl`, `parsi-rtl-test`) contributed exactly 0 chunks (T-953 defects
+#1/#2), which is worse than coarse chunking.
+
+**The only file that legitimately yields 0 chunks is one with 0 bytes of
+real (non-whitespace) content.** The AST chunker only emits a chunk for a
+`function_definition`/`class_definition` node, so a pure top-level `.py`/
+`.sh` script (imports + calls, no functions) used to walk to nothing —
+this is what was silently swallowing all 29 of `polycast`'s
+`experiments/gemini/scripts/*.py` and 4 `.sh` scripts elsewhere (T-953
+follow-up audit). `cmd_chunk_files()` now falls back to `chunk_generic()`
+(the same whole-file/~400-token-block chunker used for js/ts/go/rust)
+whenever the AST walk for a `.py`/`.sh` file finds zero `def`/`class`
+nodes, so real top-level code is searchable at whole-file granularity
+instead of being invisible. A file whose content is entirely empty or pure
+whitespace still — correctly — produces 0 chunks: confirmed against
+several 0-byte `__init__.py` files in `Arix` and `cisco-manager`, there is
+nothing to embed. The file is always hashed and recorded in
+`ingested_files` regardless of chunk count, so a 0-chunk file is not
+silently skipped — it is chunked with a genuinely empty result and never
+re-chunked until its content changes.
 
 **Per-repo isolation and failure isolation.** `ingest(force, repo_path=...)`
 now takes an explicit repo root instead of always using `Path.cwd()`; every
-DB read/write it does is scoped to that repo's name (derived from that
-root's own git remote/toplevel, not the caller's cwd). `sweep()` calls
+DB read/write it does is scoped to that repo's name, which for the sweep
+path is **the root directory's own basename** — never the git remote URL.
+Two different checkouts can share (or be misconfigured to share) one git
+remote (T-953 defect: `parsi-rtl-test`'s `origin` was still `parsi-rtl.git`),
+and remote-derived identity let them collide under one `code_chunks.repo`
+value, with a `--force` sweep of one silently GC-deleting the other's rows.
+`get_repo_roots()` already guarantees each swept root is a distinct sibling
+directory, so its basename is both unique and matches the casing everyone
+actually uses (previously "arix" from the lowercase remote vs. the real
+`Arix` directory on disk). The single-repo `project_info()` used by `r code`
+when run from inside a checkout is unchanged (still remote-derived, matching
+the rest of the ledger's project tagging) — only the multi-repo sweep's
+`_project_info_for()` changed. `sweep()` calls
 `ingest()` once per configured root and catches any exception per repo
 (bad encoding, no git, broken symlink, permission-denied directory, ...),
 logging and moving on to the next repo — one bad repo never aborts the

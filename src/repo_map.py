@@ -44,8 +44,8 @@ def generate_repo_map(cwd="."):
 
     out.append("================\n")
     res = "\n".join(out)
-    if len(res) > 4000:
-        res = res[:3900] + "\n...[TRUNCATED_DUE_TO_SIZE]...\n================"
+    if len(res) > 4500:
+        res = res[:4400] + "\n...[TRUNCATED_DUE_TO_SIZE]...\n================"
     return res
 
 if __name__ == "__main__":

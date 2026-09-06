@@ -224,6 +224,94 @@ def test_incremental_reindex_mocked(monkeypatch, tmp_path):
     assert "INSERT INTO code_chunks" in queries # fake_file.py inserted
     assert "DELETE FROM code_chunks WHERE repo = %s AND path = %s AND NOT (chunk_hash = ANY(%s)) RETURNING id" in queries # gc chunks in fake_file.py
 
+def test_ingested_key_prefixes_repo_name():
+    assert ci._ingested_key("myrepo", "src/__init__.py") == "myrepo::src/__init__.py"
+    assert ci._ingested_key("other-repo", "src/__init__.py") == "other-repo::src/__init__.py"
+
+
+def test_ingested_files_gc_only_touches_this_repos_keys(monkeypatch, tmp_path):
+    # T-953 follow-up: ingested_files has no repo column, so a --force
+    # rebuild's GC step used to do `NOT (file_path = ANY(this_repo_paths))`
+    # with a bare relative path -- which deletes every OTHER repo's rows
+    # too, since none of their paths are in "this repo's paths" either.
+    # After the fix, the GC step must only ever touch keys carrying this
+    # repo's own "<repo>::" prefix.
+    import subprocess
+
+    repo_path = tmp_path / "myrepo"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+
+    tracked = repo_path / "tracked.py"
+    tracked.write_text("def f(): pass")
+    subprocess.run(["git", "add", "tracked.py"], cwd=repo_path, check=True, capture_output=True)
+
+    class FakeCursor:
+        def __init__(self, store):
+            self.store = store
+            self.queries = []
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, query, args=None):
+            self.queries.append((query, args))
+        def fetchone(self):
+            q = self.queries[-1][0]
+            if q.startswith("SELECT repo_commit"):
+                return None  # force path, but exercised regardless
+            if q.startswith("SELECT id FROM code_chunks"):
+                return None  # no existing chunk row -> insert path
+            return (1,)  # dummy id for INSERT ... RETURNING id
+        def fetchall(self):
+            q = self.queries[-1][0]
+            if q.startswith("SELECT file_path FROM ingested_files"):
+                # Pre-existing keys from an unrelated repo AND a stale key
+                # belonging to THIS repo that should get GC'd.
+                return [("otherrepo::foo.py",), ("myrepo::stale_old_file.py",)]
+            return []
+
+    class FakeConn:
+        def __init__(self):
+            self.cur = FakeCursor(self)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def cursor(self): return self.cur
+        def commit(self): pass
+
+    conn = FakeConn()
+    monkeypatch.setattr(psycopg, "connect", lambda dsn: conn)
+    monkeypatch.setenv("POSTGRES_DSN", "dummy")
+    monkeypatch.setattr(ci, "_project_info_for", lambda p: ("myrepo", "abc123"))
+
+    monkeypatch.setattr(ci, "_chunk_files_subprocess", lambda paths: {
+        str(tracked.resolve()): [{
+            "symbol": "f", "parent_symbol": None,
+            "start_line": 1, "end_line": 1, "text": "def f(): pass",
+        }],
+    })
+
+    class FakeVec(list):
+        def tolist(self):
+            return list(self)
+
+    class FakeModel:
+        def embed(self, texts, prefix=""):
+            return [FakeVec([0.0] * 384) for _ in texts]
+    monkeypatch.setattr(ci, "get_model", FakeModel)
+
+    ci.ingest(force=True, repo_path=repo_path)
+
+    insert_calls = [a for q, a in conn.cur.queries if q.startswith("INSERT INTO ingested_files")]
+    assert insert_calls, "expected an ingested_files upsert"
+    assert insert_calls[0][0] == "myrepo::tracked.py"
+
+    gc_deletes = [a for q, a in conn.cur.queries
+                  if q.startswith("DELETE FROM ingested_files") and "ANY" in q]
+    assert gc_deletes, "expected a scoped GC delete"
+    deleted_keys = gc_deletes[0][0]
+    assert "myrepo::stale_old_file.py" in deleted_keys
+    assert "otherrepo::foo.py" not in deleted_keys
+
+
 def test_file_discovery_ignores_untracked(monkeypatch, tmp_path):
     import subprocess
     repo_path = tmp_path / "repo"
@@ -327,6 +415,152 @@ def test_get_repo_roots_default_scans_home_github(monkeypatch, tmp_path):
     roots = ci.get_repo_roots()
     assert roots == [repo1, repo2]
     assert not_a_repo not in roots
+
+
+def test_lang_for_path_covers_wo_extensions():
+    # T-953 scope: .py .js .ts .tsx .jsx .sh .go .rs
+    assert ci._lang_for_path("a.py") == "python"
+    assert ci._lang_for_path("a.sh") == "bash"
+    assert ci._lang_for_path("a.js") == "javascript"
+    assert ci._lang_for_path("a.jsx") == "javascript"
+    assert ci._lang_for_path("a.ts") == "typescript"
+    assert ci._lang_for_path("a.tsx") == "tsx"
+    assert ci._lang_for_path("a.go") == "go"
+    assert ci._lang_for_path("a.rs") == "rust"
+    assert ci._lang_for_path("a.md") is None
+    assert ci._lang_for_path("a.png") is None
+
+
+def test_chunk_generic_splits_large_file_and_has_no_symbol():
+    lines = [f"const x_{i} = {i};" for i in range(300)]
+    source = "\n".join(lines).encode("utf-8")
+
+    chunks = ci.chunk_generic(source)
+
+    assert len(chunks) > 1
+    for c in chunks:
+        assert c["symbol"] is None
+        assert c["parent_symbol"] is None
+    # every original line shows up in some chunk, in order, none dropped
+    rebuilt = "\n".join(c["text"] for c in chunks)
+    assert rebuilt.count("const x_0 = 0;") == 1
+    assert rebuilt.count("const x_299 = 299;") == 1
+
+
+def test_chunk_generic_empty_file_yields_no_chunks():
+    assert ci.chunk_generic(b"") == []
+
+
+def test_cmd_chunk_files_ts_file_uses_generic_chunker(tmp_path, capsys):
+    ts_file = tmp_path / "component.tsx"
+    ts_file.write_text("export function Foo() { return 1; }\n")
+
+    ci.cmd_chunk_files([str(ts_file)])
+    captured = capsys.readouterr()
+    import json as _json
+    out = _json.loads(captured.out)
+
+    chunks = out[str(ts_file)]
+    assert len(chunks) == 1
+    assert chunks[0]["symbol"] is None
+    assert "export function Foo" in chunks[0]["text"]
+
+
+def test_cmd_chunk_files_python_script_with_no_defs_falls_back_to_generic(tmp_path, capsys):
+    # T-953 follow-up: a real top-level script (no def/class at all) must
+    # not silently contribute 0 chunks -- this is exactly what was
+    # swallowing polycast's experiments/gemini/scripts/*.py.
+    py_file = tmp_path / "finalize_eval.py"
+    py_file.write_text(
+        "import json\n"
+        "with open('x') as f:\n"
+        "    data = json.load(f)\n"
+        "print(data)\n"
+    )
+
+    ci.cmd_chunk_files([str(py_file)])
+    captured = capsys.readouterr()
+    import json as _json
+    out = _json.loads(captured.out)
+
+    chunks = out[str(py_file)]
+    assert len(chunks) == 1
+    assert chunks[0]["symbol"] is None
+    assert "import json" in chunks[0]["text"]
+
+
+def test_cmd_chunk_files_empty_python_file_yields_no_chunks(tmp_path, capsys):
+    # Only a file with 0 bytes of real content stays at 0 chunks.
+    py_file = tmp_path / "__init__.py"
+    py_file.write_text("")
+
+    ci.cmd_chunk_files([str(py_file)])
+    captured = capsys.readouterr()
+    import json as _json
+    out = _json.loads(captured.out)
+
+    assert out[str(py_file)] == []
+
+
+def test_cmd_chunk_files_python_file_with_real_def_unaffected(tmp_path, capsys):
+    # A file that DOES have a def/class still gets normal AST chunking,
+    # not the generic fallback -- the fallback only fires when the AST
+    # walk finds zero chunks.
+    py_file = tmp_path / "has_func.py"
+    py_file.write_text("def f():\n    return 1\n")
+
+    ci.cmd_chunk_files([str(py_file)])
+    captured = capsys.readouterr()
+    import json as _json
+    out = _json.loads(captured.out)
+
+    chunks = out[str(py_file)]
+    assert len(chunks) == 1
+    assert chunks[0]["symbol"] == "f"
+
+
+def test_project_info_for_uses_directory_basename_not_remote(monkeypatch, tmp_path):
+    # T-953 defect: two checkouts can share a git remote (e.g. a "-test"
+    # fork whose origin was never repointed). Identity must come from the
+    # directory, which get_repo_roots() already guarantees is unique among
+    # swept roots -- not from the remote URL, which is not guaranteed
+    # unique and previously caused parsi-rtl-test's chunks to collide with
+    # (and be GC'd away by) parsi-rtl's.
+    import subprocess
+
+    repo_a = tmp_path / "parsi-rtl"
+    repo_b = tmp_path / "parsi-rtl-test"
+    for repo in (repo_a, repo_b):
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/su6i/parsi-rtl.git"],
+            cwd=repo, check=True, capture_output=True,
+        )
+
+    name_a, _ = ci._project_info_for(repo_a)
+    name_b, _ = ci._project_info_for(repo_b)
+
+    assert name_a == "parsi-rtl"
+    assert name_b == "parsi-rtl-test"
+    assert name_a != name_b
+
+
+def test_project_info_for_matches_directory_casing(tmp_path):
+    # T-953 hint: a directory named "Arix" must not be identified as the
+    # lowercase "arix" the git remote URL happens to use.
+    import subprocess
+
+    repo = tmp_path / "Arix"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/su6i/arix.git"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    name, _ = ci._project_info_for(repo)
+    assert name == "Arix"
 
 
 def test_is_excluded():
