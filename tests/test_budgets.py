@@ -179,3 +179,121 @@ def test_budget_warns_on_unreadable_ts(isolated_vault, caplog, monkeypatch):
 
     delegate.check_budget("testproj", "session1")
     assert "unreadable ts" in caplog.text
+
+
+def test_daily_token_budget_under_cap_no_warning(isolated_vault, caplog, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-06T12:00:00+02:00")
+    delegate.BUDGETS.write_text(json.dumps({
+        "daily_token_budget": {"test-channel": 1_000_000}
+    }))
+    delegate.AUDIT.write_text(json.dumps({
+        "ts": "2026-09-06T10:00:00+02:00",
+        "quota_channel": "test-channel",
+        "in": 100,
+        "out": 50,
+        "cache": 10,
+    }) + "\n")
+
+    delegate.check_budget("proj", None, model_spec={"quota_channel": "test-channel", "cin": 0, "cout": 0})
+    assert "TOKEN BUDGET WARNING" not in caplog.text
+
+
+def test_daily_token_budget_abort_over_cap(isolated_vault, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-06T12:00:00+02:00")
+    delegate.BUDGETS.write_text(json.dumps({
+        "daily_token_budget": {"test-channel": 1_000_000}
+    }))
+    delegate.AUDIT.write_text(json.dumps({
+        "ts": "2026-09-06T10:00:00+02:00",
+        "quota_channel": "test-channel",
+        "in": 800_000,
+        "out": 300_000,
+    }) + "\n")
+
+    with pytest.raises(SystemExit) as exc:
+        delegate.check_budget("proj", None, model_spec={"quota_channel": "test-channel", "cin": 0, "cout": 0})
+    assert "TOKEN BUDGET ABORT" in str(exc.value)
+    assert "test-channel" in str(exc.value)
+
+
+def test_daily_token_budget_warning_at_80_percent(isolated_vault, caplog, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-06T12:00:00+02:00")
+    delegate.BUDGETS.write_text(json.dumps({
+        "daily_token_budget": {"test-channel": 1_000_000}
+    }))
+    delegate.AUDIT.write_text(json.dumps({
+        "ts": "2026-09-06T10:00:00+02:00",
+        "quota_channel": "test-channel",
+        "in": 850_000,
+        "out": 0,
+    }) + "\n")
+
+    delegate.check_budget("proj", None, model_spec={"quota_channel": "test-channel", "cin": 0, "cout": 0})
+    assert "TOKEN BUDGET WARNING" in caplog.text
+    assert "test-channel" in caplog.text
+
+
+def test_daily_token_budget_coded_default_applies_to_google_ai_pro_channel_with_no_config(isolated_vault, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-06T12:00:00+02:00")
+    delegate.BUDGETS.write_text(json.dumps({"monthly_usd": 100.0}))
+    delegate.AUDIT.write_text(json.dumps({
+        "ts": "2026-09-06T10:00:00+02:00",
+        "quota_channel": "google-ai-pro-gemini",
+        "in": 15_000_000,
+        "out": 6_000_000,
+    }) + "\n")
+
+    with pytest.raises(SystemExit) as exc:
+        delegate.check_budget("proj", None, model_spec={"quota_channel": "google-ai-pro-gemini", "cin": 0, "cout": 0})
+    assert "TOKEN BUDGET ABORT" in str(exc.value)
+    assert "google-ai-pro-gemini" in str(exc.value)
+
+
+def test_daily_token_budget_uncapped_for_unlisted_non_agy_channel(isolated_vault, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-06T12:00:00+02:00")
+    delegate.BUDGETS.write_text(json.dumps({}))
+    delegate.AUDIT.write_text(json.dumps({
+        "ts": "2026-09-06T10:00:00+02:00",
+        "quota_channel": "deepseek-api",
+        "in": 50_000_000,
+        "out": 50_000_000,
+    }) + "\n")
+
+    delegate.check_budget("proj", None, model_spec={"quota_channel": "deepseek-api", "cin": 0, "cout": 0})
+
+
+def test_daily_token_budget_cache_hits_excluded(isolated_vault, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-06T12:00:00+02:00")
+    delegate.BUDGETS.write_text(json.dumps({
+        "daily_token_budget": {"test-channel": 100}
+    }))
+    delegate.AUDIT.write_text(json.dumps({
+        "ts": "2026-09-06T10:00:00+02:00",
+        "quota_channel": "test-channel",
+        "cached": True,
+        "in": 50_000_000,
+        "out": 50_000_000,
+    }) + "\n")
+
+    delegate.check_budget("proj", None, model_spec={"quota_channel": "test-channel", "cin": 0, "cout": 0})
+
+
+def test_daily_token_budget_estimate_prints_section(isolated_vault, capsys, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-06T12:00:00+02:00")
+    delegate.BUDGETS.write_text(json.dumps({
+        "daily_token_budget": {"google-ai-pro-gemini": 20_000_000}
+    }))
+    delegate.AUDIT.write_text(json.dumps({
+        "ts": "2026-09-06T10:00:00+02:00",
+        "quota_channel": "google-ai-pro-gemini",
+        "in": 5_000,
+        "out": 1_000,
+    }) + "\n")
+
+    with pytest.raises(SystemExit) as exc:
+        delegate.check_budget("proj", None, print_estimate=True)
+    assert exc.value.code == 0
+
+    out = capsys.readouterr().out
+    assert "Daily tokens vs caps:" in out
+    assert "google-ai-pro-gemini" in out

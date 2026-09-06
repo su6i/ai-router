@@ -7,6 +7,7 @@ real vault ledger.
 """
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,81 @@ def fake_caller(responses):
 
     _call.calls = calls
     return _call
+
+
+class FakeAgyPopen:
+    """Stand-in for subprocess.Popen(..., stdout=PIPE, stderr=PIPE, text=True)
+    against the real agy --output-format stream-json event shapes. `lines` is
+    a list of already-formatted NDJSON strings (each WITHOUT a trailing
+    newline; this class adds it). Pass `hang=True` with an empty/short
+    `lines` list to simulate a process that never produces the result event
+    (used to exercise the watchdog timeout path) — `.kill()` releases it.
+    """
+    def __init__(self, lines, returncode=0, hang=False, stderr=""):
+        self.args = ("agy",)
+        self._lines = list(lines)
+        self.returncode = returncode
+        self._hang = hang
+        self._killed = threading.Event()
+        self.stderr = FakeStderr(stderr)
+        self.stdout = self._stdout_iter()
+        self.was_killed = False
+
+    def _stdout_iter(self):
+        for line in self._lines:
+            yield line + "\n"
+        if self._hang:
+            self._killed.wait()
+
+    def poll(self):
+        if self._hang and not self._killed.is_set():
+            return None
+        return self.returncode
+
+    def kill(self):
+        self.was_killed = True
+        self._killed.set()
+        if self._hang:
+            self.returncode = -9
+
+    def terminate(self):
+        self.kill()
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def communicate(self, input=None, timeout=None):
+        out = "".join(self.stdout)
+        err = self.stderr.read()
+        return (out, err)
+
+
+class FakeStderr:
+    def __init__(self, text):
+        self._text = text
+
+    def read(self):
+        return self._text
+
+
+def agy_result_lines(response, usage, conversation_id, num_turns, duration_seconds, status="SUCCESS"):
+    """Build the minimal two-line NDJSON stream (one agent_response step_update
+    carrying `usage`, then the final result event) that a real single-turn
+    `agy --output-format stream-json` call produces — matches the live
+    experiment evidence exactly (T-960)."""
+    step = json.dumps({"event": "step_update", "step_update": {
+        "step_index": 1, "state": "DONE", "step_type": "agent_response",
+        "duration_seconds": duration_seconds, "usage": usage}})
+    result = json.dumps({"event": "result", "result": {
+        "conversation_id": conversation_id, "status": status, "response": response,
+        "duration_seconds": duration_seconds, "num_turns": num_turns, "usage": usage}})
+    return [step, result]
 
 
 # ---- parse_worker_response ---------------------------------------------------
@@ -496,25 +572,18 @@ def test_write_files_small_file_rewrite_unaffected_by_guard(tmp_path):
 def test_call_agy_print_success(monkeypatch, tmp_path):
     captured_cmd = {}
 
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 10},
-            "conversation_id": "conv-123",
-            "num_turns": 1,
-            "duration_seconds": 2.5
-        })
-        stderr = ""
-
-    def fake_run(cmd, cwd, capture_output, text, timeout, env=None):
+    def fake_popen(cmd, cwd=None, stdout=None, stderr=None, text=None, env=None):
         captured_cmd["cmd"] = cmd
         captured_cmd["cwd"] = cwd
         captured_cmd["env"] = env
-        return FakeCompleted()
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 10, "total_tokens": 160},
+            "conv-123", 1, 2.5
+        )
+        return FakeAgyPopen(lines)
 
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
 
     content, echoed, rid, pin, pout, cache, cache_miss = d.call_agy_print(
         "do the task", "gemini-3.1-pro-high", tmp_path, timeout_s=60)
@@ -542,68 +611,88 @@ def test_call_agy_print_success(monkeypatch, tmp_path):
     assert captured_cmd["env"].get("AI_ROUTER_IN_WORKER") == "1"
     assert "PATH" in captured_cmd["env"]  # a real copy of the parent env, not a bare dict
     assert "--output-format" in captured_cmd["cmd"]
-    assert captured_cmd["cmd"][captured_cmd["cmd"].index("--output-format") + 1] == "json"
+    assert captured_cmd["cmd"][captured_cmd["cmd"].index("--output-format") + 1] == "stream-json"
     assert captured_cmd["cwd"] == str(tmp_path)
 
 
 def test_call_agy_print_bad_json_raises(monkeypatch, tmp_path):
-    class FakeCompleted:
-        returncode = 0
-        stdout = "not json at all"
-        stderr = ""
-
-    monkeypatch.setattr(d.subprocess, "run", lambda *a, **k: FakeCompleted())
+    monkeypatch.setattr(d.subprocess, "Popen", lambda *a, **k: FakeAgyPopen(["not json at all"]))
 
     with pytest.raises(d.ProviderError, match="BAD_JSON"):
         d.call_agy_print("task", "gemini-3.1-pro-high", tmp_path, timeout_s=60)
 
 
 def test_call_agy_print_failure_status_raises(monkeypatch, tmp_path):
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({"status": "FAILURE", "response": "nope"})
-        stderr = ""
-
-    monkeypatch.setattr(d.subprocess, "run", lambda *a, **k: FakeCompleted())
+    lines = agy_result_lines("nope", {}, None, None, None, status="FAILURE")
+    monkeypatch.setattr(d.subprocess, "Popen", lambda *a, **k: FakeAgyPopen(lines))
 
     with pytest.raises(d.ProviderError, match="BAD_JSON"):
         d.call_agy_print("task", "gemini-3.1-pro-high", tmp_path, timeout_s=60)
 
 
 def test_call_agy_print_nonzero_exit_raises(monkeypatch, tmp_path):
-    class FakeCompleted:
-        returncode = 1
-        stdout = ""
-        stderr = "boom"
-
-    monkeypatch.setattr(d.subprocess, "run",
-                        lambda *a, **k: FakeCompleted())
+    monkeypatch.setattr(d.subprocess, "Popen",
+                        lambda *a, **k: FakeAgyPopen([], returncode=1, stderr="boom"))
 
     with pytest.raises(d.ProviderError):
         d.call_agy_print("task", "gemini-3.1-pro-high", tmp_path, timeout_s=60)
 
 
 def test_call_agy_print_empty_stdout_raises(monkeypatch, tmp_path):
-    class FakeCompleted:
-        returncode = 0
-        stdout = "   "
-        stderr = ""
-
-    monkeypatch.setattr(d.subprocess, "run",
-                        lambda *a, **k: FakeCompleted())
+    monkeypatch.setattr(d.subprocess, "Popen",
+                        lambda *a, **k: FakeAgyPopen([], returncode=0))
 
     with pytest.raises(d.ProviderError):
         d.call_agy_print("task", "gemini-3.1-pro-high", tmp_path, timeout_s=60)
 
 
 def test_call_agy_print_timeout_raises(monkeypatch, tmp_path):
-    def fake_run(*a, **k):
-        raise d.subprocess.TimeoutExpired(cmd="agy", timeout=60)
+    monkeypatch.setattr(d.subprocess, "Popen", lambda *a, **k: FakeAgyPopen([], hang=True))
 
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    with pytest.raises(d.ProviderError, match="TIMEOUT"):
+        d.call_agy_print("task", "gemini-3.1-pro-high", tmp_path, timeout_s=0.05)
 
-    with pytest.raises(d.ProviderError):
-        d.call_agy_print("task", "gemini-3.1-pro-high", tmp_path, timeout_s=60)
+
+def test_call_agy_print_budget_exceeded_kills_run(monkeypatch, tmp_path):
+    steps = [
+        json.dumps({"event": "step_update", "step_update": {
+            "step_index": 1, "state": "DONE", "step_type": "agent_response",
+            "duration_seconds": 1.0, "usage": {"total_tokens": 5000}}}),
+        json.dumps({"event": "step_update", "step_update": {
+            "step_index": 2, "state": "DONE", "step_type": "agent_response",
+            "duration_seconds": 1.0, "usage": {"total_tokens": 5000}}}),
+        json.dumps({"event": "step_update", "step_update": {
+            "step_index": 3, "state": "DONE", "step_type": "agent_response",
+            "duration_seconds": 1.0, "usage": {"total_tokens": 5000}}}),
+    ]
+    fake_proc = FakeAgyPopen(steps)
+    monkeypatch.setattr(d.subprocess, "Popen", lambda *a, **k: fake_proc)
+
+    with pytest.raises(d.ProviderError, match="BUDGET_EXCEEDED"):
+        d.call_agy_print("task", "gemini-3.1-pro-high", tmp_path, timeout_s=60, max_tokens_per_run=8000)
+
+    assert fake_proc.was_killed
+
+
+def test_call_agy_print_budget_zero_disables_breaker(monkeypatch, tmp_path):
+    steps = [
+        json.dumps({"event": "step_update", "step_update": {
+            "step_index": 1, "state": "DONE", "step_type": "agent_response",
+            "duration_seconds": 1.0, "usage": {"total_tokens": 50000}}}),
+        json.dumps({"event": "step_update", "step_update": {
+            "step_index": 2, "state": "DONE", "step_type": "agent_response",
+            "duration_seconds": 1.0, "usage": {"total_tokens": 50000}}}),
+        json.dumps({"event": "result", "result": {
+            "conversation_id": "conv-zero", "status": "SUCCESS", "response": "===FILE: src/a.py===\nx=1\n===END FILE===",
+            "duration_seconds": 2.0, "num_turns": 2, "usage": {"input_tokens": 90000, "output_tokens": 10000, "cache_read_tokens": 0, "total_tokens": 100000}}}),
+    ]
+    fake_proc = FakeAgyPopen(steps)
+    monkeypatch.setattr(d.subprocess, "Popen", lambda *a, **k: fake_proc)
+
+    content, model, conv_id, pin, pout, cache, _ = d.call_agy_print(
+        "task", "gemini-3.1-pro-high", tmp_path, timeout_s=60, max_tokens_per_run=0)
+    assert not fake_proc.was_killed
+    assert conv_id == "conv-zero"
 
 
 def test_worker_delegate_agy_model_needs_no_env_key(tmp_path, monkeypatch):
@@ -670,23 +759,16 @@ def test_worker_session_resume_sends_conversation_id(tmp_path, monkeypatch):
     
     captured_argv = []
     
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-            "conversation_id": "conv-999",
-            "num_turns": 2,
-            "duration_seconds": 1.0
-        })
-        stderr = ""
-        
-    def fake_run(cmd, *args, **kwargs):
+    def fake_popen(cmd, *args, **kwargs):
         captured_argv.extend(cmd)
-        return FakeCompleted()
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "conv-999", 2, 1.0
+        )
+        return FakeAgyPopen(lines)
         
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
     
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
                       verify_cmd="true", retries=1, project_root=tmp_path, session_key="my-session")
@@ -698,23 +780,16 @@ def test_worker_session_resume_sends_conversation_id(tmp_path, monkeypatch):
 def test_worker_session_fresh_persists_id(tmp_path, monkeypatch):
     captured_argv = []
     
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-            "conversation_id": "new-conv-777",
-            "num_turns": 1,
-            "duration_seconds": 1.0
-        })
-        stderr = ""
-        
-    def fake_run(cmd, *args, **kwargs):
+    def fake_popen(cmd, *args, **kwargs):
         captured_argv.extend(cmd)
-        return FakeCompleted()
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "new-conv-777", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
         
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
     
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
                       verify_cmd="true", retries=1, project_root=tmp_path, session_key="fresh-session")
@@ -729,27 +804,18 @@ def test_worker_session_self_healing(tmp_path, monkeypatch):
     
     calls = []
     
-    def fake_run(cmd, *args, **kwargs):
+    def fake_popen(cmd, *args, **kwargs):
         calls.append(cmd)
-        class FakeCompleted:
-            returncode = 0
-            stderr = ""
-        fc = FakeCompleted()
         if "--conversation" in cmd and "bad-conv-id" in cmd:
-            fc.returncode = 1
-            fc.stdout = "invalid conversation"
-        else:
-            fc.stdout = json.dumps({
-                "status": "SUCCESS",
-                "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
-                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-                "conversation_id": "healed-conv-id",
-                "num_turns": 1,
-                "duration_seconds": 1.0
-            })
-        return fc
+            return FakeAgyPopen(["invalid conversation"], returncode=1)
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "healed-conv-id", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
         
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
     
     out = d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
                             verify_cmd="true", retries=1, project_root=tmp_path, session_key="stale-session")
@@ -788,23 +854,16 @@ def test_agy_self_fix_triggers_and_sends_short_delta(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
     captured_argv = []
 
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-            "conversation_id": "conv-1",
-            "num_turns": 1,
-            "duration_seconds": 1.0
-        })
-        stderr = ""
-        
-    def fake_run(cmd, *args, **kwargs):
+    def fake_popen(cmd, *args, **kwargs):
         captured_argv.append(cmd)
-        return FakeCompleted()
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "conv-1", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
         
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
     
     verify_calls = [0]
     def fake_verify(cmd, cwd):
@@ -834,23 +893,17 @@ def test_agy_self_fix_triggers_and_sends_short_delta(tmp_path, monkeypatch):
 def test_agy_self_fix_capped_at_one_round(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
     captured_argv = []
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-            "conversation_id": "conv-1",
-            "num_turns": 1,
-            "duration_seconds": 1.0
-        })
-        stderr = ""
-        
-    def fake_run(cmd, *args, **kwargs):
+
+    def fake_popen(cmd, *args, **kwargs):
         captured_argv.append(cmd)
-        return FakeCompleted()
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "conv-1", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
         
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
     
     def fake_verify(cmd, cwd):
         return False, "error output", 0.1, 1
@@ -867,23 +920,17 @@ def test_agy_self_fix_capped_at_one_round(tmp_path, monkeypatch):
 def test_agy_self_fix_disabled_via_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
     captured_argv = []
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-            "conversation_id": "conv-1",
-            "num_turns": 1,
-            "duration_seconds": 1.0
-        })
-        stderr = ""
-        
-    def fake_run(cmd, *args, **kwargs):
+
+    def fake_popen(cmd, *args, **kwargs):
         captured_argv.append(cmd)
-        return FakeCompleted()
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "conv-1", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
         
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
     
     def fake_verify(cmd, cwd):
         return False, "error output", 0.1, 1
@@ -905,25 +952,16 @@ def test_agy_self_fix_disabled_via_flag(tmp_path, monkeypatch):
 def test_agy_self_fix_ledger_outcome_fixed(tmp_path, monkeypatch):
     verify_calls = [0]
     
-    class FakeCompleted:
-        returncode = 0
-        @property
-        def stdout(self):
-            content = "ok\n" if verify_calls[0] > 0 else "bad\n"
-            return json.dumps({
-                "status": "SUCCESS",
-                "response": f"===FILE: src/foo.py===\n{content}===END FILE===\n===SUMMARY===\nsum\n===END SUMMARY===\n",
-                "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-                "conversation_id": "conv-1",
-                "num_turns": 1,
-                "duration_seconds": 1.0
-            })
-        stderr = ""
+    def fake_popen(cmd, *args, **kwargs):
+        content = "ok\n" if verify_calls[0] > 0 else "bad\n"
+        lines = agy_result_lines(
+            f"===FILE: src/foo.py===\n{content}===END FILE===\n===SUMMARY===\nsum\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "conv-1", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
         
-    def fake_run(cmd, *args, **kwargs):
-        return FakeCompleted()
-        
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
     
     def fake_verify(cmd, cwd):
         verify_calls[0] += 1
@@ -942,31 +980,24 @@ def test_agy_self_fix_ledger_outcome_fixed(tmp_path, monkeypatch):
 
 
 def test_agy_self_fix_ledger_outcome_failed(tmp_path, monkeypatch):
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nbad\n===END FILE===\n===SUMMARY===\nsum\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-            "conversation_id": "conv-1",
-            "num_turns": 1,
-            "duration_seconds": 1.0
-        })
-        stderr = ""
-        
-    def fake_run(cmd, *args, **kwargs):
-        return FakeCompleted()
-        
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
-    
+    def fake_popen(cmd, *args, **kwargs):
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nbad\n===END FILE===\n===SUMMARY===\nsum\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "conv-1", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
+
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
+
     def fake_verify(cmd, cwd):
         return False, "error", 0.1, 1
-    
+
     monkeypatch.setattr(d, "run_verify", fake_verify)
-    
+
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
                       verify_cmd="fake_verify", retries=1, project_root=tmp_path)
-                      
+
     lines = d.AUDIT.read_text().strip().splitlines()
     rec = json.loads(lines[-1])
     assert rec["self_fix_rounds"] == 1
@@ -974,28 +1005,21 @@ def test_agy_self_fix_ledger_outcome_failed(tmp_path, monkeypatch):
 
 
 def test_agy_self_fix_ledger_outcome_skipped(tmp_path, monkeypatch):
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nok\n===END FILE===\n===SUMMARY===\nsum\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0},
-            "conversation_id": "conv-1",
-            "num_turns": 1,
-            "duration_seconds": 1.0
-        })
-        stderr = ""
-        
-    def fake_run(cmd, *args, **kwargs):
-        return FakeCompleted()
-        
-    monkeypatch.setattr(d.subprocess, "run", fake_run)
-    
+    def fake_popen(cmd, *args, **kwargs):
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nok\n===END FILE===\n===SUMMARY===\nsum\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "total_tokens": 150},
+            "conv-1", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
+
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
+
     def fake_verify(cmd, cwd):
         return True, "", 0.1, 0
-    
+
     monkeypatch.setattr(d, "run_verify", fake_verify)
-    
+
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
                       verify_cmd="fake_verify", retries=1, project_root=tmp_path)
 
@@ -1014,19 +1038,15 @@ def test_agy_ledger_carries_conversation_id_and_turns(tmp_path, monkeypatch):
     # (not just the printed cache-hit-rate line) must be proof of warm-session
     # reuse: same conversation_id, real num_turns/duration from agy's own
     # --output-format json envelope.
-    class FakeCompleted:
-        returncode = 0
-        stdout = json.dumps({
-            "status": "SUCCESS",
-            "response": "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 42},
-            "conversation_id": "conv-turns-test",
-            "num_turns": 3,
-            "duration_seconds": 5.25
-        })
-        stderr = ""
+    def fake_popen(cmd, *args, **kwargs):
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 42, "total_tokens": 192},
+            "conv-turns-test", 3, 5.25
+        )
+        return FakeAgyPopen(lines)
 
-    monkeypatch.setattr(d.subprocess, "run", lambda *a, **k: FakeCompleted())
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
 
     d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
                       verify_cmd="true", retries=1, project_root=tmp_path)
@@ -1040,6 +1060,75 @@ def test_agy_ledger_carries_conversation_id_and_turns(tmp_path, monkeypatch):
     assert rec["in"] == 100
     assert rec["out"] == 50
     assert rec["cache"] == 42
+
+
+def test_worker_delegate_cumulative_budget_blocks_second_self_fix_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "_cli_bin", lambda name: "agy")
+    calls = []
+
+    def fake_popen(cmd, *args, **kwargs):
+        calls.append(cmd)
+        lines = agy_result_lines(
+            "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n",
+            {"input_tokens": 5000, "output_tokens": 1000, "cache_read_tokens": 0, "total_tokens": 6000},
+            "conv-cumul", 1, 1.0
+        )
+        return FakeAgyPopen(lines)
+
+    monkeypatch.setattr(d.subprocess, "Popen", fake_popen)
+
+    def fake_verify(cmd, cwd):
+        return False, "verify failed", 0.1, 1
+
+    monkeypatch.setattr(d, "run_verify", fake_verify)
+
+    # Attempt 1 uses 6000 tokens (under 8000). Verify fails, triggering self-fix.
+    # For attempt 2, the remaining budget is 8000 - 6000 = 2000.
+    # Call_agy_print is launched with max_tokens_per_run=2000.
+    # When attempt 2 stream produces 6000 tokens (> 2000), the mid-run circuit
+    # breaker kills it with BUDGET_EXCEEDED, and worker_delegate surfaces ValueError.
+    with pytest.raises(ValueError, match="BUDGET_EXCEEDED"):
+        d.worker_delegate("task", "agy", files_arg="src/foo.py", allow_write_arg="src/**",
+                          verify_cmd="fake_verify", retries=2, project_root=tmp_path,
+                          self_fix=True, max_tokens_per_run=8000)
+
+    agy_calls = [c for c in calls if c and c[0] == "agy"]
+    assert len(agy_calls) == 2
+
+
+def test_worker_delegate_token_alarm_appears_for_non_agy_provider_over_budget(tmp_path, monkeypatch):
+    # T-960: the post-run alarm is the ONLY protection a non-agy provider gets
+    # (no streaming mid-run signal exists for call_gemini/call_openai), so it
+    # must fire in the returned summary — not just the ledger — the moment a
+    # run's total tokens exceed the budget, even though nothing here actually
+    # aborted the call.
+    response = "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n"
+
+    def huge_usage_caller(spec, key, history, system):
+        return (response, spec["api"], "resp-1", 6000, 3000, 0, None)  # 9000 total
+
+    monkeypatch.setattr(d, "call_gemini", huge_usage_caller)
+
+    out = d.worker_delegate("add foo()", "test-gemini", files_arg="src/foo.py", allow_write_arg="src/**",
+                            verify_cmd="true", retries=1, project_root=tmp_path,
+                            max_tokens_per_run=8000)
+
+    assert "TOKEN ALARM" in out
+    assert "9,000" in out
+    assert "8,000" in out
+
+
+def test_worker_delegate_normal_small_run_has_no_token_alarm(tmp_path, monkeypatch):
+    # The circuit breaker must be invisible to a run that never gets near the
+    # budget — no alarm text, no behavior change.
+    response = "===FILE: src/foo.py===\nx = 1\n===END FILE===\n===SUMMARY===\nok\n===END SUMMARY===\n"
+    monkeypatch.setattr(d, "call_gemini", fake_caller([response]))
+
+    out = d.worker_delegate("add foo()", "test-gemini", files_arg="src/foo.py", allow_write_arg="src/**",
+                            verify_cmd="true", retries=1, project_root=tmp_path)
+
+    assert "TOKEN ALARM" not in out
+    assert "files written : src/foo.py" in out
 
 
 def test_non_agy_ledger_has_no_agy_fields(tmp_path, monkeypatch):

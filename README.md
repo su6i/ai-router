@@ -499,6 +499,16 @@ python3 src/delegate.py --model flash \
   module. Files are `stat()`ed, never read; a declared path that does not
   exist yet is one the worker will create and counts as nothing. The error
   names the three largest files so "split the work" is actionable.
+- `--max-tokens-per-run <n>` — T-960: per-run TOKEN circuit breaker for the
+  `agy` channel, default 8,000,000 (`AI_ROUTER_MAX_TOKENS_PER_RUN` env var;
+  `0` disables). Unlike `--max-files`/`--max-input-bytes`, this does not
+  check the request before the call — it can't, the growth happens *inside*
+  a single agy conversation via its own agentic exploration, not in what we
+  send it. Instead `call_agy_print()` streams `agy --output-format
+  stream-json` and kills the subprocess live, the moment the running token
+  total crosses the budget, instead of only finding out after the process
+  exits. See "Token circuit breaker" below for how this was proven to work
+  and what it does not catch.
 - `--retries` — verify-failure retries (default 1, max 2); the worker gets
   the verify output back and one more attempt per retry.
 - `--session-key <key>` — `agy` channel only: resume the SAME `agy`
@@ -523,7 +533,8 @@ Full wire protocol: the private `DELEGATE-TOOL-DESIGN.md` (vault).
 
 ### Warm agy sessions & self-fix loop
 
-`call_agy_print()` invokes `agy` with `--output-format json`, which returns a
+`call_agy_print()` invokes `agy` with `--output-format stream-json` (T-960;
+was `json` — see "Token circuit breaker" above for why), which returns a
 stable `conversation_id` plus REAL `usage.input_tokens` /
 `usage.output_tokens` / `usage.cache_read_tokens`. The router used to record
 zeros here and mark the cost "unknown" — that was a bug in how the router
@@ -550,6 +561,64 @@ second failure returns to the caller with a structured report, never a
 silent extra retry. Disable with `--no-self-fix`. The audit ledger records
 `self_fix_rounds` (`0` or `1`) and `self_fix_outcome` (`fixed` / `failed` /
 `skipped`).
+
+### Token circuit breaker (T-960)
+
+The owner burned ~75% of a weekly agy quota in under two days (2026-09-06):
+ten runs made up 93% of two days' consumption, two of them wrote zero files
+and still burned 27M/19M tokens each. Ledger analysis ruled out retries,
+cross-dispatch replay (every dispatch carries its own `agy_conversation_id`),
+and our own payload size — the growth happens *inside* one agy conversation,
+from its own agentic file exploration, which no pre-call cap (`--max-files`,
+`--max-input-bytes`) can see.
+
+**Is there a mid-run signal at all? Yes — proven live, not assumed.**
+`agy --output-format stream-json` (vs. the `json` mode used before) writes
+one NDJSON line per event as the run progresses; each `agent_response` step,
+once `"state":"DONE"`, carries a per-turn `usage.total_tokens` that sums
+*exactly* to the final result's total — verified against the real CLI across
+single- and multi-turn runs, and re-verified specifically over a Python
+`subprocess.Popen` pipe (not just a terminal, which buffers differently).
+Evidence: `<vault>/workspace/evidence/T-960-agy-usage-signal.md`.
+
+Two breakers, doing different jobs:
+
+1. **Per-run (real-time kill).** `call_agy_print()` sums the streamed running
+   total live and kills the `agy` subprocess the instant it crosses
+   `AI_ROUTER_MAX_TOKENS_PER_RUN` (default 8,000,000, `--max-tokens-per-run`
+   per call, `0` disables — see the flag above). Justified against the
+   ledger: the 2026-09-05/06 runaway rows ran 9.4M–53M tokens; only 5 of 276
+   (~1.8%, ~p98) historically PASSING worker runs exceeded 8,000,000. The
+   remaining budget shrinks across self-fix retries within one delegation —
+   a retry that would push the cumulative total over budget is refused
+   before it spends anything, not just capped once it's already running. A
+   run that still finishes over budget (or one dispatched with a raised
+   override) gets a loud `⚠️ TOKEN ALARM` line prepended to its returned
+   summary — for every provider, not only agy, since a ledger row is not
+   somewhere a caller is looking mid-task.
+2. **Daily per-channel total (the actual fix for the quota loss).**
+   `check_budget()` — already called before every provider call — now also
+   sums each `quota_channel`'s tokens spent today (cache hits excluded, same
+   rule as the existing daily-call count) and aborts loudly before the call
+   once `daily_token_budget` (see Budgets below) is exceeded. A single run
+   staying under its own per-run budget is not a defense against many such
+   runs adding up in one day; this is.
+
+**What this does NOT catch, stated plainly:** a non-agy provider mid-run —
+`gemini`/`openai` have no equivalent streaming mode, so they only ever get
+the post-run alarm once the total is already known. And the per-run breaker
+is scoped to `call_agy_print`'s own subprocess invocations; a self-fix retry
+gets a shrinking slice of the SAME budget (so the whole delegation is
+bounded), but nothing stops a legitimately large single agy turn from being
+killed close to the ceiling if that's genuinely how much work it needed —
+that trade-off is the point of a circuit breaker, not a bug in it.
+
+`AGY_WORKER_TIMEOUT_S` also dropped from 900s to 600s (`AI_ROUTER_AGY_WORKER_TIMEOUT_S`),
+re-measured against the ledger's own worker-run latency distribution
+(p50=67.7s, p75=139s, p90=248.1s, p95=319s, p99=531.7s; only 4 of 495 worker
+runs historically ran past 600s) — still a per-`call_agy_print`-invocation
+maximum, so a run with a self-fix retry can take up to ~2x this across two
+invocations.
 
 ### Large File Guard
 
@@ -635,7 +704,8 @@ Schema (see `budgets.example.json` in the repo root):
   "weekly_usd": 2.0,
   "per_session_usd": 0.50,
   "per_project_monthly_usd": {},
-  "daily_calls": {"google-ai-pro": 50}
+  "daily_calls": {"google-ai-pro": 50},
+  "daily_token_budget": {"google-ai-pro-gemini": 20000000}
 }
 ```
 
@@ -643,6 +713,16 @@ Schema (see `budgets.example.json` in the repo root):
 subscription/free channels always report `cost_usd=0`, so USD caps never brake
 them; their scarce unit is daily quota. Over the cap aborts loudly; at ≥80% a
 warning is printed. A missing key means uncapped. Cache hits don't count.
+
+`daily_token_budget` (T-960) caps *tokens* per `quota_channel` per calendar
+day, same cache-hits-excluded rule, same loud-abort/≥80%-warning behaviour —
+this is the one that actually would have stopped the 2026-09-06 quota loss,
+since a handful of calls can each burn millions of tokens without ever
+tripping a call-count cap. Any channel not listed here stays uncapped
+**except** one starting with `google-ai-pro`, which falls back to a coded
+default of 20,000,000/day even with no `budgets.json` entry at all — silent
+overspend by omission is still silent overspend. See "Token circuit breaker"
+above.
 
 Use `--estimate` to dry-run a call: prints estimated tokens, cost, current
 budget usage, and today's per-channel call counts without calling the provider

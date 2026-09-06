@@ -71,7 +71,7 @@ Prometheus, Grafana, migrations, 12-factor config, headless runtime).
 
 | Component | Tech | Responsibility |
 |---|---|---|
-| **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, worker mode (`--files`: cheap model reads/writes files on disk directly, verified via a caller-supplied command, only a short summary returns to the caller — see private `DELEGATE-TOOL-DESIGN.md`), agent mode (`--agent`: an agentic CLI — `agy`/`codewhale` — performs its own tool-calls in the workdir; the launch binds `--add-dir <workdir>` so `agy` writes to the target rather than its sandbox scratch, and change detection falls back to a filesystem snapshot outside a git repo — a 0-change/verify-fail run is surfaced as `UNVERIFIED`, never a silent `COMPLETED`), audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). The `agy` worker channel invokes `agy` with `--output-format json`, which exposes a stable `conversation_id` and REAL `usage.input_tokens`/`output_tokens`/`cache_read_tokens` — the router previously recorded zeros and marked cost "unknown" here; that was a router bug, not a limitation of the `agy` CLI, and is now fixed (cost stays $0-by-subscription, but the token counts are real). `--session-key` resumes that same `conversation_id` across separate invocations, persisted in `<DATA_DIR>/worker_sessions.json` (never git), pruned after 24h, self-healing on a stale/unknown id (one silent cold retry, never a hard failure). On a verify failure the `agy` channel gets exactly ONE self-fix round: the verify command, exit code, and a truncated+redacted tail of its output are sent back into the SAME warm conversation (not a full context replay) so the model pays for the delta, not a re-read — opt out with `--no-self-fix`; the ledger records `self_fix_rounds`/`self_fix_outcome`. |
+| **delegate.py** | Python + httpx | Single LLM gateway, lives at `src/delegate.py` in this repo (state — cache/audit/sessions — stays in the vault, never in git). Provider-echoed proof, cost calc, session memory, worker mode (`--files`: cheap model reads/writes files on disk directly, verified via a caller-supplied command, only a short summary returns to the caller — see private `DELEGATE-TOOL-DESIGN.md`), agent mode (`--agent`: an agentic CLI — `agy`/`codewhale` — performs its own tool-calls in the workdir; the launch binds `--add-dir <workdir>` so `agy` writes to the target rather than its sandbox scratch, and change detection falls back to a filesystem snapshot outside a git repo — a 0-change/verify-fail run is surfaced as `UNVERIFIED`, never a silent `COMPLETED`), audit ledger. Claude models reachable only in the *quality/heavy* tier (see §5). The `agy` worker channel invokes `agy` with `--output-format stream-json` (T-960; was `json`, see §5), which exposes a stable `conversation_id` and REAL `usage.input_tokens`/`output_tokens`/`cache_read_tokens` — the router previously recorded zeros and marked cost "unknown" here; that was a router bug, not a limitation of the `agy` CLI, and is now fixed (cost stays $0-by-subscription, but the token counts are real). `--session-key` resumes that same `conversation_id` across separate invocations, persisted in `<DATA_DIR>/worker_sessions.json` (never git), pruned after 24h, self-healing on a stale/unknown id (one silent cold retry, never a hard failure). On a verify failure the `agy` channel gets exactly ONE self-fix round: the verify command, exit code, and a truncated+redacted tail of its output are sent back into the SAME warm conversation (not a full context replay) so the model pays for the delta, not a re-read — opt out with `--no-self-fix`; the ledger records `self_fix_rounds`/`self_fix_outcome`. |
 | **Channel Registry** | JSON file | Controls access to the available channels (`agy`, `codewhale`, `codex`, `copilot`). Checked at runtime before delegating via `delegate_agent`. Enforced by `channels.json` and the `AI_ROUTER_DISABLE_CHANNELS` env var. |
 | **src/doctor.py** | Python, stdlib-only | `r doctor` self-healing checks (MCP registration, handshake, hooks, permissions, launchd, vault env, database). Exposes `--fix` for MCP registration idempotently. |
 | **SessionStart continuity hook** | `hooks/session_start_brief.py`, stdlib-only | Claude Code `SessionStart` hook. Replaces the legacy pointer-only bash hook with a retrieved brief (raw JSONL transcript path for this and the previous session, open `TODO.md` items, RAG-retrieved `session_chunks` filtered for ping-noise and boosted for resolution-bearing headings, vault inbox listing, fallback pointer tail), hard-capped at 4500 chars. Fails safe to the legacy pointer text (never a hang, never a nonzero exit) when Postgres is unreachable, the embedding model isn't already cached on disk, or retrieval exceeds a 6s wall-clock budget. Registered via `r doctor --fix` (`sessionstart-rag` check). |
@@ -169,8 +169,26 @@ before the call — a flash-class model loses the thread across large fan-outs (
 does NOT bound, stated plainly: ledger analysis of the 2026-09-06 agy quota burn
 found each dispatch on its own `conversation_id`, so the multi-million-token runs
 grew inside a single conversation from agy's own agentic file exploration, not
-from the payload we hand it. Bounding that needs a per-run token circuit breaker,
-which these caps are not. The ledger records
+from the payload we hand it. That breaker now exists (T-960): a live experiment
+proved `agy --output-format stream-json` streams a per-turn `usage.total_tokens`
+that reconstructs the running total *before* the process exits, so `call_agy_print()`
+(via `subprocess.Popen`, not `subprocess.run`) kills the subprocess the moment the
+running sum crosses `AI_ROUTER_MAX_TOKENS_PER_RUN` (default 8,000,000, ~p98 of
+historically successful worker runs — only 5 of 276 exceeded it) — a real abort
+mid-flight, and the remaining budget shrinks across self-fix retries so a delegation
+can't dodge it by staying under budget per call while going over in total. Stated
+honestly, this is NOT the whole fix: it bounds one run, not many small ones adding
+up, and it has no equivalent for non-agy providers (`gemini`/`openai`), which get
+only a post-run `⚠️ TOKEN ALARM` in the returned summary once the total is already
+known. The actual defense against a repeat of the 2026-09-05/06 quota loss is a
+second, independent breaker in `check_budget()`: a rolling daily total per
+`quota_channel` (cache hits excluded, same rule as the existing daily-call count)
+that aborts BEFORE the provider call once `daily_token_budget` (`budgets.json`, or a
+coded 20,000,000/day fallback for any `google-ai-pro*` channel with no config at
+all) is exceeded — every normal day in the ledger topped out at 12,893,374 tokens on
+that channel; the two crisis days hit 147,514,702 and 106,191,856. `AGY_WORKER_TIMEOUT_S`
+also dropped 900s → 600s, re-measured against the ledger's own latency distribution
+(p95=319s, p99=531.7s). The ledger records
 `verify_present`, `no_verify_reason`, and `files_written_count` per run, and
 `--scorecard` surfaces a `%unverified` column per model so an unverified run stays
 visible in the comparison D-233 exists to produce.

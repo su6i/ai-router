@@ -184,7 +184,7 @@ def test_tools_list_exposes_exactly_tools(server_proc):
     worker = next(t for t in tools if t["name"] == "delegate_worker")
     assert set(worker["inputSchema"]["properties"]) == {
         "prompt", "files", "allow_write", "verify", "model", "retries", "workdir",
-        "no_verify_reason", "max_files"}
+        "no_verify_reason", "max_files", "max_tokens_per_run"}
 
 
 def test_tools_call_delegate_research_returns_capped_answer_with_cost(tmp_path):

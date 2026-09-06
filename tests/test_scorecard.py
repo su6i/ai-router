@@ -362,3 +362,79 @@ def test_unverified_percentage_backward_compat_old_ledger_row(tmp_path):
     assert row[headers.index("model")] == "model-legacy"
     assert row[headers.index("runs")] == "2"
     assert row[headers.index("%unverified")] == "50.0%"
+
+
+def test_tok_per_run_averages_in_out_and_cache(tmp_path):
+    audit_file = _write_ledger(
+        tmp_path / "audit.log",
+        [
+            {
+                "model_asked": "model-worker",
+                "mode": "worker",
+                "in": 1000,
+                "out": 500,
+                "cache": 8500,
+            },
+            {
+                "model_asked": "model-worker",
+                "mode": "worker",
+                "in": 2000,
+                "out": 1000,
+                "cache": 17000,
+            },
+        ],
+    )
+    out = sc.show_scorecard(audit_file)
+    lines = out.splitlines()
+    headers = [c.strip() for c in lines[0].split("  ") if c.strip()]
+    row = [c.strip() for c in lines[2].split("  ") if c.strip()]
+
+    tok_run_idx = headers.index("tok/run")
+    assert row[tok_run_idx] == "15,000"
+
+
+def test_tok_per_run_dash_when_no_token_data(tmp_path):
+    audit_file = _write_ledger(
+        tmp_path / "audit.log",
+        [
+            {
+                "model_asked": "model-no-tokens",
+                "verify_status": "PASS",
+                "attempts": 1,
+            },
+        ],
+    )
+    out = sc.show_scorecard(audit_file)
+    lines = out.splitlines()
+    headers = [c.strip() for c in lines[0].split("  ") if c.strip()]
+    row = [c.strip() for c in lines[2].split("  ") if c.strip()]
+
+    tok_run_idx = headers.index("tok/run")
+    assert row[tok_run_idx] == "-"
+
+
+def test_tok_per_run_with_zero_cache(tmp_path):
+    audit_file = _write_ledger(
+        tmp_path / "audit.log",
+        [
+            {
+                "model_asked": "model-zero-cache",
+                "in": 300,
+                "out": 100,
+                "cache": 0,
+            },
+            {
+                "model_asked": "model-zero-cache",
+                "in": 500,
+                "out": 100,
+                "cache": 0,
+            },
+        ],
+    )
+    out = sc.show_scorecard(audit_file)
+    lines = out.splitlines()
+    headers = [c.strip() for c in lines[0].split("  ") if c.strip()]
+    row = [c.strip() for c in lines[2].split("  ") if c.strip()]
+
+    tok_run_idx = headers.index("tok/run")
+    assert row[tok_run_idx] == "500"

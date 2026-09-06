@@ -165,6 +165,8 @@ TOOLS = [
                                      "description": "escape hatch: explicit reason to skip --verify on a docs/text-only run; empty/whitespace is rejected"},
                 "max_files": {"type": "integer",
                               "description": "override the default 8-file-per-run cap for this call"},
+                "max_tokens_per_run": {"type": "integer",
+                                       "description": "override the default 8,000,000-token-per-run circuit breaker for this call; 0 disables it (agy channel only)"},
             },
             "required": ["prompt", "workdir"],
         },
@@ -415,7 +417,8 @@ def handle_delegate_worker(args: dict) -> dict:
         summary = d.worker_delegate(
             prompt, model, args.get("files", ""), args.get("allow_write", ""),
             args.get("verify", ""), retries, project_root=Path(workdir), via="mcp",
-            no_verify_reason=args.get("no_verify_reason"), max_files=args.get("max_files"))
+            no_verify_reason=args.get("no_verify_reason"), max_files=args.get("max_files"),
+            max_tokens_per_run=args.get("max_tokens_per_run"))
     return _text_result(summary)
 
 

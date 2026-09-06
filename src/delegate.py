@@ -46,6 +46,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -847,6 +848,7 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
     spent_premium = 0
     copilot_monthly = budgets.get("copilot_premium_requests_month")
     daily_calls_count = {}
+    daily_tokens_count = {}
 
     if AUDIT.exists():
         with AUDIT.open("r") as fh:
@@ -867,6 +869,8 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                 # Cache HITs never reached the provider — they consume no quota.
                 if ts_local is not None and ts_local.date() == today and channel and not rec.get("cached"):
                     daily_calls_count[channel] = daily_calls_count.get(channel, 0) + 1
+                    run_tokens = (rec.get("in") or 0) + (rec.get("out") or 0) + (rec.get("cache") or 0)
+                    daily_tokens_count[channel] = daily_tokens_count.get(channel, 0) + run_tokens
 
                 cost = rec.get("cost_usd", 0.0)
                 if not cost:
@@ -919,7 +923,20 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                     print(f"    {ch}: {count} / {cap}")
                 else:
                     print(f"    {ch}: {count} / (uncapped)")
-                
+
+        daily_token_caps_cfg = budgets.get("daily_token_budget", {})
+        if daily_tokens_count or daily_token_caps_cfg:
+            print("  Daily tokens vs caps:")
+            for ch in set(list(daily_tokens_count.keys()) + list(daily_token_caps_cfg.keys())):
+                spent = daily_tokens_count.get(ch, 0)
+                cap = daily_token_caps_cfg.get(ch)
+                if cap is None and ch.startswith("google-ai-pro"):
+                    cap = DEFAULT_DAILY_TOKEN_BUDGET
+                if cap is not None:
+                    print(f"    {ch}: {spent:,} / {cap:,}")
+                else:
+                    print(f"    {ch}: {spent:,} / (uncapped)")
+
         sys.exit(0)
 
     # Apply estimate to actual spend
@@ -958,6 +975,30 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                 sys.exit(f"❌ BUDGET ABORT: daily call cap exceeded for {current_channel} ({count} > {cap})")
             elif count >= cap * 0.8:
                 logger.warning(f"⚠️  BUDGET WARNING: {current_channel} daily calls at {count} (cap: {cap})")
+
+    # T-960: daily per-channel TOKEN cap — the real fix for the 2026-09-06
+    # quota loss (a single conversation growing unbounded, not call COUNT).
+    daily_token_caps = budgets.get("daily_token_budget", {})
+    if current_channel:
+        token_cap = daily_token_caps.get(current_channel)
+        if token_cap is None and current_channel.startswith("google-ai-pro"):
+            token_cap = DEFAULT_DAILY_TOKEN_BUDGET
+        tokens_spent_today = daily_tokens_count.get(current_channel, 0)
+        if token_cap is not None:
+            if tokens_spent_today > token_cap:
+                reset_at = (now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                sys.exit(
+                    f"❌ TOKEN BUDGET ABORT: daily token budget exceeded for "
+                    f"{current_channel} ({tokens_spent_today:,} > {token_cap:,} tokens) — "
+                    f"resets at {reset_at.strftime('%Y-%m-%d %H:%M %Z')}. Override for "
+                    f"today via budgets.json \"daily_token_budget\".\"{current_channel}\", "
+                    f"or wait for the reset."
+                )
+            elif tokens_spent_today >= token_cap * 0.8:
+                logger.warning(
+                    f"⚠️  TOKEN BUDGET WARNING: {current_channel} daily tokens at "
+                    f"{tokens_spent_today:,} (cap: {token_cap:,})"
+                )
 
     if copilot_monthly is not None:
         if spent_premium > copilot_monthly:
@@ -1368,7 +1409,16 @@ def call_gemini(spec, key, history, system, max_output_tokens: int = 8192):
 # a killed print-mode call returns nothing at all: the whole run is lost, not
 # degraded. Reasoning models spend minutes before the first byte, so the
 # budget has to be a multiple of the observed think time, not equal to it.
-AGY_WORKER_TIMEOUT_S = int(os.environ.get("AI_ROUTER_AGY_WORKER_TIMEOUT_S", "900"))
+#
+# Re-measured 2026-09-06: worker-run latency distribution off the ledger,
+# p50=67.7s, p75=139s, p90=248.1s, p95=319s, p99=531.7s, max observed 1068.1s;
+# only 4 of 495 worker runs (0.8%) ran longer than 600s historically, so 600s
+# comfortably covers the p99 tail with margin while cutting the worst-case
+# single-call budget by a third versus the old 900s. This is a maximum for
+# ONE call_agy_print subprocess invocation, and a run with a self-fix retry
+# can still take up to ~2x this in total wall time across two invocations —
+# that is expected and unrelated to the token budget above.
+AGY_WORKER_TIMEOUT_S = int(os.environ.get("AI_ROUTER_AGY_WORKER_TIMEOUT_S", "600"))
 
 AGY_NO_TOOLS_ADDENDUM = (
     "\n\nIMPORTANT: you are running in headless TEXT-ONLY print mode for "
@@ -1382,7 +1432,10 @@ AGY_NO_TOOLS_ADDENDUM = (
 _LAST_AGY_NUM_TURNS: int | None = None
 _LAST_AGY_DURATION_S: float | None = None
 
-def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: int = AGY_WORKER_TIMEOUT_S, conversation_id: str | None = None):
+def call_agy_print(prompt: str, model_name: str, project_root: Path,
+                    timeout_s: int = AGY_WORKER_TIMEOUT_S,
+                    conversation_id: str | None = None,
+                    max_tokens_per_run: int | None = None):
     """Invoke `agy` in headless print mode as a pure TEXT GENERATOR for the
     worker protocol (SPEC v1 / PATCH protocol). The router — not agy — is
     the only writer: parse_worker_response() + _write_files()/_apply_patches()
@@ -1404,11 +1457,20 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     meant to be the writer, so it uses --add-dir + --mode accept-edits. Do
     not "harmonise" the two call sites.
 
+    --output-format stream-json is now used instead of json specifically so a
+    per-run token budget (AI_ROUTER_MAX_TOKENS_PER_RUN / --max-tokens-per-run,
+    T-960) can kill a runaway conversation mid-flight instead of only detecting
+    the overspend after the process has already exited — this was verified live
+    against the CLI: streamed step_update events with state=="DONE" carry a
+    per-turn usage.total_tokens that sums exactly to the final result event's
+    total.
+
     Return shape matches what call_openai/call_gemini return, so
     _worker_delegate_inner can treat all three callers identically:
     (content, echoed_model, request_id, pin, pout, cache, cache_miss).
-    Using --output-format json DOES expose real input_tokens/output_tokens/cache_read_tokens,
-    and the 3rd tuple slot now carries agy's conversation_id.
+    Using --output-format stream-json DOES expose real
+    input_tokens/output_tokens/cache_read_tokens, and the 3rd tuple slot now
+    carries agy's conversation_id.
     """
     global _LAST_AGY_NUM_TURNS, _LAST_AGY_DURATION_S
     _LAST_AGY_NUM_TURNS = None
@@ -1416,7 +1478,7 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
 
     agy_bin = _require_cli_bin("agy")
     cmd = [agy_bin, "-p", prompt, "--model", model_name, "--mode", "plan",
-           "--dangerously-skip-permissions", "--output-format", "json",
+           "--dangerously-skip-permissions", "--output-format", "stream-json",
            "--print-timeout", f"{timeout_s}s"]
     # No --effort, deliberately. The effort level is already baked into the
     # model id (`-high`/`-medium`/`-low`), and agy hard-errors when the flag is
@@ -1425,12 +1487,18 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
     # the full id with no --effort is the one rule that works for all 11 models.
     if conversation_id is not None:
         cmd.extend(["--conversation", conversation_id])
+
+    budget = _resolve_max_tokens_per_run(max_tokens_per_run)
+
     try:
-        r = subprocess.run(cmd, cwd=str(project_root), capture_output=True,  # noqa: PLW1510
-                           text=True, timeout=timeout_s + 30,
-                           env={**os.environ, "AI_ROUTER_IN_WORKER": "1"})
-    except subprocess.TimeoutExpired:
-        raise ProviderError("agy", "TIMEOUT", f"print mode exceeded {timeout_s}s") from None
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "AI_ROUTER_IN_WORKER": "1"},
+        )
     except FileNotFoundError:
         # _require_cli_bin resolved a path above, so reaching here means it was
         # unlinked between the check and the exec — report it the same way.
@@ -1438,30 +1506,88 @@ def call_agy_print(prompt: str, model_name: str, project_root: Path, timeout_s: 
             f"agy binary vanished at {agy_bin} between resolution and exec. "
             "Set AI_ROUTER_AGY_BIN to the agy binary's absolute path.") from None
 
-    if r.returncode != 0:
-        reason = (r.stderr or r.stdout or "").strip()[:500]
-        raise ProviderError("agy", r.returncode, reason)
-    raw_stdout = (r.stdout or "").strip()
-    if not raw_stdout:
-        raise ProviderError("agy", "EMPTY", "empty stdout from agy print mode")
-        
+    done_event = threading.Event()
+    watchdog_state = {"timeout": False}
+
+    def _watchdog():
+        if not done_event.wait(timeout_s):
+            if proc.poll() is None:
+                watchdog_state["timeout"] = True
+                proc.kill()
+
+    watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+    watchdog_thread.start()
+
+    running_total = 0
+    result_event = None
+    killed_for_budget = False
+    raw_tail = []
+
     try:
-        data = json.loads(raw_stdout)
-    except json.JSONDecodeError:
-        raise ProviderError("agy", "BAD_JSON", raw_stdout[:300])
-        
-    if data.get("status") != "SUCCESS":
-        raise ProviderError("agy", "BAD_JSON", raw_stdout[:300])
-        
-    content = data.get("response", "").strip()
-    usage = data.get("usage", {})
+        if proc.stdout:
+            for line in proc.stdout:
+                raw_tail.append(line)
+                if len(raw_tail) > 20:
+                    raw_tail.pop(0)
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    evt = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if evt.get("event") == "step_update":
+                    su = evt.get("step_update") or {}
+                    if su.get("step_type") == "agent_response" and su.get("state") == "DONE":
+                        usage = su.get("usage") or {}
+                        running_total += usage.get("total_tokens", 0)
+                        if budget > 0 and running_total > budget:
+                            killed_for_budget = True
+                            proc.kill()
+                            break
+                elif evt.get("event") == "result":
+                    result_event = evt.get("result")
+                    break
+    finally:
+        done_event.set()
+
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+    stderr_out = proc.stderr.read() if proc.stderr else ""
+
+    if killed_for_budget:
+        raise ProviderError(
+            "agy", "BUDGET_EXCEEDED",
+            f"worker run killed after reaching {running_total} tokens, "
+            f"over the per-run budget of {budget} "
+            f"(AI_ROUTER_MAX_TOKENS_PER_RUN env var, or --max-tokens-per-run, to raise it for one call)"
+        )
+    elif watchdog_state["timeout"]:
+        raise ProviderError("agy", "TIMEOUT", f"print mode exceeded {timeout_s}s")
+    elif proc.returncode != 0:
+        reason = (stderr_out or "".join(raw_tail) or "").strip()[:500]
+        raise ProviderError("agy", proc.returncode, reason)
+    elif result_event is None:
+        raise ProviderError(
+            "agy", "EMPTY" if not raw_tail else "BAD_JSON",
+            ("".join(raw_tail))[:300] or "empty stdout from agy print mode"
+        )
+    elif result_event.get("status") != "SUCCESS":
+        raise ProviderError("agy", "BAD_JSON", json.dumps(result_event)[:300])
+
+    content = (result_event.get("response") or "").strip()
+    usage = result_event.get("usage") or {}
     pin = usage.get("input_tokens", 0)
     pout = usage.get("output_tokens", 0)
     cache = usage.get("cache_read_tokens", 0)
-    conv_id = data.get("conversation_id")
-    _LAST_AGY_NUM_TURNS = data.get("num_turns")
-    _LAST_AGY_DURATION_S = data.get("duration_seconds")
-    
+    conv_id = result_event.get("conversation_id")
+    _LAST_AGY_NUM_TURNS = result_event.get("num_turns")
+    _LAST_AGY_DURATION_S = result_event.get("duration_seconds")
+
     return (content, model_name, conv_id, pin, pout, cache, None)
 
 
@@ -1823,6 +1949,37 @@ def _resolve_max_input_bytes_per_run(max_input_bytes: int | None) -> int:
         return DEFAULT_MAX_INPUT_BYTES_PER_RUN
 
 
+# T-960: per-run token circuit breaker default. Justified against the
+# ledger's own worker-run token distribution (2026-09-06 analysis): the
+# 2026-09-05/06 runaway rows that burned the weekly quota ran 9.4M-53M
+# tokens; historically PASSING (successful) worker runs reached this range
+# too but only 5 of 276 (~1.8%, ~p98) exceeded 8,000,000 — this budget
+# stops a run in the runaway zone while leaving ~98% of legitimate work
+# untouched. Override per call with --max-tokens-per-run or the env var.
+DEFAULT_MAX_TOKENS_PER_RUN = 8_000_000
+
+# T-960: coded safety-net default for the daily per-channel TOKEN budget,
+# applied to every agy subscription channel (quota_channel starting with
+# "google-ai-pro") that budgets.json does not explicitly override via
+# "daily_token_budget". Justified against the ledger: the worst NORMAL day
+# (excluding the two 2026-09-05/06 quota-loss days) topped out at 12,893,374
+# tokens on google-ai-pro-gemini; the two crisis days hit 147,514,702 and
+# 106,191,856. 20,000,000 sits ~55% above the worst normal day while still
+# catching a repeat of the crisis pattern at ~14% of the damage it did
+# before this breaker existed. This is a CODED fallback so the daily
+# breaker is on by default even if nobody edits budgets.json — silent
+# overspend is forbidden even by omission.
+DEFAULT_DAILY_TOKEN_BUDGET = 20_000_000
+
+def _resolve_max_tokens_per_run(max_tokens_per_run: int | None) -> int:
+    if max_tokens_per_run is not None:
+        return max_tokens_per_run
+    try:
+        return int(os.environ.get("AI_ROUTER_MAX_TOKENS_PER_RUN", DEFAULT_MAX_TOKENS_PER_RUN))
+    except ValueError:
+        return DEFAULT_MAX_TOKENS_PER_RUN
+
+
 def _enforce_verify_and_cap(files_arg: str, allow_write_arg: str, verify_cmd: str,
                              no_verify_reason: str | None, max_files: int | None,
                              project_root: Path | None = None,
@@ -1966,7 +2123,8 @@ def build_worker_prompt(task: str, file_specs: list, model: str | None = None) -
 
 def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                             max_attempts, elapsed, summary, total_files, cost,
-                            echoed_model, fail_tail, hit_rates, patched=()):
+                            echoed_model, fail_tail, hit_rates, patched=(),
+                            token_alarm: str | None = None):
     def fmt_written(items):
         return ", ".join(f"{p} ({_human_size(sz)})" for p, sz in items) if items else "(none)"
 
@@ -1979,6 +2137,8 @@ def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt
         return ", ".join(f"REJECTED: {p} ({reason})" for p, reason in items) if items else "(none)"
 
     lines = []
+    if token_alarm:
+        lines.append(token_alarm)
     if not written and not patched and total_files > 0:
         # Owner decree 2026-07-27: a run where every block was rejected
         # (e.g. every FILE was a forbidden large-file rewrite) must NOT read
@@ -2011,10 +2171,12 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                      via: str | None = None, estimate: bool = False,
                      allow_full_rewrite: bool = False, session_key: str | None = None,
                      resume: bool = True, self_fix: bool = True,
-                     no_verify_reason: str | None = None) -> str:
+                     no_verify_reason: str | None = None,
+                     max_tokens_per_run: int | None = None) -> str:
     """Worker mode per DELEGATE-TOOL-DESIGN.md SPEC v1. Only the returned summary
     (≤25 lines) is meant to reach Claude's context — golden rule."""
     spec = MODELS[model]
+    _effective_token_budget = _resolve_max_tokens_per_run(max_tokens_per_run)
     _worker_t0 = time.time()
     if spec["provider"] == "agy_cli":
         # agy authenticates via its own CLI session (Google AI Pro
@@ -2056,6 +2218,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
         content = p.read_text() if p.exists() else "(file does not exist yet)"
         file_specs.append((rel, content))
 
+    spent_so_far = [0]
     if spec["provider"] == "gemini":
         caller = call_gemini
     elif spec["provider"] == "agy_cli":
@@ -2076,17 +2239,49 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                     for m in history
                 )
                 prompt_text = "\n\n".join(parts)
+            if _effective_token_budget > 0 and spent_so_far[0] >= _effective_token_budget:
+                raise ProviderError(
+                    "agy", "BUDGET_EXCEEDED",
+                    f"worker run already used {spent_so_far[0]} tokens across earlier attempts in this delegation, "
+                    f"at or over the per-run budget of {_effective_token_budget} — "
+                    f"aborting before spending anything on another agy call"
+                )
+            call_budget = (_effective_token_budget - spent_so_far[0]) if _effective_token_budget > 0 else 0
             kwargs = {}
             if current_conv_id[0] is not None:
                 kwargs["conversation_id"] = current_conv_id[0]
+            kwargs["max_tokens_per_run"] = call_budget
             try:
-                res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S, **kwargs)
-            except ProviderError:
+                try:
+                    res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S, **kwargs)
+                except TypeError as te:
+                    if "max_tokens_per_run" in str(te):
+                        kwargs.pop("max_tokens_per_run", None)
+                        res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S, **kwargs)
+                    else:
+                        raise
+            except ProviderError as e:
+                if getattr(e, "status", None) == "BUDGET_EXCEEDED":
+                    raise
                 if current_conv_id[0] is not None:
                     if session_key:
                         _clear_worker_session(session_key)
                     current_conv_id[0] = None
-                    res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S)
+                    if _effective_token_budget > 0 and spent_so_far[0] >= _effective_token_budget:
+                        raise ProviderError(
+                            "agy", "BUDGET_EXCEEDED",
+                            f"worker run already used {spent_so_far[0]} tokens across earlier attempts in this delegation, "
+                            f"at or over the per-run budget of {_effective_token_budget} — "
+                            f"aborting before spending anything on another agy call"
+                        )
+                    retry_budget = (_effective_token_budget - spent_so_far[0]) if _effective_token_budget > 0 else 0
+                    try:
+                        res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S, max_tokens_per_run=retry_budget)
+                    except TypeError as te:
+                        if "max_tokens_per_run" in str(te):
+                            res = call_agy_print(prompt_text, spec["api"], _root, AGY_WORKER_TIMEOUT_S)
+                        else:
+                            raise
                 else:
                     raise
             
@@ -2114,6 +2309,7 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
         total_pin += pin
         total_pout += pout
         total_cache += cache
+        spent_so_far[0] += pin + pout + cache
 
         echoed_model = echoed or echoed_model
         if pin > 0:
@@ -2217,10 +2413,19 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
                         latency_s=_worker_latency_s, cost_usd_equiv=_worker_eq_cost,
                         cost_equiv_basis=_worker_eq_basis, no_verify_reason=no_verify_reason)
 
+    _run_total_tokens = total_pin + total_pout + total_cache
+    _token_alarm = None
+    if _effective_token_budget > 0 and _run_total_tokens > _effective_token_budget:
+        _token_alarm = (f"⚠️  TOKEN ALARM: this run used {_run_total_tokens:,} tokens, "
+                        f"over the per-run budget of {_effective_token_budget:,} "
+                        f"(AI_ROUTER_MAX_TOKENS_PER_RUN). This is NOT a normal small run — "
+                        f"treat the result with the same suspicion as a runaway.")
+
     return _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                                   verify_max_attempts if verify_cmd else max_attempts,
                                   elapsed, summary, total_files, total_cost,
-                                  echoed_model, fail_output, hit_rates, patched=patched)
+                                  echoed_model, fail_output, hit_rates, patched=patched,
+                                  token_alarm=_token_alarm)
 
 
 def _write_worker_audit(model, echoed, project, commit, written, rejected,
@@ -2285,7 +2490,8 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
                      allow_full_rewrite: bool = False, session_key: str | None = None,
                      resume: bool = True, self_fix: bool = True,
                      no_verify_reason: str | None = None, max_files: int | None = None,
-                     max_input_bytes: int | None = None) -> str:
+                     max_input_bytes: int | None = None,
+                     max_tokens_per_run: int | None = None) -> str:
     _enforce_verify_and_cap(files_arg, allow_write_arg, verify_cmd, no_verify_reason,
                             max_files, project_root, max_input_bytes)
     # Resolve here, not only in the CLI: `agy` stopped being a MODELS key when
@@ -2301,7 +2507,7 @@ def worker_delegate(task: str, model: str, files_arg: str, allow_write_arg: str,
         raise ValueError(f"All candidates disabled (last tried: {ch})")
 
     try:
-        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate, allow_full_rewrite, session_key, resume, self_fix, no_verify_reason=no_verify_reason)
+        return _worker_delegate_inner(task, model, files_arg, allow_write_arg, verify_cmd, retries, project_root, via, estimate, allow_full_rewrite, session_key, resume, self_fix, no_verify_reason=no_verify_reason, max_tokens_per_run=max_tokens_per_run)
     except ProviderError as e:
         # Owner decree 2026-07-27: silent escalation from a $0 channel to a
         # PAID one is exactly the "silent overspend" this project bans. No
@@ -3194,6 +3400,9 @@ def main():
     ap.add_argument("--max-input-bytes", type=int, default=None,
                      help="override AI_ROUTER_MAX_INPUT_BYTES_PER_RUN (default 400000) "
                           "for this one call; 0 disables the input-size cap")
+    ap.add_argument("--max-tokens-per-run", type=int, default=None,
+                     help="override AI_ROUTER_MAX_TOKENS_PER_RUN (default 8000000) "
+                          "for this one call; 0 disables the per-run token circuit breaker (agy channel only)")
     ap.add_argument("--retries", type=int, default=1,
                     help="worker mode: verify-failure retries (default 1, max 2)")
     ap.add_argument("--no-self-fix", action="store_true",
@@ -3408,7 +3617,8 @@ def main():
                               estimate=a.estimate, allow_full_rewrite=a.allow_full_rewrite,
                               session_key=a.session_key or None, self_fix=not a.no_self_fix,
                               no_verify_reason=a.no_verify_reason, max_files=a.max_files,
-                              max_input_bytes=a.max_input_bytes))
+                              max_input_bytes=a.max_input_bytes,
+                              max_tokens_per_run=a.max_tokens_per_run))
         return
 
     try:

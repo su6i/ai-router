@@ -123,6 +123,8 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
                 "in_tokens": 0,
                 "has_out_tokens": False,
                 "out_tokens": 0,
+                "has_cache_tokens": False,
+                "cache_tokens": 0,
                 "has_cost_usd": False,
                 "cost_usd_sum": 0.0,
                 "has_cost_usd_equiv": False,
@@ -175,6 +177,11 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
                 stats["has_out_tokens"] = True
                 stats["out_tokens"] += out_tok
 
+            cache_tok = rec.get("cache")
+            if cache_tok is not None and isinstance(cache_tok, (int, float)) and not isinstance(cache_tok, bool):
+                stats["has_cache_tokens"] = True
+                stats["cache_tokens"] += cache_tok
+
             cost = rec.get("cost_usd")
             if cost is not None and isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 stats["has_cost_usd"] = True
@@ -193,7 +200,7 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
 
     headers = [
         "model", "runs", "verify_pass", "%unverified", "avg_attempts", "self_fix_rate",
-        "avg_latency_s", "in_tokens", "out_tokens", "real_usd", "equiv_usd", "quality"
+        "avg_latency_s", "in_tokens", "out_tokens", "tok/run", "real_usd", "equiv_usd", "quality"
     ]
     rows = []
     for m in sorted(all_models):
@@ -213,6 +220,8 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
             "in_tokens": 0,
             "has_out_tokens": False,
             "out_tokens": 0,
+            "has_cache_tokens": False,
+            "cache_tokens": 0,
             "has_cost_usd": False,
             "cost_usd_sum": 0.0,
             "has_cost_usd_equiv": False,
@@ -233,13 +242,23 @@ def show_scorecard(audit_path, since: str | None = None) -> str:
         col_latency = f"{(s['latency_sum'] / s['latency_count']):.2f}" if s["latency_count"] > 0 else "-"
         col_in = str(int(round(s["in_tokens"]))) if s["has_in_tokens"] else "-"
         col_out = str(int(round(s["out_tokens"]))) if s["has_out_tokens"] else "-"
+        _total_toks = (
+            (s["in_tokens"] if s["has_in_tokens"] else 0)
+            + (s["out_tokens"] if s["has_out_tokens"] else 0)
+            + (s["cache_tokens"] if s["has_cache_tokens"] else 0)
+        )
+        col_tok_per_run = (
+            f"{int(round(_total_toks / s['runs'])):,}"
+            if s["runs"] > 0 and (s["has_in_tokens"] or s["has_out_tokens"] or s["has_cache_tokens"])
+            else "-"
+        )
         col_real = f"{s['cost_usd_sum']:.6f}" if s["has_cost_usd"] else "-"
         col_equiv = f"{s['cost_usd_equiv_sum']:.6f}" if s["has_cost_usd_equiv"] else "-"
         col_quality = f"{(sum(q_list) / len(q_list)):.2f} (n={len(q_list)})" if q_list else "-"
 
         rows.append([
             col_model, col_runs, col_verify, col_unverified, col_attempts, col_self_fix,
-            col_latency, col_in, col_out, col_real, col_equiv, col_quality
+            col_latency, col_in, col_out, col_tok_per_run, col_real, col_equiv, col_quality
         ])
 
     all_rows = [headers] + rows
