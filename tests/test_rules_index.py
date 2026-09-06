@@ -101,9 +101,7 @@ def test_stale_index_warning(monkeypatch, capsys):
 has_model = os.path.exists(os.path.expanduser("~/.cache/huggingface/hub"))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-# has_rules_corpus: without the constitution symlink there is no 040-git.md to
-# retrieve, so a red here would be a missing fixture, not a ranking regression.
-from conftest import has_pg, has_rules_corpus  # noqa: E402  (sits below the sys.path setup it needs)
+from conftest import has_pg  # noqa: E402  (sits below the sys.path setup it needs)
 
 
 def test_ingest_refuses_empty_rules_corpus(tmp_path, monkeypatch):
@@ -126,32 +124,73 @@ def test_ingest_refuses_empty_rules_corpus(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(
-    not (has_pg and has_model and has_rules_corpus),
-    reason="Missing Postgres, e5 model, or the constitution rules corpus",
+    not (has_pg and has_model),
+    reason="Missing Postgres or the e5 model",
 )
 def test_retrieval_sanity(monkeypatch):
+    """Retrieval returns the relevant rule for a Persian query.
+
+    T-964: this used to reindex the LIVE .agent/constitution/rules symlink
+    plus this repo's own docs/, both shared, mutable state:
+      - the corpus grew every time someone edited docs/ARCHITECTURE.md,
+        eventually pushing the target rule out of the top-k (a tripwire on
+        unrelated doc edits, not a ranking regression);
+      - every run wrote to the one fixed schema/repo namespace
+        ("ai_router_test" / repo="ai-router"), so two concurrent pytest
+        processes deleted each other's rows via ingest()'s own-corpus GC.
+    Both are gone now: the corpus is a small fixture this test owns (see
+    tests/fixtures/retrieval_sanity_corpus/), and each run gets its own
+    `repo` namespace (rules_chunks/ingested_files are keyed by repo), so
+    concurrent runs cannot see or delete each other's rows.
+    """
+    import uuid
+
     class Args:
         pass
     a = Args()
-    
+
     assert "ai_router_test" in os.environ.get("POSTGRES_DSN", ""), (
         "Isolation failure: missing 'ai_router_test' schema in POSTGRES_DSN. "
         "Proceeding would reindex the LIVE rules index."
     )
-    
-    ri.cmd_reindex(a)
-    
-    # k=5, membership assert: e5-small cross-lingual ranking (Persian query →
-    # English rule text) is approximate; the contract is "the right rule is in
-    # the top-k", not "top-1".
-    a.query = "قانون کامیت"
-    a.k = 5
-    
-    import io
-    import contextlib
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        ri.cmd_search(a)
-        
-    output = out.getvalue()
-    assert "040-git.md" in output
+
+    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "retrieval_sanity_corpus"
+    assert (fixture_dir / ".agent" / "constitution" / "rules" / "040-git.md").exists(), (
+        f"Missing test fixture corpus at {fixture_dir} -- checked-in fixture is gone."
+    )
+
+    # Give this run its own repo namespace: rules_chunks/ingested_files rows
+    # are scoped by `repo`, and ingest()'s GC only ever deletes rows for the
+    # SAME repo. A unique repo name per test invocation means two concurrent
+    # runs of this test (or the whole suite) never see or delete each
+    # other's rows even though they share the "ai_router_test" schema.
+    repo_name = f"test-retrieval-sanity-{uuid.uuid4().hex}"
+    monkeypatch.setattr(ri, "project_info", lambda: (repo_name, "fixture"))
+    monkeypatch.chdir(fixture_dir)
+
+    dsn = os.environ["POSTGRES_DSN"]
+    try:
+        # force=True: ingested_files' skip-if-unchanged check is keyed by
+        # (collection, file_path) only -- NOT by repo -- so a PRIOR test run
+        # (different repo_name, same fixture file, same content hash) would
+        # otherwise make ingest() believe this file is already indexed and
+        # skip writing any chunks for OUR repo namespace, leaving
+        # cmd_search empty for this run.
+        a.force = True
+        ri.cmd_reindex(a)
+
+        a.query = "قانون کامیت"
+        a.k = 5
+
+        import io
+        import contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ri.cmd_search(a)
+
+        output = out.getvalue()
+        assert "040-git.md" in output
+    finally:
+        import psycopg
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM rules_chunks WHERE repo = %s", (repo_name,))
