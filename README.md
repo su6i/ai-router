@@ -355,6 +355,11 @@ To remove the schedule later, run `bash hooks/vault_export_sweep.sh --uninstall`
 
 `ai-router` provides semantic retrieval over past session context (the `~/.local/share/agent-projects/*/workspace/SESSION.md` files) exactly like it does for rules.
 It chunks by headings (like `## YYYY-MM-DD`) and stores them in the `session_chunks` pgvector collection.
+The stored `date` is always canonical ISO `YYYY-MM-DD` (Latin digits): Persian-Indic/Arabic-Indic
+digit dates and Jalali (Solar Hijri) dates are normalised to that shape on ingest (`src/jalaali.py`),
+never left as a raw non-Latin or Jalali string — string comparisons across repos would otherwise
+silently misorder. `uv run --directory <repo> python src/sessions_index.py backfill-dates` is a
+one-shot, idempotent migration for rows indexed before this normalisation existed.
 
 ```bash
 # Query the sessions index (returns top 5 chunks by default)
