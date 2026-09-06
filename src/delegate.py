@@ -2121,6 +2121,39 @@ def build_worker_prompt(task: str, file_specs: list, model: str | None = None) -
     return "\n".join(parts)
 
 
+def _compute_cache_hit_rate(cache: int, pin: int, provider: str) -> tuple[str, str | None]:
+    """T-958: format the 'cache hit rate' shown in the worker summary.
+
+    Evidence (established by reading call_agy_print and call_openai, not guessed):
+    - agy_cli (see call_agy_print): usage.input_tokens and
+      usage.cache_read_tokens are DISJOINT Anthropic-style counts -- Claude's
+      Messages API usage object reports input_tokens as the fresh,
+      non-cached read only; cache_read_tokens is separate and is NOT a
+      subset of input_tokens. The total context actually read is their SUM.
+      Using cache/pin here is unbounded (observed live: in=139518,
+      cache=1363302 -> cache/pin = 977.2%, impossible).
+    - openai-compat providers (call_openai; DeepSeek/MiniMax): prompt_tokens
+      already includes the cached tokens as a subset
+      (prompt_cache_hit_tokens + prompt_cache_miss_tokens == prompt_tokens,
+      per DeepSeek's usage object), so cache/pin there IS the correct
+      0-1 fraction and must not be changed.
+
+    Returns (display_string, warning_or_None). display_string is either
+    "NN.N%" or "n/a"; warning is a one-line message to log when the computed
+    rate had to be discarded as out-of-range, else None.
+    """
+    denom = pin + cache if provider == "agy_cli" else pin
+    if denom <= 0:
+        return "n/a", None
+    rate = cache / denom * 100
+    if not (0.0 <= rate <= 100.0):
+        return "n/a", (
+            f"cache hit rate out of range ({rate:.1f}%) for provider={provider!r} "
+            f"in={pin} cache={cache} -- printing n/a instead of a nonsense number"
+        )
+    return f"{rate:.1f}%", None
+
+
 def _format_worker_summary(written, rejected, verify_cmd, verify_status, attempt,
                             max_attempts, elapsed, summary, total_files, cost,
                             echoed_model, fail_tail, hit_rates, patched=(),
@@ -2312,8 +2345,11 @@ def _worker_delegate_inner(task: str, model: str, files_arg: str, allow_write_ar
         spent_so_far[0] += pin + pout + cache
 
         echoed_model = echoed or echoed_model
-        if pin > 0:
-            hit_rates.append(f"{cache/pin*100:.1f}%")
+        if pin > 0 or cache > 0:
+            rate_str, warning = _compute_cache_hit_rate(cache, pin, spec["provider"])
+            if warning:
+                logger.warning(warning)
+            hit_rates.append(rate_str)
         return answer
 
     answer = call_once()

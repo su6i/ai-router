@@ -462,7 +462,7 @@ python3 src/delegate.py --model flash -p "same prompt as before" --no-cache  # f
 Many API providers (like DeepSeek, Gemini, and MiniMax) automatically cache prompts based on exact prefix matching. `delegate.py` accounts for this discount automatically:
 
 - Cash savings are explicitly reflected in the printed cost.
-- Cache hit rates (e.g., `cache hit rate: 85.0%`) are displayed in the worker summary and `r cost` reports.
+- Cache hit rates (e.g., `cache hit rate: 85.0%`) are displayed in the worker summary and `r cost` reports. The worker summary's rate is provider-aware (T-958): it prints `n/a` instead of a percentage when the underlying usage numbers can't produce a sane 0-100% value, rather than a bogus number.
 - Worker mode uses prefix discipline (files first, task last) to maximize prefix cache efficiency.
 
 ### Worker mode
