@@ -764,3 +764,50 @@ def test_bash_bare_cat_no_target_not_gated(monkeypatch, tmp_path):
 
     result = run_hook(monkeypatch, payload)
     assert result is None
+
+
+def test_repo_has_chunks_logs_broken_on_missing_psycopg(monkeypatch):
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+    res = code_lookup_gate._repo_has_chunks("some-repo")
+    assert res is False
+    assert code_lookup_gate._last_check_was_broken is True
+
+
+def test_repo_has_chunks_not_broken_when_dsn_missing(monkeypatch):
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
+    monkeypatch.setattr("delegate.load_env", lambda: None, raising=False)
+    res = code_lookup_gate._repo_has_chunks("some-repo")
+    assert res is False
+    assert code_lookup_gate._last_check_was_broken is False
+
+
+def test_block_message_logs_pass_gate_broken_when_psycopg_missing(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "myrepo"
+    (repo_dir / ".git").mkdir(parents=True)
+    large_file = repo_dir / "big.py"
+    large_file.write_text("x\n" * 9000)
+
+    transcript = tmp_path / "transcript_broken.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}
+    }) + "\n")
+
+    log_file = tmp_path / "gate.log"
+    monkeypatch.setenv("AI_ROUTER_LOOKUP_GATE_LOG", str(log_file))
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+
+    payload = {
+        "session_id": str(uuid.uuid4()),
+        "transcript_path": str(transcript),
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(large_file)},
+    }
+
+    result = run_hook(monkeypatch, payload)
+    assert result is None
+
+    lines = log_file.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["decision"] == "pass-gate-broken"

@@ -36,6 +36,11 @@ from pathlib import Path
 # if a session's tool-call density ever needs a bigger or smaller window.
 TRANSCRIPT_TAIL_BYTES = 1_000_000
 
+# Set by _repo_has_chunks() on every call; read immediately after calling it
+# by every call site to pick the right decision string. A fresh interpreter
+# per hook invocation makes a plain module global safe here (no threading).
+_last_check_was_broken = False
+
 def _state_dir(session_id: str) -> Path:
     d = Path(tempfile.gettempdir()) / f"code-lookup-gate-{session_id or 'nosession'}"
     d.mkdir(parents=True, exist_ok=True)
@@ -69,10 +74,28 @@ def _repo_has_chunks(repo_name) -> bool:
     move this check earlier in the flow; a DB round-trip on every gated call
     would add real latency to routine tool use.
     """
+    global _last_check_was_broken
+    _last_check_was_broken = False
     if not repo_name:
         return True
     try:
         import psycopg
+    except ImportError as e:
+        _last_check_was_broken = True
+        msg = (
+            f"code_lookup gate: WARNING -- cannot import psycopg under "
+            f"{sys.executable} ({e}); the gate cannot determine whether "
+            f"code_chunks has rows for this repo, so it is passing the call "
+            f"through rather than blocking on an unproven index. Fix: run "
+            f"this hook under an interpreter with project deps (see "
+            f"docs/CODE-RAG.md)."
+        )
+        try:
+            print(msg, file=sys.stderr)
+        except TypeError:
+            sys.stderr.write(msg + "\n")
+        return False
+    try:
         src_dir = str(Path(__file__).resolve().parent.parent / "src")
         if src_dir not in sys.path:
             sys.path.insert(0, src_dir)
@@ -208,7 +231,8 @@ def _handle_bash(payload) -> None:
         return
 
     if not _repo_has_chunks(repo_name):
-        _log_decision(repo_name, "Bash", command, "pass-empty-index")
+        decision = "pass-gate-broken" if _last_check_was_broken else "pass-empty-index"
+        _log_decision(repo_name, "Bash", command, decision)
         return
 
     session_id = payload.get("session_id", "")
@@ -384,7 +408,8 @@ def _handle_read(payload) -> None:
 
     repo_name = _find_repo_name(file_path)
     if not _repo_has_chunks(repo_name):
-        _log_decision(repo_name, "Read", file_path, "pass-empty-index")
+        decision = "pass-gate-broken" if _last_check_was_broken else "pass-empty-index"
+        _log_decision(repo_name, "Read", file_path, decision)
         return
 
     session_id = payload.get("session_id", "")
@@ -459,7 +484,8 @@ def _handle_grep_or_glob(payload, tool_name) -> None:
 
     repo_name = _find_repo_name(os.path.join(search_dir, "x"))
     if not _repo_has_chunks(repo_name):
-        _log_decision(repo_name, tool_name, target_key, "pass-empty-index")
+        decision = "pass-gate-broken" if _last_check_was_broken else "pass-empty-index"
+        _log_decision(repo_name, tool_name, target_key, decision)
         return
 
     session_id = payload.get("session_id", "")
