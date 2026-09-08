@@ -20,11 +20,52 @@ ever — see "Non-goals" in the design doc.
 import contextlib
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-import delegate as d
+
+
+def _db_dep_importable() -> bool:
+    """True if the running interpreter can import the project's DB dependency
+    (psycopg). Cheap: only imports a module already on sys.path or site-packages,
+    never opens a connection."""
+    try:
+        import psycopg  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _venv_python() -> Path:
+    """Path to this repo's own venv interpreter, which has project deps."""
+    return Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python"
+
+
+def _maybe_reexec_into_venv() -> None:
+    """If the running interpreter cannot import psycopg, re-exec this same
+    process through <repo>/.venv/bin/python -- so the server (and the gate
+    hook, which imports this same pattern) work correctly regardless of how
+    the caller happens to spell "python3" in its launch config. Guarded by an
+    env marker so this can fire AT MOST ONCE ever (never a re-exec loop, even
+    if the venv interpreter is somehow ALSO missing the dependency)."""
+    if os.environ.get("AI_ROUTER_MCP_REEXEC_DONE") == "1":
+        return
+    if _db_dep_importable():
+        return
+    venv_python = _venv_python()
+    if not venv_python.exists():
+        return
+    if Path(sys.executable).resolve() == venv_python.resolve():
+        return
+    os.environ["AI_ROUTER_MCP_REEXEC_DONE"] = "1"
+    os.execv(str(venv_python), [str(venv_python), *sys.argv])
+
+
+_maybe_reexec_into_venv()
+
+import delegate as d  # noqa: E402
 
 
 # --- Stale-code detection (T-950) ----------------------------------------
@@ -598,6 +639,12 @@ def handle_tools_call(id_, params: dict):
         return _rpc_error(id_, INVALID_PARAMS, str(e))
     except SystemExit as e:
         return _rpc_error(id_, SERVER_ERROR, str(e.code) if e.code else "delegate exited")
+    except ModuleNotFoundError as e:
+        return _rpc_error(id_, SERVER_ERROR,
+            f"{type(e).__name__}: {e} -- running under interpreter {sys.executable}. "
+            f"Fix: this interpreter is missing a project dependency. Launch this server "
+            f"via {_venv_python()} instead of a bare 'python3', or run `uv sync` against "
+            f"that venv.")
     except Exception as e:  # noqa: BLE001 — fail loud over the wire, never swallow
         return _rpc_error(id_, SERVER_ERROR, f"{type(e).__name__}: {e}")
     stale = _stale_source_files()
