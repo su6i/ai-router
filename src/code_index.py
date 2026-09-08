@@ -399,6 +399,67 @@ def _ingested_key(repo_name: str, rel_path: str) -> str:
     return f"{repo_name}::{rel_path}"
 
 
+def _code_chunk_and_ingested_counts(cur) -> tuple[dict[str, int], dict[str, int]]:
+    """Per-repo (code_chunks rows, ingested_files rows) for the code collection.
+
+    ingested_files has no `repo` column (see `_ingested_key` above); a
+    repo's own rows are only identifiable by the `"<repo>::<path>"` prefix
+    it writes into `file_path`. Never SQL `LIKE` here -- a repo name
+    containing "_" is a wildcard to LIKE, same reasoning as the existing
+    --force GC path in `ingest()` below. Returns (chunk_counts,
+    file_counts), each {repo_name: count}, used by both `repo_status()`
+    (T-970 DoD #5, `--status`) and `_diverged_repo_names()` (the sweep
+    self-heal check) so the two never disagree about what "diverged"
+    means.
+    """
+    cur.execute("SELECT repo, count(*) FROM code_chunks GROUP BY repo")
+    chunk_counts = dict(cur.fetchall())
+    cur.execute("SELECT file_path FROM ingested_files WHERE collection = 'code'")
+    file_counts: dict[str, int] = {}
+    for (key,) in cur.fetchall():
+        repo, sep, _rest = key.partition("::")
+        if sep:
+            file_counts[repo] = file_counts.get(repo, 0) + 1
+    return chunk_counts, file_counts
+
+
+def repo_status() -> dict:
+    """Per-repo status for the code collection: {repo: {chunks, files, diverged}}.
+
+    Used by `rag_ingest.py --status` (T-970 DoD #5) so a diverged repo --
+    files registered in `ingested_files`, zero rows in `code_chunks` -- is
+    visible in one command instead of the hand-written SQL it took to find
+    this state in the first place. Returns {} when POSTGRES_DSN is unset
+    OR Postgres is unreachable -- callers must treat that as "unknown",
+    never as "no repos are diverged" (fail toward not blocking --status on
+    a DB problem, same philosophy as hooks/code_lookup_gate.py's
+    _repo_has_chunks).
+    """
+    load_env()
+    dsn = os.environ.get("POSTGRES_DSN")
+    if not dsn:
+        return {}
+    try:
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                chunk_counts, file_counts = _code_chunk_and_ingested_counts(cur)
+    except psycopg.OperationalError:
+        return {}
+    result = {}
+    for repo in set(chunk_counts) | set(file_counts):
+        chunks = chunk_counts.get(repo, 0)
+        files = file_counts.get(repo, 0)
+        result[repo] = {"chunks": chunks, "files": files, "diverged": files > 0 and chunks == 0}
+    return result
+
+
+def _diverged_repo_names(cur, roots: list[Path]) -> list[str]:
+    """Names (each root's own basename) currently diverged: `ingested_files`
+    rows > 0 for that repo, `code_chunks` rows == 0 for that repo."""
+    chunk_counts, file_counts = _code_chunk_and_ingested_counts(cur)
+    return [r.name for r in roots if file_counts.get(r.name, 0) > 0 and chunk_counts.get(r.name, 0) == 0]
+
+
 def ingest(force: bool = False, repo_path: Path | None = None) -> dict:
     load_env()
     if repo_path is None:
