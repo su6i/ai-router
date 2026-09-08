@@ -113,6 +113,8 @@ and fails toward "let it through" on any DB problem (missing
 `POSTGRES_DSN`, connection error, timeout) rather than blocking on an
 unproven index.
 
+**Broken-installation pass-through (T-969).** `_repo_has_chunks()` used to catch every exception (including `ModuleNotFoundError` when this hook ran under an interpreter missing `psycopg`) into the same fail-open path as a genuinely empty index, so a broken installation was silently indistinguishable from "nothing to find here" -- the gate never blocked anything for days and nobody could tell why from the log alone. A missing DB dependency now logs a distinct decision, `pass-gate-broken`, and prints a one-line warning to stderr naming the interpreter that ran and pointing at this section; every other existing fail-open reason (missing `POSTGRES_DSN`, a connection error, a timeout, no repo name) still logs `pass-empty-index` exactly as before -- those are genuine "nothing to prove" cases, not installation defects.
+
 **Bypass**: a deliberate second attempt on the exact same call always
 passes — the gate marks each `(session, tool, target)` it has already
 warned about and never blocks it twice. Set `AI_ROUTER_LOOKUP_GATE=off` to
@@ -126,6 +128,18 @@ is measurable instead of assumed.
 Registered in `~/.claude/settings.json` as two `PreToolUse` hook entries
 (matchers `Read|Grep|Glob` and `Bash`, both invoking this same script) —
 that file is owner-owned and not edited by this repo's tooling.
+
+## Interpreter self-healing (T-969)
+
+Both `mcp/server.py` and `hooks/code_lookup_gate.py` are launched by whatever `python3` the owner's `~/.claude.json` / `~/.claude/settings.json` happen to spell, which resolved to Homebrew's `python3` (no project deps) -- every DB-backed tool (`rules_lookup`, `code_lookup`) failed with `ModuleNotFoundError: No module named 'psycopg'`, and the gate's own broad exception handling silently absorbed the same failure (see the paragraph above).
+
+`mcp/server.py` now re-execs itself through `<repo>/.venv/bin/python` on startup, at most once (env marker `AI_ROUTER_MCP_REEXEC_DONE`), whenever the running interpreter cannot import `psycopg` and that venv interpreter exists -- so the server is correct regardless of what the launch config says. `hooks/code_lookup_gate.py` is a stateless per-invocation script (no long-lived process to re-exec) -- it stays interpreter-agnostic instead by logging `pass-gate-broken` + a stderr warning rather than crashing or silently misbehaving when it's the one running under the wrong interpreter.
+
+### Owner action (not applied by this repo)
+
+The in-repo fix above makes the system correct either way, but pointing both launch configs at the project's own interpreter removes the extra re-exec hop and is recommended. Exact changes (the owner applies these by hand, never this repo's tooling):
+- `~/.claude.json`, `mcpServers.ai-router.command`: change `"python3"` to `"/Users/su6i/@-github/ai-router/.venv/bin/python"` (args unchanged: `["/Users/su6i/@-github/ai-router/mcp/server.py"]`).
+- `~/.claude/settings.json`, both `PreToolUse` hook entries running `code_lookup_gate.py` (matchers `Read|Grep|Glob` and `Bash`): change `python3 "$f"` to `/Users/su6i/@-github/ai-router/.venv/bin/python "$f"` inside the existing `command` string (keep the `if [ -f "$f" ]; then ... ; else exit 0; fi` guard exactly as-is, only the interpreter changes).
 
 ## When it pays off
 

@@ -529,3 +529,103 @@ def test_stale_source_warning_appears_only_on_mismatch(tmp_path, monkeypatch):
     text_stale = resp_stale["result"]["content"][0]["text"]
     assert "STALE CODE WARNING" in text_stale
     assert "delegate.py" in text_stale
+
+
+def test_reexec_skipped_when_import_succeeds(monkeypatch):
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import server
+
+    monkeypatch.setattr(server, "_db_dep_importable", lambda: True)
+
+    def fake_execv(prog, args):
+        raise AssertionError("execv must not be called")
+
+    monkeypatch.setattr(server.os, "execv", fake_execv)
+    monkeypatch.delenv("AI_ROUTER_MCP_REEXEC_DONE", raising=False)
+    server._maybe_reexec_into_venv()
+
+
+def test_reexec_fires_when_import_fails_and_venv_exists(tmp_path, monkeypatch):
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import server
+
+    monkeypatch.setattr(server, "_db_dep_importable", lambda: False)
+    fake_python = tmp_path / "fake_python"
+    fake_python.touch()
+    monkeypatch.setattr(server, "_venv_python", lambda: fake_python)
+
+    execv_calls = []
+
+    def fake_execv(prog, args):
+        execv_calls.append((prog, args))
+
+    monkeypatch.setattr(server.os, "execv", fake_execv)
+    monkeypatch.setattr(server.sys, "executable", str(tmp_path / "other_python"))
+    monkeypatch.delenv("AI_ROUTER_MCP_REEXEC_DONE", raising=False)
+
+    server._maybe_reexec_into_venv()
+
+    assert len(execv_calls) == 1
+    assert execv_calls[0][0] == str(fake_python)
+    assert os.environ.get("AI_ROUTER_MCP_REEXEC_DONE") == "1"
+
+
+def test_reexec_guard_fires_at_most_once(tmp_path, monkeypatch):
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import server
+
+    monkeypatch.setattr(server, "_db_dep_importable", lambda: False)
+    fake_python = tmp_path / "fake_python"
+    fake_python.touch()
+    monkeypatch.setattr(server, "_venv_python", lambda: fake_python)
+
+    execv_calls = []
+
+    def fake_execv(prog, args):
+        execv_calls.append((prog, args))
+
+    monkeypatch.setattr(server.os, "execv", fake_execv)
+    monkeypatch.setattr(server.sys, "executable", str(tmp_path / "other_python"))
+    monkeypatch.setenv("AI_ROUTER_MCP_REEXEC_DONE", "1")
+
+    server._maybe_reexec_into_venv()
+
+    assert len(execv_calls) == 0
+
+
+def test_reexec_skipped_when_no_venv(tmp_path, monkeypatch):
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import server
+
+    monkeypatch.setattr(server, "_db_dep_importable", lambda: False)
+    fake_python = tmp_path / "does_not_exist"
+    monkeypatch.setattr(server, "_venv_python", lambda: fake_python)
+
+    def fake_execv(prog, args):
+        raise AssertionError("execv must not be called")
+
+    monkeypatch.setattr(server.os, "execv", fake_execv)
+    monkeypatch.delenv("AI_ROUTER_MCP_REEXEC_DONE", raising=False)
+
+    server._maybe_reexec_into_venv()
+
+
+def test_module_not_found_names_interpreter_and_fix(monkeypatch):
+    if str(MCP_DIR) not in sys.path:
+        sys.path.insert(0, str(MCP_DIR))
+    import server
+
+    def fake_handler(args):
+        raise ModuleNotFoundError("No module named 'psycopg'")
+
+    monkeypatch.setitem(server.TOOL_HANDLERS, "rules_lookup", fake_handler)
+
+    resp = server.handle_tools_call(1, {"name": "rules_lookup", "arguments": {}})
+    assert "error" in resp
+    msg = resp["error"]["message"]
+    assert sys.executable in msg
+    assert "Fix:" in msg or ".venv" in msg
