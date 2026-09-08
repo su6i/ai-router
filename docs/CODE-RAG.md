@@ -77,6 +77,72 @@ stamps the new `repo_commit`. `--rebuild` re-discovers everything via
 index). Both paths are idempotent; a second run is a no-op. Queries print a
 one-line stale-index warning when `repo_commit != HEAD`.
 
+## Divergence detection, self-heal, and the sweep lock (T-970)
+
+**The failure this closes.** `ingested_files`' incremental skip-check is
+keyed only on `(collection, file_path)` and a content hash -- it has no way
+to know whether the `code_chunks` rows that hash was supposed to protect
+still exist. If something outside `ingest()`'s own guarded delete paths (or,
+as measured live during this fix, three unlocked concurrent writers racing
+each other) wipes a repo's `code_chunks` rows while leaving its
+`ingested_files` rows in place, every future incremental sweep sees an
+unchanged hash for every file, skips all of them, and reports
+`chunks_deleted: 0` forever -- a repo can sit at 0 indexed chunks
+indefinitely while every sweep still prints `OK`.
+
+**Detection.** `_code_chunk_and_ingested_counts()` returns per-repo
+`(code_chunks rows, ingested_files rows)` for the `code` collection (never
+via SQL `LIKE` on the `"<repo>::"` prefix -- a repo name containing `_` is
+itself a wildcard). `_diverged_repo_names(cur, roots)` names every
+configured repo with `> 0` `ingested_files` rows and `== 0` `code_chunks`
+rows. `repo_status()` exposes the same counts as `{repo: {chunks, files,
+diverged}}` for `rag_ingest.py --status` (below); it returns `{}` -- never a
+false "nothing is diverged" -- whenever Postgres itself is unreachable.
+
+**Self-heal.** `sweep()` runs this check after its normal per-repo pass.
+Each diverged repo has its stale `ingested_files` rows dropped
+(`_heal_diverged_repo`, scoped strictly to that repo's own key prefix) and
+is then force-reingested on its own -- a full rebuild is correct here
+because the repo's `code_chunks` are already empty, and healing one repo's
+rows never touches another repo's. Healing respects the same
+`budget_seconds` deadline as the main pass: a repo left unhealed when time
+runs out is reported in `empty_repos_unhealed`, not silently dropped, and
+the next sweep tries again from a fresh divergence scan (no separate resume
+state needed -- an unhealed repo is still diverged, so it's found again).
+
+**Exit-status contract.** A sweep that heals every divergence it finds is a
+success: `rag_ingest.py --collection code` exits `0`, same as any clean
+run. A sweep that still has an unhealed divergence when it finishes is what
+must be loud: `rag_ingest.py` sets that collection's status to `diverged`
+and exits `1`, so `com.ai-router.rag-sweep`'s own log (and any monitoring
+watching its exit code) surfaces the failure instead of a fourth
+consecutive silent `OK` over an empty repo.
+
+**The sweep lock -- the actual root cause.** The corruption that motivated
+this WO was not a broken delete: 10,640 `code_chunks` rows collapsed to 152
+while every run's own `chunks_deleted` counter still read `0`, which fits
+three unlocked writers racing the same rows (a manual `--force` sweep, the
+launchd `com.ai-router.rag-sweep` timer firing mid-run, and a scoped
+`code_index.py reindex` from a parallel session) far better than any single
+counted `DELETE`. `_SweepLock` is a non-blocking `flock()` on
+`<vault>/data/code_index.lock`, held for the whole body of `sweep()` and
+around `cmd_reindex()`'s `ingest()` call -- the three real-world entry
+points that raced. Non-blocking on purpose: a busy lock means "another run
+is already doing this," so the caller does zero work and returns
+immediately (`locked_out: True` in `sweep()`'s stats) rather than queuing
+behind a possibly-long cold ingest; the launchd job simply retries on its
+next 30-minute tick.
+
+**Forcing a full rebuild / checking status.**
+- `uv run --directory /Users/su6i/@-github/ai-router python src/code_index.py reindex --force` --
+  full rebuild of the current directory's repo.
+- `RAG_CODE_SWEEP_BUDGET_S=5400 uv run --directory /Users/su6i/@-github/ai-router python src/rag_ingest.py --collection code --force` --
+  full rebuild of every configured repo root.
+- `uv run --directory /Users/su6i/@-github/ai-router python src/rag_ingest.py --status` --
+  per-repo chunk/file counts for the `code` collection, with any diverged
+  repo flagged inline -- the one-command replacement for the hand-written
+  SQL it used to take to find this state.
+
 ## Invocation gate (T-952)
 
 Indexing content nobody consults is wasted work, and consulting was in fact

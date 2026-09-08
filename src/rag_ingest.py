@@ -188,13 +188,21 @@ def main():
 
     if args.status:
         state = rag_freshness()
+        code_repos = code_index.repo_status()
         if args.json_out:
-            print(json.dumps(state, indent=2))
+            out = dict(state)
+            out["code_repos"] = code_repos
+            print(json.dumps(out, indent=2))
         else:
             for col, data in state.items():
                 print(f"{col.upper()}:")
                 for k, v in data.items():
                     print(f"  {k}: {v}")
+            if code_repos:
+                print("CODE_REPOS:")
+                for repo, info in sorted(code_repos.items()):
+                    flag = "  <-- DIVERGED (files registered, 0 chunks)" if info["diverged"] else ""
+                    print(f"  {repo}: chunks={info['chunks']} files={info['files']}{flag}")
         return
 
     if not args.collection:
@@ -242,10 +250,26 @@ def main():
             if "repos_seen" in stats:
                 res["repos_seen"] = stats["repos_seen"]
                 res["repos_failed"] = stats["repos_failed"]
+            # T-970 DoD 4: a sweep that healed every divergence it found is
+            # still a clean run (status stays "ok", exit 0). A sweep that
+            # finishes with a divergence it could NOT heal (budget ran out,
+            # or the heal itself raised) must be loud: status becomes
+            # "diverged" and the whole process exits non-zero below, instead
+            # of looking identical to a healthy sweep the way four
+            # consecutive real launchd runs once did.
+            healed = stats.get("empty_repos_healed") or []
+            unhealed = stats.get("empty_repos_unhealed") or []
+            if healed or unhealed:
+                res["empty_repos_healed"] = healed
+                res["empty_repos_unhealed"] = unhealed
+            if unhealed:
+                res["status"] = "diverged"
+                any_failed = True
             if args.json_out:
                 print(json.dumps(res))
             else:
-                print(f"{col} OK: {stats} in {res['duration_s']}s")
+                label = "OK" if res["status"] == "ok" else res["status"].upper()
+                print(f"{col} {label}: {stats} in {res['duration_s']}s")
                 
         except psycopg.OperationalError:
             print("Postgres unavailable — start it first: colima start", file=sys.stderr)

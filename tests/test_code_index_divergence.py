@@ -464,3 +464,256 @@ def test_ingest_idempotent_second_run_writes_zero_chunks(tmp_path, monkeypatch):
 
     assert stats1["chunks_written"] >= 1, "First ingest must write ≥1 chunk"
     assert stats2["chunks_written"] == 0, "Second ingest must write 0 new chunks (idempotent)"
+
+
+# ---------------------------------------------------------------------------
+# T-970: sweep lock, divergence self-heal, --status wiring
+# ---------------------------------------------------------------------------
+
+
+class TestSweepLock:
+    """_SweepLock must be a real mutual-exclusion primitive: a second
+    acquire while the first is held must fail, and release must free it
+    for the next acquirer."""
+
+    def test_second_acquire_fails_while_held(self):
+        lock1 = ci._SweepLock()
+        assert lock1.acquire() is True
+        lock2 = ci._SweepLock()
+        assert lock2.acquire() is False
+        lock1.release()
+        assert lock2.acquire() is True
+        lock2.release()
+
+    def test_sweep_returns_locked_out_when_lock_held(self, monkeypatch):
+        """sweep() must do zero work and report locked_out=True instead of
+        blocking or corrupting anything when another holder already has
+        the lock."""
+        held = ci._SweepLock()
+        assert held.acquire() is True
+        try:
+            monkeypatch.setattr(ci, "get_repo_roots", lambda: [])
+            result = ci.sweep()
+        finally:
+            held.release()
+        assert result.get("locked_out") is True
+        assert result["repos_seen"] == 0
+
+
+def _make_git_repo(base: Path, name: str, filename: str = "mod.py") -> Path:
+    repo = base / name
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
+    (repo / filename).write_text(
+        textwrap.dedent("""\
+            def alpha():
+                return 1
+        """),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True, check=True)
+    return repo
+
+
+@requires_pg
+class TestDivergenceSelfHeal:
+    """The T-970 core scenario: a repo's code_chunks rows vanish (e.g. a
+    concurrent run's GC) while its ingested_files rows survive -- the next
+    sweep must detect it, heal it, leave other repos untouched, and still
+    exit cleanly."""
+
+    def test_diverged_repo_detected_and_healed_other_untouched(self, tmp_path, monkeypatch):
+        import psycopg
+
+        dsn = os.environ["POSTGRES_DSN"]
+        repo_a = _make_git_repo(tmp_path, "divergence-heal-a")
+        repo_b = _make_git_repo(tmp_path, "divergence-heal-b")
+
+        ci.ingest(force=True, repo_path=repo_a)
+        ci.ingest(force=True, repo_path=repo_b)
+
+        try:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM code_chunks WHERE repo = %s", ("divergence-heal-a",))
+                    assert cur.fetchone()[0] > 0
+                    cur.execute("SELECT count(*) FROM code_chunks WHERE repo = %s", ("divergence-heal-b",))
+                    b_chunks_before = cur.fetchone()[0]
+                    assert b_chunks_before > 0
+
+                    # Reproduce the real T-970 failure directly: wipe
+                    # repo_a's code_chunks rows but leave its
+                    # ingested_files rows in place (the divergence).
+                    cur.execute("DELETE FROM code_chunks WHERE repo = %s", ("divergence-heal-a",))
+                conn.commit()
+
+            monkeypatch.setattr(ci, "get_repo_roots", lambda: [repo_a, repo_b])
+
+            result = ci.sweep()
+
+            assert result["repos_failed"] == 0
+            assert "divergence-heal-a" in result["empty_repos_healed"]
+            assert result["empty_repos_unhealed"] == []
+
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM code_chunks WHERE repo = %s", ("divergence-heal-a",))
+                    a_chunks_after = cur.fetchone()[0]
+                    cur.execute("SELECT count(*) FROM code_chunks WHERE repo = %s", ("divergence-heal-b",))
+                    b_chunks_after = cur.fetchone()[0]
+
+            assert a_chunks_after > 0, "diverged repo must be healed (chunks rewritten)"
+            assert b_chunks_after == b_chunks_before, "healing one repo must never touch another's rows"
+        finally:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    for name in ("divergence-heal-a", "divergence-heal-b"):
+                        cur.execute("DELETE FROM code_chunks WHERE repo = %s", (name,))
+                        cur.execute(
+                            "DELETE FROM ingested_files WHERE collection = 'code' AND file_path LIKE %s",
+                            (f"{name}::%",),
+                        )
+                conn.commit()
+
+    def test_second_sweep_after_heal_is_clean(self, tmp_path, monkeypatch):
+        """A second sweep run right after the heal must find nothing left
+        to heal -- the whole point of DoD 1/2 is that the NEXT sweep finds
+        the repo clean."""
+        import psycopg
+
+        dsn = os.environ["POSTGRES_DSN"]
+        repo = _make_git_repo(tmp_path, "divergence-heal-clean")
+        ci.ingest(force=True, repo_path=repo)
+
+        try:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM code_chunks WHERE repo = %s", ("divergence-heal-clean",))
+                conn.commit()
+
+            monkeypatch.setattr(ci, "get_repo_roots", lambda: [repo])
+            first = ci.sweep()
+            assert "divergence-heal-clean" in first["empty_repos_healed"]
+
+            second = ci.sweep()
+            assert second["empty_repos"] == []
+            assert second["empty_repos_healed"] == []
+            assert second["empty_repos_unhealed"] == []
+        finally:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM code_chunks WHERE repo = %s", ("divergence-heal-clean",))
+                    cur.execute(
+                        "DELETE FROM ingested_files WHERE collection = 'code' AND file_path LIKE %s",
+                        ("divergence-heal-clean::%",),
+                    )
+                conn.commit()
+
+
+@requires_pg
+class TestRepoStatusDivergedFlag:
+    """repo_status() must flag a repo with registered files and zero
+    chunks as diverged=True (DoD 5)."""
+
+    def test_diverged_repo_flagged(self, tmp_path):
+        import psycopg
+
+        dsn = os.environ["POSTGRES_DSN"]
+        repo = _make_git_repo(tmp_path, "status-diverged-repo", filename="m.py")
+        repo_name = repo.name
+
+        try:
+            ci.ingest(force=True, repo_path=repo)
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM code_chunks WHERE repo = %s", (repo_name,))
+                conn.commit()
+
+            status = ci.repo_status()
+            assert repo_name in status
+            assert status[repo_name]["diverged"] is True
+            assert status[repo_name]["chunks"] == 0
+            assert status[repo_name]["files"] > 0
+        finally:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM code_chunks WHERE repo = %s", (repo_name,))
+                    cur.execute(
+                        "DELETE FROM ingested_files WHERE collection = 'code' AND file_path LIKE %s",
+                        (f"{repo_name}::%",),
+                    )
+                conn.commit()
+
+
+@requires_pg
+class TestVanishedFileDeleteSiteClearsIngestedFiles:
+    """The `vanished` files DELETE path (incremental ingest of a repo whose
+    tracked file was removed) must clear the matching ingested_files key,
+    not just the code_chunks row -- DoD 3's guarantee, exercised for the one
+    DELETE site not already covered by test_ingest_creates_and_gc_chunks
+    (which only exercises the force=True whole-rebuild GC path)."""
+
+    def test_vanished_file_clears_ingested_files_row(self, tmp_path):
+        import psycopg
+
+        dsn = os.environ["POSTGRES_DSN"]
+        repo = tmp_path / "vanished-delete-site-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
+        f = repo / "gone.py"
+        f.write_text("def g():\n    return 1\n")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True, check=True)
+
+        repo_name = repo.name
+
+        try:
+            ci.ingest(force=True, repo_path=repo)
+            key = ci._ingested_key(repo_name, "gone.py")
+
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT count(*) FROM ingested_files WHERE collection = 'code' AND file_path = %s",
+                        (key,),
+                    )
+                    assert cur.fetchone()[0] == 1
+
+            f.unlink()
+            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-m", "remove gone.py"], cwd=repo, capture_output=True, check=True)
+
+            # Incremental (force=False) ingest so the "vanished" branch
+            # (git diff against the last indexed commit) runs, not the
+            # separate force=True whole-rebuild GC path.
+            ci.ingest(force=False, repo_path=repo)
+
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT count(*) FROM ingested_files WHERE collection = 'code' AND file_path = %s",
+                        (key,),
+                    )
+                    remaining = cur.fetchone()[0]
+                    cur.execute(
+                        "SELECT count(*) FROM code_chunks WHERE repo = %s AND path = %s",
+                        (repo_name, "gone.py"),
+                    )
+                    chunk_remaining = cur.fetchone()[0]
+
+            assert remaining == 0, "vanished-file DELETE site must also clear the ingested_files row"
+            assert chunk_remaining == 0
+        finally:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM code_chunks WHERE repo = %s", (repo_name,))
+                    cur.execute(
+                        "DELETE FROM ingested_files WHERE collection = 'code' AND file_path LIKE %s",
+                        (f"{repo_name}::%",),
+                    )
+                conn.commit()
