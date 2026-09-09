@@ -5,6 +5,8 @@ import os
 import hashlib
 import subprocess
 import ast
+import fcntl
+from contextlib import contextmanager
 from pathlib import Path
 import psycopg
 
@@ -399,6 +401,154 @@ def _ingested_key(repo_name: str, rel_path: str) -> str:
     return f"{repo_name}::{rel_path}"
 
 
+def _code_chunk_and_ingested_counts(cur) -> tuple[dict[str, int], dict[str, int]]:
+    """Per-repo (code_chunks rows, ingested_files rows) for the code collection.
+
+    ingested_files has no `repo` column (see `_ingested_key` above); a
+    repo's own rows are only identifiable by the `"<repo>::<path>"` prefix
+    it writes into `file_path`. Never SQL `LIKE` here -- a repo name
+    containing "_" is a wildcard to LIKE, same reasoning as the existing
+    --force GC path in `ingest()` below. Returns (chunk_counts,
+    file_counts), each {repo_name: count}, used by both `repo_status()`
+    (T-970 DoD #5, `--status`) and `_diverged_repo_names()` (the sweep
+    self-heal check) so the two never disagree about what "diverged"
+    means.
+    """
+    cur.execute("SELECT repo, count(*) FROM code_chunks GROUP BY repo")
+    chunk_counts = dict(cur.fetchall())
+    cur.execute("SELECT file_path FROM ingested_files WHERE collection = 'code'")
+    file_counts: dict[str, int] = {}
+    for (key,) in cur.fetchall():
+        repo, sep, _rest = key.partition("::")
+        if sep:
+            file_counts[repo] = file_counts.get(repo, 0) + 1
+    return chunk_counts, file_counts
+
+
+def repo_status() -> dict:
+    """Per-repo status for the code collection: {repo: {chunks, files, diverged}}.
+
+    Used by `rag_ingest.py --status` (T-970 DoD #5) so a diverged repo --
+    files registered in `ingested_files`, zero rows in `code_chunks` -- is
+    visible in one command instead of the hand-written SQL it took to find
+    this state in the first place. Returns {} when POSTGRES_DSN is unset
+    OR Postgres is unreachable -- callers must treat that as "unknown",
+    never as "no repos are diverged" (fail toward not blocking --status on
+    a DB problem, same philosophy as hooks/code_lookup_gate.py's
+    _repo_has_chunks).
+    """
+    load_env()
+    dsn = os.environ.get("POSTGRES_DSN")
+    if not dsn:
+        return {}
+    try:
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                chunk_counts, file_counts = _code_chunk_and_ingested_counts(cur)
+    except psycopg.OperationalError:
+        return {}
+    result = {}
+    for repo in set(chunk_counts) | set(file_counts):
+        chunks = chunk_counts.get(repo, 0)
+        files = file_counts.get(repo, 0)
+        result[repo] = {"chunks": chunks, "files": files, "diverged": files > 0 and chunks == 0}
+    return result
+
+
+def _diverged_repo_names(cur, roots: list[Path]) -> list[str]:
+    """Names (each root's own basename) currently diverged: `ingested_files`
+    rows > 0 for that repo, `code_chunks` rows == 0 for that repo."""
+    chunk_counts, file_counts = _code_chunk_and_ingested_counts(cur)
+    return [r.name for r in roots if file_counts.get(r.name, 0) > 0 and chunk_counts.get(r.name, 0) == 0]
+
+
+def _sweep_lock_path() -> Path:
+    """Vault-relative flock target guarding sweep()/cmd_reindex() against
+    concurrent runs (see _SweepLock)."""
+    return delegate.DATA_DIR / "code_index.lock"
+
+
+class _SweepLock:
+    """Non-blocking, whole-process flock so at most one ingest/sweep touches
+    the code index at a time.
+
+    T-970 root cause: three unlocked writers overlapped (a manual --force
+    sweep, the launchd `com.ai-router.rag-sweep` timer, and a scoped
+    `code_index.py reindex` from a parallel session), and one run's
+    committed writes were silently overwritten by another's now-stale view
+    of the world -- 10,640 code_chunks rows collapsed to 152 while every
+    run still reported `chunks_deleted: 0`. A single `flock` on one file,
+    acquired non-blocking around `sweep()`'s whole body and around
+    `cmd_reindex()`'s `ingest()` call, makes those three entry points
+    mutually exclusive without touching the DB schema or transactions.
+    Non-blocking on purpose: launchd fires every 30 minutes, so a busy
+    lock should skip this cycle and let the next one retry, never queue
+    behind a long cold ingest.
+    """
+
+    def __init__(self):
+        self._fh = None
+
+    def acquire(self) -> bool:
+        path = _sweep_lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "w")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return False
+        self._fh = fh
+        return True
+
+    def release(self) -> None:
+        if self._fh is not None:
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._fh.close()
+                self._fh = None
+
+
+@contextmanager
+def _sweep_lock():
+    """`with _sweep_lock() as locked:` -- locked is False if another
+    process already holds it; callers must skip their work in that case,
+    never block waiting for it."""
+    lock = _SweepLock()
+    got = lock.acquire()
+    try:
+        yield got
+    finally:
+        if got:
+            lock.release()
+
+
+def _heal_diverged_repo(dsn: str, repo_name: str) -> None:
+    """Drop repo_name's stale ingested_files rows so the follow-up
+    force=True ingest actually rewrites every file instead of trusting
+    content hashes that no longer correspond to any code_chunks row (the
+    exact trap this WO fixes: an unchanged file's hash still matches its
+    old ingested_files row, so the per-file skip check in ingest() short-
+    circuits it forever once code_chunks has been wiped out from under
+    it). Scoped to this repo's own `"<repo>::"` prefix only -- fetched and
+    filtered in Python, never via SQL LIKE, for the same reason as the
+    --force GC path below in ingest(): a repo name containing "_" (e.g.
+    research_toolkit) is itself a LIKE wildcard.
+    """
+    prefix = f"{repo_name}::"
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT file_path FROM ingested_files WHERE collection = 'code'")
+            stale_keys = [r[0] for r in cur.fetchall() if r[0].startswith(prefix)]
+            if stale_keys:
+                cur.execute(
+                    "DELETE FROM ingested_files WHERE collection = 'code' AND file_path = ANY(%s)",
+                    (stale_keys,),
+                )
+        conn.commit()
+
+
 def ingest(force: bool = False, repo_path: Path | None = None) -> dict:
     load_env()
     if repo_path is None:
@@ -631,65 +781,136 @@ def sweep(force: bool = False, budget_seconds: float | None = None) -> dict:
       ({"next_index": N}) so a run that hits the budget resumes with the
       repos it didn't get to last time, instead of starving the same
       tail of the list forever. Missing/corrupt state file starts at 0.
+    - Concurrency: the whole call is wrapped in `_sweep_lock()` (T-970) --
+      if another sweep or `code_index.py reindex` already holds it, this
+      call does no work at all and returns immediately with
+      `locked_out: True` in the stats, so the launchd job still exits 0
+      and simply retries on its next 30-minute tick.
+    - Divergence self-heal (T-970 DoD 1/2): after the normal per-repo pass,
+      every configured root is checked for the failure this WO fixes --
+      rows in `ingested_files` but zero rows in `code_chunks` for that
+      repo, which the old skip-cache check could never notice on its own.
+      Each diverged repo has its stale `ingested_files` rows dropped
+      (`_heal_diverged_repo`) and is force-reingested, scoped to that repo
+      only -- healing one repo never touches another's rows. Healing
+      respects the same `budget_seconds` deadline as the main pass: a
+      repo left unhealed when the budget runs out is reported in
+      `empty_repos_unhealed`, not silently dropped, and the next sweep
+      will find it still diverged and try again. A healed divergence is a
+      success (`empty_repos_unhealed == []`); an unhealed one is what
+      `rag_ingest.py` treats as loud (DoD 4).
     """
     load_env()
     if budget_seconds is None:
         budget_seconds = float(os.environ.get("RAG_CODE_SWEEP_BUDGET_S", 1500))
-
-    import time
-    roots = get_repo_roots()
-    state_path = delegate.DATA_DIR / "code_sweep_state.json"
-    try:
-        state = json.loads(state_path.read_text("utf-8")) if state_path.exists() else {}
-    except Exception:
-        state = {}
-    start_idx = (state.get("next_index", 0) % len(roots)) if roots else 0
-    order = roots[start_idx:] + roots[:start_idx]
-
-    t0 = time.time()
-    total = {
-        "repos_seen": 0, "repos_failed": 0, "files_seen": 0,
-        "chunks_written": 0, "chunks_deleted": 0, "skipped": 0,
-        "failures": {},
-    }
-    processed = 0
-    for root in order:
-        if time.time() - t0 > budget_seconds:
-            break
-        try:
-            stats = ingest(force=force, repo_path=root)
-            for k in ("files_seen", "chunks_written", "chunks_deleted", "skipped"):
-                total[k] += stats.get(k, 0)
-        except psycopg.OperationalError:
-            raise
-        except Exception as e:
-            total["repos_failed"] += 1
-            total["failures"][str(root)] = str(e)
-            print(f"code_index: skipping repo {root}: {e}", file=sys.stderr)
-        finally:
-            total["repos_seen"] += 1
-            processed += 1
-
-    delegate.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    next_index = ((start_idx + processed) % len(roots)) if roots else 0
-    state_path.write_text(json.dumps({"next_index": next_index}), "utf-8")
-
     dsn = os.environ.get("POSTGRES_DSN")
-    if dsn:
-        with psycopg.connect(dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT count(*) FROM code_chunks")
-                total["total_chunks"] = cur.fetchone()[0]
-                cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'code'")
-                total["total_docs"] = cur.fetchone()[0]
 
-    return total
+    with _sweep_lock() as locked:
+        if not locked:
+            print("code_index: sweep skipped -- another ingest/sweep holds the lock", file=sys.stderr)
+            return {
+                "repos_seen": 0, "repos_failed": 0, "files_seen": 0,
+                "chunks_written": 0, "chunks_deleted": 0, "skipped": 0,
+                "failures": {}, "locked_out": True,
+                "empty_repos": [], "empty_repos_healed": [], "empty_repos_unhealed": [],
+            }
+
+        import time
+        roots = get_repo_roots()
+        state_path = delegate.DATA_DIR / "code_sweep_state.json"
+        try:
+            state = json.loads(state_path.read_text("utf-8")) if state_path.exists() else {}
+        except Exception:
+            state = {}
+        start_idx = (state.get("next_index", 0) % len(roots)) if roots else 0
+        order = roots[start_idx:] + roots[:start_idx]
+
+        t0 = time.time()
+        total = {
+            "repos_seen": 0, "repos_failed": 0, "files_seen": 0,
+            "chunks_written": 0, "chunks_deleted": 0, "skipped": 0,
+            "failures": {},
+        }
+        processed = 0
+        for root in order:
+            if time.time() - t0 > budget_seconds:
+                break
+            try:
+                stats = ingest(force=force, repo_path=root)
+                for k in ("files_seen", "chunks_written", "chunks_deleted", "skipped"):
+                    total[k] += stats.get(k, 0)
+            except psycopg.OperationalError:
+                raise
+            except Exception as e:
+                total["repos_failed"] += 1
+                total["failures"][str(root)] = str(e)
+                print(f"code_index: skipping repo {root}: {e}", file=sys.stderr)
+            finally:
+                total["repos_seen"] += 1
+                processed += 1
+
+        delegate.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        next_index = ((start_idx + processed) % len(roots)) if roots else 0
+        state_path.write_text(json.dumps({"next_index": next_index}), "utf-8")
+
+        # --- Divergence detection + self-heal (T-970 DoD 1/2) ---
+        total["empty_repos"] = []
+        total["empty_repos_healed"] = []
+        total["empty_repos_unhealed"] = []
+        if dsn:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    diverged = _diverged_repo_names(cur, roots)
+            total["empty_repos"] = diverged
+            if diverged:
+                print(f"code_index: divergence detected in {len(diverged)} repo(s): {diverged}", file=sys.stderr)
+            roots_by_name = {r.name: r for r in roots}
+            for repo_name in diverged:
+                if time.time() - t0 > budget_seconds:
+                    total["empty_repos_unhealed"].append(repo_name)
+                    continue
+                root = roots_by_name.get(repo_name)
+                if root is None:
+                    total["empty_repos_unhealed"].append(repo_name)
+                    continue
+                try:
+                    _heal_diverged_repo(dsn, repo_name)
+                    heal_stats = ingest(force=True, repo_path=root)
+                    for k in ("files_seen", "chunks_written", "chunks_deleted", "skipped"):
+                        total[k] += heal_stats.get(k, 0)
+                    total["empty_repos_healed"].append(repo_name)
+                except psycopg.OperationalError:
+                    raise
+                except Exception as e:
+                    total["empty_repos_unhealed"].append(repo_name)
+                    total["failures"][f"heal:{repo_name}"] = str(e)
+                    print(f"code_index: failed to heal diverged repo {repo_name}: {e}", file=sys.stderr)
+            if total["empty_repos_healed"] or total["empty_repos_unhealed"]:
+                print(
+                    f"code_index: healed {total['empty_repos_healed']}, "
+                    f"still diverged {total['empty_repos_unhealed']}",
+                    file=sys.stderr,
+                )
+
+        if dsn:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM code_chunks")
+                    total["total_chunks"] = cur.fetchone()[0]
+                    cur.execute("SELECT count(*) FROM ingested_files WHERE collection = 'code'")
+                    total["total_docs"] = cur.fetchone()[0]
+
+        return total
 
 
 def cmd_reindex(args):
     try:
         force = getattr(args, "rebuild", False) or getattr(args, "force", False)
-        ingest(force=force)
+        with _sweep_lock() as locked:
+            if not locked:
+                print("code_index: another ingest/sweep holds the lock, skipping", file=sys.stderr)
+                return
+            ingest(force=force)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
