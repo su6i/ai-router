@@ -39,6 +39,7 @@ INFO-level lines.
 - **mcp-registration**: Ensures the MCP server is correctly registered in `~/.claude.json`.
 - **mcp-handshake**: Spawns the MCP server and verifies JSON-RPC initialization and tool list.
 - **hooks-exist**: Verifies all python files referenced in Claude settings hooks actually exist and compile.
+- **hooks-sync**: Verifies the canonical hook set (`hooks/settings.hooks.json`) is installed in **every** Claude Code config dir on the machine, not just `~/.claude`. `--fix` installs the missing entries. See § Multi-account hook sync.
 - **sessionstart-rag**: Verifies the SessionStart RAG brief hook (`hooks/session_start_brief.py`) exists, compiles, and is registered in `~/.claude/settings.json`. `--fix` registers it and removes the legacy pointer-only hook if still present.
 - **permissions-consistency**: Ensures `permissions.allow` precisely matches the tools served by the MCP server.
 - **launchd**: Checks background sync plists are installed and running cleanly.
@@ -426,6 +427,43 @@ isolates one bad or slow repo from the rest; see
 [`docs/CODE-RAG.md`](docs/CODE-RAG.md#multi-repo-ingestion-t-953) for the
 failure-isolation and budget/resume details.
 
+### Multi-account hook sync
+
+Claude Code reads user settings from `$CLAUDE_CONFIG_DIR/settings.json`, **not**
+from `~/.claude` unconditionally. A second account (`~/.config/claude-acc2`)
+therefore ran with an empty `hooks` block — no `code_lookup` gate, no
+`delegate_nudge`, no `layer_guard`, no SessionStart RAG brief, no instant RAG
+ingest — while the primary account had all of them. Nothing errored and nothing
+was logged: the enforcement layer simply did not exist for that account, so
+agents fell straight back to `grep`/`cat` (measured 2026-09-09).
+
+`hooks/settings.hooks.json` is the single source of truth for the hook set,
+written with `{REPO}` / `{CLAUDE_HOME}` / `{HOME}` tokens so it is not tied to one
+machine. `scripts/sync_hooks.py` renders it and merges it into every config dir
+it *discovers* — `~/.claude`, every `~/.config/claude*`, and `$CLAUDE_CONFIG_DIR`
+— so an account created next month is covered without editing any list. The merge
+is strictly additive and keyed on (event, matcher, normalised command): an
+account-local hook is never removed, `~` and absolute paths count as the same
+hook, and a re-run changes nothing. A `settings.json` that does not parse is
+reported and skipped, never overwritten.
+
+```bash
+uv run python scripts/sync_hooks.py            # dry run; exit 1 if any dir has drifted
+uv run python scripts/sync_hooks.py --apply    # install the missing entries (backs up first)
+```
+
+Enforcement is a LaunchAgent, not discipline: `com.ai-router.hooks-sync` runs
+`--apply` at load and every 30 minutes, so a config dir born at 14:00 is enforced
+by 14:30. Install it with:
+
+```bash
+uv run python scripts/sync_hooks.py --print-plist > ~/Library/LaunchAgents/com.ai-router.hooks-sync.plist
+launchctl load ~/Library/LaunchAgents/com.ai-router.hooks-sync.plist
+```
+
+`r doctor` reports the same state as the `hooks-sync` check, and `r doctor --fix`
+installs what is missing.
+
 ### RAG index & auto-ingest
 
 `src/rag_ingest.py` unifies semantic indexing for rules, sessions, and code into a single process. It is incremental by default (skipping unchanged content via fast hashing) and tracks freshness via a state file (`rag_state.json`). You can interact with the ingest CLI directly:
@@ -442,7 +480,16 @@ uv run src/rag_ingest.py --receipt ~/.local/share/agent-projects/ai-router/works
 
 # Check current freshness status
 uv run src/rag_ingest.py --status
+
+# List every document currently indexed in a collection (path + chunk count)
+uv run src/rag_ingest.py --list skills
+
+# ... or just the bare names (374 skills, one per line)
+uv run src/rag_ingest.py --list skills --names-only
 ```
+
+`--list` reads the index itself, not the source directory, so it answers "what is
+actually retrievable right now" — the two disagree exactly when something went wrong.
 
 The `sessions` collection covers per-repo `SESSION.md`, `_memory/sessions/*.md`, `_memory/handoffs/*` (markdown/text notes), and per-repo archived session digests under `<repo>/workspace/archive*`. Incremental hashing ensures unchanged files are skipped in ~0.1s, and deleted files have their chunks removed automatically.
 The freshness of the RAG index is reported at the bottom of the 📋 open-tasks Telegram dashboard.
