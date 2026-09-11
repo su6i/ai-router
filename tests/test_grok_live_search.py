@@ -280,3 +280,43 @@ def test_cli_max_tool_calls_override(monkeypatch):
     d.main()
 
     assert seen["max_tool_calls"] == 3
+
+def test_x_search_never_requested(monkeypatch):
+    captured = {}
+
+    def fake_post(model, url, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return httpx.Response(200, json=FIXTURE_RESPONSE, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(d, "_post_with_retry", fake_post)
+    spec = d.MODELS["grok"]
+
+    # web_search=True: tools list has exactly web_search, never x_search
+    d.call_xai_responses(spec, "test-grok-key-xyz", [{"role": "user", "content": "hi"}], "", web_search=True)
+    assert captured["json"]["tools"] == [{"type": "web_search"}]
+    assert not any("x_search" in str(t) for t in captured["json"]["tools"])
+
+    # web_search=False: no tools key at all
+    d.call_xai_responses(spec, "test-grok-key-xyz", [{"role": "user", "content": "hi"}], "", web_search=False)
+    assert "tools" not in captured["json"]
+
+
+def test_x_search_server_side_billing_warns(monkeypatch, caplog):
+    resp = dict(FIXTURE_RESPONSE)
+    resp["usage"] = dict(FIXTURE_RESPONSE["usage"])
+    resp["usage"]["server_side_tool_usage_details"] = {
+        "web_search_calls": 1,
+        "x_search_calls": 1,
+    }
+
+    def fake_post(model, url, **kwargs):
+        return httpx.Response(200, json=resp, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(d, "_post_with_retry", fake_post)
+    spec = d.MODELS["grok"]
+
+    with caplog.at_level("WARNING", logger="ai_router"):
+        d.call_xai_responses(spec, "test-grok-key-xyz", [{"role": "user", "content": "hi"}], "")
+
+    assert any("x_search" in record.message for record in caplog.records)
+

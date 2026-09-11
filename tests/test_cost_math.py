@@ -5,16 +5,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from delegate import MODELS
 
 def test_cost_arithmetic_with_cache():
-    # flash pricing: cin = 0.14, cout = 0.28, cin_cached = 0.014
+    # flash pricing (T-992, DeepSeek off-peak, effective 2026-09-10):
+    # cin = 0.15, cout = 0.60, cin_cached = 0.003
     spec = MODELS["flash"]
-    assert spec["cin"] == 0.14
-    assert spec["cout"] == 0.28
-    assert spec["cin_cached"] == 0.014
+    assert spec["cin"] == 0.15
+    assert spec["cout"] == 0.60
+    assert spec["cin_cached"] == 0.003
 
     pin, pout, cached = 1_000_000, 1_000_000, 500_000
     cost = ((pin - cached) / 1e6 * spec["cin"]) + (cached / 1e6 * spec["cin_cached"]) + (pout / 1e6 * spec["cout"])
     import math
-    assert math.isclose(cost, 0.357, rel_tol=1e-9)
+    assert math.isclose(cost, 0.6765, rel_tol=1e-9)
 
 def test_cost_arithmetic_no_cache_regression():
     # WO-ai-router-0024: grok now DOES have cin_cached (0.20) — the old

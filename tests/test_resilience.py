@@ -115,7 +115,12 @@ def test_resolve_model_raises_value_error():
         resolve_model("nope")
 
 def test_deepseek_peak_warning_fires_once(monkeypatch, capsys):
-    monkeypatch.setattr(delegate_module, "DEEPSEEK_PEAK_WINDOWS_UTC", [(0, 24)])
+    # Stub the window predicate itself, not DEEPSEEK_PEAK_WINDOWS_UTC: widening
+    # the windows to (0, 24) still loses to the weekday guard inside
+    # deepseek_is_peak, so the warning never fired when the suite ran on a
+    # Saturday or Sunday. The window logic has its own deterministic tests in
+    # test_deepseek_pricing.py; this test is only about the fire-once latch.
+    monkeypatch.setattr(delegate_module, "deepseek_is_peak", lambda dt_utc: True)
     delegate_module._DEEPSEEK_PEAK_WARNED = False
     try:
         resolve_model("deepseek")

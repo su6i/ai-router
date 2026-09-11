@@ -587,7 +587,7 @@ files written : src/foo.py (312B)
 rejected      : (none)
 verify        : uv run pytest -q → PASS (1.2s)   [attempt 1/2]
 worker summary: added a one-line docstring to foo()
-cost          : $0.000421 · model echoed: deepseek-v4-flash
+cost          : $0.000421 · model echoed: deepseek-flash
 ```
 
 Full wire protocol: the private `DELEGATE-TOOL-DESIGN.md` (vault).
@@ -995,8 +995,8 @@ From `MODELS` in `src/delegate.py` (cost per 1M tokens):
 | `--model` | API model | Provider | Cost in / out | Role |
 | --- | --- | --- | --- | --- |
 | `minimax` | `MiniMax-M3` | MiniMax | $0.30 / $1.20 | Default — one-time prepaid credit, spend first |
-| `flash` | `deepseek-v4-flash` | DeepSeek | $0.14 / $0.28 | General grunt work — implementation, refactor, tests, boilerplate |
-| `pro` | `deepseek-v4-pro` | DeepSeek | $0.435 / $0.87 | Reasoner — escalation target when `flash` fails or needs deeper reasoning |
+| `flash` | `deepseek-flash` | DeepSeek | $0.15 / $0.60 | General grunt work — implementation, refactor, tests, boilerplate |
+| `pro` | `deepseek-v4-pro` | DeepSeek | $0.15 / $0.60 | Reasoner — escalation target when `flash` fails or needs deeper reasoning |
 | `grok` | `grok-4.3` | xAI | $1.25 / $2.50 (+ $0.20 cached in) | Second opinion / current-events knowledge — PAID `delegate_research` escape hatch, explicit only (default is `agy`), not for routine work |
 | `grok-4.5` | `grok-4.5` | xAI | $2.00 / $6.00 (+ $0.30 cached in) | Opt-in only — a live A/B found 3.6x the cost of `grok` for equal-or-worse research quality |
 | `agy` | newest `gemini-*-pro-high` served (alias, resolved live) | Google AI Pro sub (local `agy`) | $0 / $0 | Default coding worker — mechanical changes, tests, boilerplate |
@@ -1009,7 +1009,7 @@ distinction): `STRATEGY.md` and `ROLES.md` in
 ### Resilience & Fallbacks
 
 - **Retries**: All provider calls automatically retry on transient errors (HTTP 429, 5xx, or timeouts) with an exponential backoff (1s, then 3s). Hard errors (like HTTP 400 or malformed JSON responses) fail immediately with a specific `ProviderError`.
-- **MiniMax Fallback**: If the prepaid `minimax` model fails with a credit exhaustion or 401/402/429 error after retries, the router will automatically fall back to `flash` (`deepseek-v4-flash`).
+- **MiniMax Fallback**: If the prepaid `minimax` model fails with a credit exhaustion or 401/402/429 error after retries, the router will automatically fall back to `flash` (`deepseek-flash`).
 - **HTTP 503**: A 503 means the provider itself is down (e.g. a paid provider endpoint under load). The built-in 3-attempt retry already ran; there is NO automatic paid fallback for 503 — per the $0-first policy a transient upstream outage does not authorize paid spend. Wait and retry later, or ask the owner before switching channels.
 
 ### Secret hygiene

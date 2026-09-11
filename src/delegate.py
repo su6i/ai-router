@@ -10,7 +10,7 @@ Providers:
   agy     — newest Gemini Pro via the `agy` CLI, Google AI Pro subscription ($0);
             the generation is resolved from the live CLI catalog, never hardcoded
   minimax — MiniMax-M3 (prepaid, spend first)
-  flash   — deepseek-v4-flash    pro — deepseek-v4-pro    grok — grok-4.3
+  flash   — deepseek-flash    pro — deepseek-v4-pro    grok — grok-4.3
 
 Note: `gemini`/`gemini-lite`/`gemma` (the free-quota Gemini API channel) were
 REMOVED 2026-07-27 — they silently overrode the $0 `agy` default and 429'd
@@ -19,7 +19,7 @@ raises loudly for these names instead of silently remapping them.
 
 Usage:
   python3 delegate.py -p "prompt"                       # default model = minimax
-  python3 delegate.py --model deepseek-v4-flash --plan PLAN.md --out ANSWER.md
+  python3 delegate.py --model deepseek-flash --plan PLAN.md --out ANSWER.md
   python3 delegate.py --audit                           # print the ledger
 
   # worker mode (SPEC v1) — cheap model reads/rewrites files on disk directly;
@@ -36,6 +36,7 @@ subscription. See STRATEGY.md (source of truth) for the routing policy.
 """  # noqa: EXE001
 import argparse
 import datetime as dt
+from datetime import datetime, timezone
 import fnmatch
 import hashlib
 import json
@@ -76,6 +77,10 @@ CACHE_MAX_AGE_DAYS = 90
 # $0.005/call plus the search-result tokens, an unbounded question can cost
 # 100x what the caller expects). Overridable via --max-tool-calls / MCP arg.
 XAI_MAX_TOOL_CALLS = 6
+# From 2026-09-21, xAI x_search bills per item (/1k posts, /1k profiles)
+# instead of per call. Owner order: never enable X Search in our search path.
+# web_search is the only allowed search tool.
+_XAI_ALLOWED_SEARCH_TOOLS = ("web_search",)
 
 logger = logging.getLogger("ai_router")
 
@@ -213,7 +218,8 @@ def _pop_last_true_cost() -> dict | None:
     return val
 
 
-def compute_token_cost(spec: dict, pin: int, pout: int, cached: int) -> float:
+def compute_token_cost(spec: dict, pin: int, pout: int, cached: int,
+                       now_utc: datetime | None = None) -> float:
     """Table-based fallback cost — used whenever a provider does not report
     a true billed cost (every provider except xAI's /v1/responses). Honors
     cin_cached for the cached slice of pin, and the long-context surcharge
@@ -228,7 +234,12 @@ def compute_token_cost(spec: dict, pin: int, pout: int, cached: int) -> float:
     else:
         cin, cout = spec["cin"], spec["cout"]
     cin_cached = spec.get("cin_cached", cin)
-    return (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * cout
+    cost = (pin - cached) / 1e6 * cin + cached / 1e6 * cin_cached + pout / 1e6 * cout
+    if "deepseek.com" in spec.get("url", ""):
+        effective_now = now_utc if now_utc is not None else datetime.now(timezone.utc)
+        if deepseek_is_peak(effective_now):
+            cost *= DEEPSEEK_OFF_PEAK_MULTIPLIER
+    return cost
 
 
 def _post_with_retry(model, *args, **kwargs):
@@ -298,15 +309,16 @@ CACHE = DATA_DIR / "cache.db"
 # Priority (per STRATEGY.md): MiniMax first (prepaid, never recharged) → DeepSeek → Grok.
 # Gemini is FREE ($0) but rate-limited (~a few req) — good for light chat/code one-shots.
 # cin_cached provenance: minimax 0.06 = owner's real billing (2026-07-13);
-# deepseek 0.014/0.0435 = assumed 10x cache-hit discount (research 2026-07-11,
-# official page lists no v4 models) — verify against real DeepSeek billing.
+# deepseek: email effective 2026-09-10 04:00 UTC, off-peak prices per 1M tokens
+# (cache-hit-in $0.003, cache-miss-in $0.15, output $0.60), V4.1 Flash serving
+# all Pro requests at Flash price until V4.1 Pro ships.
 MODELS = {
     "minimax": {"api": "MiniMax-M3",        "provider": "openai", "url": "https://api.minimax.io/v1",
                     "cin": 0.30, "cin_cached": 0.06, "cout": 1.20, "key": "MINIMAX_API_KEY", "quota_channel": "minimax-api"},
-    "flash":   {"api": "deepseek-v4-flash", "provider": "openai", "url": "https://api.deepseek.com/v1",
-                    "cin": 0.14, "cin_cached": 0.014, "cout": 0.28, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
+    "flash":   {"api": "deepseek-flash",    "provider": "openai", "url": "https://api.deepseek.com/v1",
+                    "cin": 0.15, "cin_cached": 0.003, "cout": 0.60, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
     "pro":     {"api": "deepseek-v4-pro",   "provider": "openai", "url": "https://api.deepseek.com/v1",
-                    "cin": 0.435, "cin_cached": 0.0435, "cout": 0.87, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
+                    "cin": 0.15, "cin_cached": 0.003, "cout": 0.60, "key": "DEEPSEEK_API_KEY", "quota_channel": "deepseek-api"},
     "grok":    {"api": "grok-4.3",          "provider": "xai", "url": "https://api.x.ai/v1",
                     "cin": 1.25, "cin_cached": 0.20, "cout": 2.50,
                     "cin_long": 2.50, "cout_long": 5.00, "long_ctx_threshold": 200_000,
@@ -347,6 +359,7 @@ ALIASES = {
     "minimax": "minimax", "minimax-m3": "minimax", "m3": "minimax",
     "flash": "flash", "deepseek": "flash", "ds": "flash", "deepseek-v4": "flash",
     "deepseek-flash": "flash", "deepseek-v4-flash": "flash",
+    "deepseek-v4.1-flash": "flash",
     "pro": "pro", "reasoner": "pro", "deepseek-pro": "pro", "deepseek-v4-pro": "pro",
     "grok": "grok", "grok-4.3": "grok", "grok4": "grok",
     "grok-4.5": "grok-4.5", "grok45": "grok-4.5", "grok4.5": "grok-4.5",
@@ -687,19 +700,22 @@ DEEPSEEK_OFF_PEAK_MULTIPLIER = 2
 
 _DEEPSEEK_PEAK_WARNED = False
 
+
+def deepseek_is_peak(dt_utc: datetime) -> bool:
+    if dt_utc.weekday() >= 5:
+        return False
+    return any(start <= dt_utc.hour < end for start, end in DEEPSEEK_PEAK_WINDOWS_UTC)
+
+
 def _warn_if_deepseek_peak(model: str) -> None:
     global _DEEPSEEK_PEAK_WARNED
     if _DEEPSEEK_PEAK_WARNED:
         return
     if model not in ("flash", "pro", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek"):
         return
-    from datetime import datetime, timezone
-    now_utc = datetime.now(timezone.utc).hour
-    for start, end in DEEPSEEK_PEAK_WINDOWS_UTC:
-        if start <= now_utc < end:
-            print(f"⚠️ DeepSeek peak window (UTC {start:02d}-{end:02d}) — off-peak price is {DEEPSEEK_OFF_PEAK_MULTIPLIER}× cheaper", file=sys.stderr)
-            _DEEPSEEK_PEAK_WARNED = True
-            break
+    if deepseek_is_peak(datetime.now(timezone.utc)):
+        print(f"⚠️ DeepSeek peak window — off-peak price is {DEEPSEEK_OFF_PEAK_MULTIPLIER}× cheaper", file=sys.stderr)
+        _DEEPSEEK_PEAK_WARNED = True
 
 def resolve_model(name: str) -> str:
     key = name.strip().lower()
@@ -1615,7 +1631,7 @@ def call_xai_responses(spec: dict, key: str, history: list, system: str,
     msgs = ([{"role": "system", "content": system}] if system else []) + history
     body = {"model": spec["api"], "input": msgs, "max_output_tokens": max_output_tokens}
     if web_search:
-        body["tools"] = [{"type": "web_search"}]
+        body["tools"] = [{"type": t} for t in _XAI_ALLOWED_SEARCH_TOOLS]
         body["max_tool_calls"] = max_tool_calls
 
     r = _post_with_retry(spec["api"], f"{spec['url']}/responses",
@@ -1647,6 +1663,10 @@ def call_xai_responses(spec: dict, key: str, history: list, system: str,
     if web_search and web_search_calls >= max_tool_calls:
         logger.warning(f"⚠️  xai web_search hit max_tool_calls={max_tool_calls} "
                         f"— answer may be truncated research")
+
+    x_search_calls = tool_usage.get("x_search_calls", 0)
+    if x_search_calls > 0:
+        logger.warning(f"⚠️  xai x_search unexpectedly billed/enabled server-side: {x_search_calls} calls (never requested)")
 
     global _LAST_TRUE_COST
     ticks = u.get("cost_in_usd_ticks")
@@ -2884,7 +2904,7 @@ def agent_delegate(task: str, runner: str = "agy", model: str | None = None, wor
         # errors otherwise, despite exec --help listing it as forwarded), and
         # the provider is chosen via CODEWHALE_PROVIDER (per `auth status`) —
         # otherwise the model name is sent to whatever provider is active.
-        cw_model = "deepseek-v4-flash" if model_name == "flash" else "minimax-m3"
+        cw_model = MODELS["flash"]["api"] if model_name == "flash" else "minimax-m3"
         run_env["CODEWHALE_PROVIDER"] = "deepseek" if model_name == "flash" else "minimax"
         codewhale_bin = _require_cli_bin("codewhale")
         cmd = [codewhale_bin, "-C", str(project_root), "--model", cw_model,
