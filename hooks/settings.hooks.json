@@ -1,0 +1,229 @@
+{
+  "PreCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/save-handoff-su6i.sh",
+          "timeout": 15,
+          "statusMessage": "💾 su6i — session backup"
+        }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/session-snapshot.sh",
+          "timeout": 15
+        },
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/save-handoff-su6i.sh",
+          "timeout": 15,
+          "statusMessage": "💾 su6i — session backup"
+        },
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/session-narrative-end.sh",
+          "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/check-session-saved.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "SessionStart": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash '{CLAUDE_HOME}/hooks/herdr-agent-state.sh' session",
+          "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "uv run --directory {REPO} python {REPO}/hooks/session_start_brief.py",
+          "timeout": 10,
+          "statusMessage": "▶️ su6i — session continuity (RAG)"
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 {CLAUDE_HOME}/hooks/context-checkpoint-su6i.py",
+          "timeout": 15,
+          "statusMessage": "💾 checkpoint (50k steps + pre-commit)"
+        }
+      ]
+    },
+    {
+      "matcher": "Write|Edit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/workdir-guard.sh",
+          "timeout": 10,
+          "statusMessage": "⛔ working-dir guard"
+        },
+        {
+          "type": "command",
+          "command": "python3 {REPO}/hooks/delegate_nudge.py",
+          "timeout": 10,
+          "statusMessage": "🔀 delegation-first check"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 {CLAUDE_HOME}/hooks/block-ai-attribution.py"
+        },
+        {
+          "type": "command",
+          "command": "f={REPO}/hooks/worker_channel_nudge.py; if [ -f \"$f\" ]; then python3 \"$f\"; else exit 0; fi",
+          "timeout": 10,
+          "statusMessage": "🔀 worker channel check"
+        },
+        {
+          "type": "command",
+          "command": "f={REPO}/hooks/code_lookup_gate.py; if [ -f \"$f\" ]; then {REPO}/.venv/bin/python \"$f\"; else exit 0; fi",
+          "timeout": 10,
+          "statusMessage": "🔎 code_lookup gate"
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__ai-router__delegate_worker|mcp__ai-router__delegate_agent",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 {REPO}/hooks/layer_guard.py",
+          "timeout": 10,
+          "statusMessage": "⛔ layer-085 guard"
+        }
+      ]
+    },
+    {
+      "matcher": "Read|Grep|Glob",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "f={REPO}/hooks/code_lookup_gate.py; if [ -f \"$f\" ]; then {REPO}/.venv/bin/python \"$f\"; else exit 0; fi",
+          "timeout": 10,
+          "statusMessage": "🔎 code_lookup gate"
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/check-session-saved.sh",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 {CLAUDE_HOME}/hooks/context-warn.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Write|Edit|MultiEdit|Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/rag-session-ingest.sh",
+          "timeout": 10,
+          "statusMessage": "🧠 RAG instant ingest"
+        }
+      ]
+    },
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/session-autosave.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/save-summary-su6i.sh",
+          "timeout": 15,
+          "statusMessage": "📝 su6i — summary → SESSION.md"
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 {CLAUDE_HOME}/hooks/enforce-identifiers.py",
+          "timeout": 10,
+          "statusMessage": "🛑 rule-075 identifier gate"
+        },
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/stop-session-save.sh"
+        },
+        {
+          "type": "command",
+          "command": "bash {CLAUDE_HOME}/hooks/check-session-saved.sh",
+          "timeout": 10,
+          "statusMessage": "💾 session-save gate"
+        }
+      ]
+    },
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 {CLAUDE_HOME}/hooks/enforce-no-repetition.py"
+        }
+      ]
+    }
+  ],
+  "SubagentStop": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 {CLAUDE_HOME}/hooks/enforce-no-repetition.py"
+        }
+      ]
+    }
+  ]
+}

@@ -172,16 +172,55 @@ def handle_receipt(file_path_str: str, collection_arg: str | None = None):
 
     print(f"RECEIPT col:{col} sha:{db_sha} chunks:{chunk_count} {id_str} path:{rel_path}")
 
+_TABLES = {
+    "rules": "rules_chunks",
+    "skills": "skill_chunks",
+    "sessions": "session_chunks",
+    "code": "code_chunks",
+}
+
+def list_documents(collection: str, names_only: bool = False):
+    """Print every document currently indexed in a collection, one per line.
+
+    Answers "what is actually IN the RAG right now" from the index itself
+    rather than from the source directory -- the two disagree exactly when
+    something went wrong, which is the case worth being able to see.
+    """
+    d.load_env()
+    dsn = os.environ.get("POSTGRES_DSN")
+    if not dsn:
+        print("Postgres unavailable — start it first: colima start", file=sys.stderr)
+        sys.exit(2)
+
+    table = _TABLES[collection]
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT path, count(*) FROM {table} GROUP BY path ORDER BY path")
+            rows = cur.fetchall()
+
+    for path, n in rows:
+        name = Path(path).stem if names_only else path
+        print(f"{name}\t{n}" if not names_only else name)
+    print(f"--- {len(rows)} documents in '{collection}'", file=sys.stderr)
+
 def main():
     parser = argparse.ArgumentParser(description="Unified RAG Ingest")
     parser.add_argument("--collection", choices=["rules", "skills", "sessions", "code", "all"])
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_out")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--list", dest="list_collection", choices=list(_TABLES),
+                        help="print every indexed document of a collection (path + chunk count)")
+    parser.add_argument("--names-only", action="store_true",
+                        help="with --list: print bare document names instead of full paths")
     parser.add_argument("--receipt", type=str, help="Ingest single file and print receipt")
     
     args = parser.parse_args()
     
+    if getattr(args, "list_collection", None):
+        list_documents(args.list_collection, args.names_only)
+        return
+
     if getattr(args, "receipt", None):
         handle_receipt(args.receipt, getattr(args, "collection", None))
         return

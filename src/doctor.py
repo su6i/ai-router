@@ -48,6 +48,48 @@ def _get_claude_json_path():
 def _get_settings_json_path():
     return _get_home() / ".claude" / "settings.json"
 
+def _sync_hooks_module():
+    """Import scripts/sync_hooks.py (not a package, so it goes on sys.path)."""
+    scripts_dir = REPO_ROOT / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import sync_hooks
+    return sync_hooks
+
+def check_hooks_sync(fix: bool = False):
+    """Every Claude Code config dir must carry the canonical hook set.
+
+    `check_hooks_exist` only ever looked at `~/.claude/settings.json`, so a
+    second account (`~/.config/claude-acc2`) ran for weeks with an empty
+    `hooks` block — no code_lookup gate, no delegate nudge, no layer guard —
+    and every check on this machine still said OK.
+    """
+    try:
+        sh = _sync_hooks_module()
+        canonical = sh.render_canonical()
+        dirs = sh.discover_config_dirs()
+    except Exception as e:
+        print(f"FAIL  hooks-sync  Cannot evaluate hook sync: {e}")
+        return False
+
+    drifted = []
+    for cfg in dirs:
+        n, _added, err = sh.sync_dir(cfg, canonical, apply=fix)
+        if err:
+            print(f"FAIL  hooks-sync  {cfg}: {err}")
+            return False
+        if n:
+            drifted.append(f"{cfg} ({n} hook(s))")
+
+    if not drifted:
+        print(f"OK  hooks-sync  Canonical hooks present in all {len(dirs)} config dir(s)")
+        return True
+    if fix:
+        print(f"OK  hooks-sync  Installed missing hooks into: {', '.join(drifted)}")
+        return True
+    print(f"WARN  hooks-sync  Missing canonical hooks in: {', '.join(drifted)} — run with --fix")
+    return True
+
 def get_server_tools():
     server_path = REPO_ROOT / "mcp" / "server.py"
     try:
@@ -601,6 +643,7 @@ def main():
         check_mcp_registration()
         check_mcp_handshake()
         check_hooks_exist()
+        check_hooks_sync(fix=args.fix)
         check_sessionstart_rag_hook()
         check_permissions_consistency()
         check_launchd()
