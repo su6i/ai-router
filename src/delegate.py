@@ -395,6 +395,17 @@ FAMILY_ALIASES = {
     "gemini-flash-low": ("flash", "low"),
 }
 
+# Static gemini model IDs retained in MODELS for pricing/audit back-compat
+# even if dropped from a trimmed or newer live agy catalog.
+RETIRED_AGY_MODELS = {
+    "gemini-3.7-flash-high",
+    "gemini-3.7-flash-medium",
+    "gemini-3.7-flash-low",
+    "gemini-3.6-flash-high",
+    "gemini-3.6-flash-medium",
+    "gemini-3.6-flash-low",
+}
+
 
 def parse_agy_models(stdout: str) -> list[str]:
     """Model ids exactly as `agy models` prints them (first token of a data row).

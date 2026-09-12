@@ -313,3 +313,168 @@ def test_worker_mcp_and_agent_default_resolve_to_newest_flash(monkeypatch):
     monkeypatch.setattr(delegate, "worker_delegate", fake_worker_delegate)
     server.handle_delegate_worker({"prompt": "test prompt", "workdir": "/tmp"})
     assert worker_calls == [newest_flash]
+
+
+def _parse_version(version_str: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in version_str.split("."))
+
+
+def assert_catalog_drift_free(catalog: list[str], resolved_aliases: dict[str, str] | None = None):
+    """Assert that a model catalog does not drift ahead of alias resolution or leave models orphaned.
+
+    1. Every FAMILY_ALIASES entry in src/delegate.py resolves to an id that exists in the catalog.
+    2. Every static MODELS entry matching AGY_GEMINI_ID_RE still exists in the catalog,
+       or is explicitly listed in RETIRED_AGY_MODELS.
+    3. No catalog id matching AGY_GEMINI_ID_RE for a routed family (flash, pro) is newer
+       than what the family alias resolves to (the real drift case).
+    """
+    catalog_set = set(catalog)
+
+    # 1. Every FAMILY_ALIASES entry resolves to an id that exists in the catalog
+    if resolved_aliases is None:
+        resolved_aliases = {
+            alias: delegate.resolve_model(alias)
+            for alias in delegate.FAMILY_ALIASES
+        }
+    for alias in delegate.FAMILY_ALIASES:
+        resolved = resolved_aliases[alias]
+        assert resolved in catalog_set, (
+            f"FAMILY_ALIASES[{alias!r}] resolves to {resolved!r}, which does not exist in the catalog"
+        )
+
+    # 2. Every static MODELS entry matching AGY_GEMINI_ID_RE still exists in the catalog,
+    # or is explicitly listed as a retired/back-compat alias.
+    retired = getattr(delegate, "RETIRED_AGY_MODELS", set())
+    for model_id in delegate.MODELS:
+        if delegate.AGY_GEMINI_ID_RE.match(model_id):
+            assert model_id in catalog_set or model_id in retired, (
+                f"Static MODELS entry {model_id!r} not found in catalog and not listed in RETIRED_AGY_MODELS"
+            )
+
+    # 3. No catalog id matching AGY_GEMINI_ID_RE for a routed family (flash, pro) is newer
+    # than what the family alias resolves to.
+    for cat_id in catalog:
+        m = delegate.AGY_GEMINI_ID_RE.match(cat_id)
+        if not m:
+            continue
+        cat_ver = _parse_version(m.group(1))
+        family, effort = m.group(2), m.group(3)
+        if family not in ("flash", "pro"):
+            continue
+
+        matching_aliases = sorted(
+            [alias for alias, (f, e) in delegate.FAMILY_ALIASES.items() if f == family and e == effort],
+            key=lambda a: (0 if a.startswith("gemini-") else 1, a),
+        )
+        assert matching_aliases, f"No family alias routes ({family}, {effort}) for catalog model {cat_id!r}"
+
+        for alias in matching_aliases:
+            resolved = resolved_aliases[alias]
+            res_m = delegate.AGY_GEMINI_ID_RE.match(resolved)
+            assert res_m, f"Alias {alias!r} resolved to non-gemini id {resolved!r}"
+            res_ver = _parse_version(res_m.group(1))
+            assert cat_ver <= res_ver, (
+                f"Model catalog drift detected: catalog id '{cat_id}' is newer than what "
+                f"alias '{alias}' resolves to ('{resolved}')"
+            )
+
+
+# Frozen snapshot in the same shape as the real `<vault>/data/agy_models.json`
+# cache file. Checked into the repo so this test never touches the real vault
+# and stays green on a laptop where the vault does not exist.
+_FROZEN_CACHED_CATALOG = {
+    "fetched_at": 1789214096.765909,
+    "models": [
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "gemini-3.7-flash-high",
+        "gemini-3.7-flash-medium",
+        "gemini-3.7-flash-low",
+        "gemini-3.6-flash-high",
+        "gemini-3.6-flash-medium",
+        "gemini-3.6-flash-low",
+        "gemini-3.1-pro-high",
+        "gemini-3.1-pro-low",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
+    ],
+}
+
+
+def test_model_catalog_drift_free_on_cached_catalog(tmp_path, monkeypatch):
+    """DoD 1: compares sets, not strings. Using a catalog fixture shaped exactly
+    like the real cached-catalog file (never the real vault path itself, per
+    DoD 2), asserts no drift, all aliases resolve to catalog models, and static
+    entries are accounted for.
+    """
+    cache_file = tmp_path / "agy_models.json"
+    cache_file.write_text(json.dumps(_FROZEN_CACHED_CATALOG))
+    monkeypatch.setattr(delegate, "AGY_CATALOG_CACHE", cache_file)
+
+    assert delegate.AGY_CATALOG_CACHE.exists(), "Cached catalog fixture missing"
+    data = json.loads(delegate.AGY_CATALOG_CACHE.read_text())
+    assert_catalog_drift_free(data["models"])
+
+
+def test_model_catalog_host_independent_synthetic_catalog(tmp_path, monkeypatch):
+    """DoD 2: Host-independent. Feeds a synthetic catalog through the same parsing path
+    pointing the loader at a tmp_path file without external CLI or vault calls.
+    """
+    monkeypatch.setattr(delegate, "MODELS", delegate.MODELS.copy())
+    cache_file = tmp_path / "agy_models.json"
+    synthetic_models = [
+        "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+        "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+        "claude-sonnet-4-6", "gpt-oss-120b-medium",
+    ]
+    cache_file.write_text(json.dumps({"fetched_at": time.time(), "models": synthetic_models}))
+    monkeypatch.setattr(delegate, "AGY_CATALOG_CACHE", cache_file)
+    monkeypatch.setattr(delegate.agy_served_models, "_memo",
+                         {"path": None, "disk_fetched_at": None, "resolved_fetched_at": None, "models": None},
+                         raising=False)
+
+    loaded = delegate.agy_served_models()
+    assert loaded == synthetic_models
+    assert_catalog_drift_free(loaded)
+
+
+def test_model_catalog_drift_detects_newer_generation_loudly():
+    """DoD 3: Drift is provable. Feeds a catalog containing a newer generation
+    than the alias currently resolves to and asserts the test fails loudly,
+    naming the newer id and the alias that missed it.
+    """
+    base_catalog = [
+        "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+        "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+    ]
+    current_resolved = {
+        alias: delegate.resolve_model(alias)
+        for alias in delegate.FAMILY_ALIASES
+    }
+    # Feed catalog with newer flash generation
+    newer_catalog = base_catalog + ["gemini-3.9-flash-high"]
+
+    with pytest.raises(AssertionError) as exc_info:
+        assert_catalog_drift_free(newer_catalog, resolved_aliases=current_resolved)
+
+    msg = str(exc_info.value)
+    assert "gemini-3.9-flash-high" in msg
+    assert "gemini-flash" in msg
+
+    # Also prove drift detection for pro family
+    newer_pro_catalog = base_catalog + ["gemini-3.2-pro-high"]
+    with pytest.raises(AssertionError) as exc_info_pro:
+        assert_catalog_drift_free(newer_pro_catalog, resolved_aliases=current_resolved)
+
+    msg_pro = str(exc_info_pro.value)
+    assert "gemini-3.2-pro-high" in msg_pro
+    assert any(a in msg_pro for a in ("gemini-pro", "gemini-3-pro", "agy", "antigravity"))
+
+
+def test_version_comparison_is_numeric_not_lexical():
+    """DoD 4: gemini-3.10-flash-high must sort above gemini-3.9-flash-high."""
+    assert _parse_version("3.10") > _parse_version("3.9")
+    assert _parse_version("3.10.1") > _parse_version("3.9.9")
+    assert _parse_version("3.2") > _parse_version("3.1.9")
