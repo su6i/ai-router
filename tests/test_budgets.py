@@ -297,3 +297,219 @@ def test_daily_token_budget_estimate_prints_section(isolated_vault, capsys, monk
     out = capsys.readouterr().out
     assert "Daily tokens vs caps:" in out
     assert "google-ai-pro-gemini" in out
+
+
+def test_token_budget_huge_cache_no_abort(isolated_vault, caplog, monkeypatch):
+    caplog.set_level(logging.WARNING)
+    _pin_now(monkeypatch, "2026-09-12T12:00:00+02:00")
+
+    # weekly=10,000,000 -> default fraction 0.15 -> cap 1,500,000
+    delegate.BUDGETS.write_text(
+        json.dumps({
+            "weekly_token_quota": {
+                "google-ai-pro-gemini": {"tokens": 10000000, "calibrated_at": "2026-09-10"}
+            }
+        })
+    )
+
+    # in: 10,000 (non-cached, since agy), cache: 5,000,000, out: 5,000 -> total non-cached 15,000 (well under 1.5M)
+    delegate.AUDIT.write_text(
+        json.dumps({
+            "ts": "2026-09-12T00:00:00+00:00",
+            "quota_channel": "google-ai-pro-gemini",
+            "in": 10000,
+            "cache": 5000000,
+            "out": 5000,
+            "cached": False,
+            "cost_usd": 0.0,
+        })
+        + "\n"
+    )
+
+    # Should not raise
+    delegate.check_budget("testproj", "session1", model_spec={"quota_channel": "google-ai-pro-gemini", "cin": 0, "cout": 0})
+    assert "TOKEN BUDGET ABORT" not in caplog.text
+
+
+def test_token_budget_non_cached_over_fraction_abort(isolated_vault, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-12T12:00:00+02:00")
+
+    # weekly=10,000,000 -> default fraction 0.15 -> cap 1,500,000
+    delegate.BUDGETS.write_text(
+        json.dumps({
+            "weekly_token_quota": {
+                "google-ai-pro-gemini": {"tokens": 10000000, "calibrated_at": "2026-09-10"}
+            }
+        })
+    )
+
+    # non-cached 1,600,000 > cap 1,500,000
+    delegate.AUDIT.write_text(
+        json.dumps({
+            "ts": "2026-09-12T00:00:00+00:00",
+            "quota_channel": "google-ai-pro-gemini",
+            "in": 1600000,
+            "cache": 0,
+            "out": 0,
+            "cached": False,
+            "cost_usd": 0.0,
+        })
+        + "\n"
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        delegate.check_budget("testproj", "session1", model_spec={"quota_channel": "google-ai-pro-gemini", "cin": 0, "cout": 0})
+    msg = str(exc.value)
+    assert "TOKEN BUDGET ABORT" in msg
+    assert "non-cached spent: 1,600,000 > cap: 1,500,000" in msg
+    assert "Fraction: 0.15" in msg
+    assert "calibrated 2026-09-10" in msg
+
+
+def test_token_budget_explicit_override_wins(isolated_vault, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-12T12:00:00+02:00")
+
+    delegate.BUDGETS.write_text(
+        json.dumps({
+            "daily_token_budget": {
+                "google-ai-pro-gemini": 2000000  # explicit override
+            },
+            "weekly_token_quota": {
+                "google-ai-pro-gemini": {"tokens": 10000000, "calibrated_at": "2026-09-10"}
+            },
+        })
+    )
+
+    # non-cached 1,600,000 < 2,000,000
+    delegate.AUDIT.write_text(
+        json.dumps({
+            "ts": "2026-09-12T00:00:00+00:00",
+            "quota_channel": "google-ai-pro-gemini",
+            "in": 1600000,
+            "out": 0,
+            "cached": False,
+            "cost_usd": 0.0,
+        })
+        + "\n"
+    )
+
+    # Should not raise since 1.6M < 2.0M
+    delegate.check_budget("testproj", "session1", model_spec={"quota_channel": "google-ai-pro-gemini", "cin": 0, "cout": 0})
+
+
+def test_token_budget_missing_calibration_warns(isolated_vault, caplog, monkeypatch):
+    caplog.set_level(logging.WARNING)
+    _pin_now(monkeypatch, "2026-09-12T12:00:00+02:00")
+
+    delegate.BUDGETS.write_text(json.dumps({}))  # empty budgets
+
+    delegate.AUDIT.write_text(
+        json.dumps({
+            "ts": "2026-09-12T00:00:00+00:00",
+            "quota_channel": "google-ai-pro-gemini",
+            "in": 100,
+            "out": 0,
+            "cached": False,
+            "cost_usd": 0.0,
+        })
+        + "\n"
+    )
+
+    delegate.check_budget("testproj", "session1", model_spec={"quota_channel": "google-ai-pro-gemini", "cin": 0, "cout": 0})
+
+    assert "missing weekly calibration — falling back to 20,000,000 cap" in caplog.text
+
+
+def test_token_budget_cached_hits_ignored(isolated_vault, monkeypatch):
+    _pin_now(monkeypatch, "2026-09-12T12:00:00+02:00")
+
+    delegate.BUDGETS.write_text(
+        json.dumps({
+            "daily_token_budget": {
+                "google-ai-pro-gemini": 1000
+            }
+        })
+    )
+
+    # This row is a HIT (cached: true), it should be ignored completely
+    delegate.AUDIT.write_text(
+        json.dumps({
+            "ts": "2026-09-12T00:00:00+00:00",
+            "quota_channel": "google-ai-pro-gemini",
+            "in": 5000,
+            "out": 5000,
+            "cached": True,
+            "cost_usd": 0.0,
+        })
+        + "\n"
+    )
+
+    delegate.check_budget("testproj", "session1", model_spec={"quota_channel": "google-ai-pro-gemini", "cin": 0, "cout": 0})
+
+
+def test_calibrate_quota_maths_and_refusal(isolated_vault, monkeypatch, capsys):
+    _pin_now(monkeypatch, "2026-09-12T12:00:00+02:00")
+
+    delegate.AUDIT.write_text(
+        json.dumps({
+            "ts": "2026-09-12T00:00:00+00:00",
+            "quota_channel": "google-ai-pro-gemini",
+            "in": 5000,
+            "out": 5000,
+            "cache": 0,
+            "cached": False,
+            "cost_usd": 0.0,
+        })
+        + "\n"
+    )
+
+    with (
+        patch(
+            "sys.argv",
+            [
+                "delegate.py",
+                "--calibrate-quota",
+                "--channel",
+                "google-ai-pro-gemini",
+                "--pct-before",
+                "100.0",
+                "--pct-after",
+                "98.5",
+                "--since",
+                "2026-09-11",
+            ],
+        ),
+        pytest.raises(SystemExit) as exc,
+    ):
+        with patch("delegate.AUDIT", isolated_vault / "data" / "audit.log"):
+            delegate.main()
+
+    assert "Refusing calibration" in str(exc.value)
+    assert "< 2 points" in str(exc.value)
+
+    with pytest.raises(SystemExit) as exc:
+        with patch("delegate.AUDIT", isolated_vault / "data" / "audit.log"):
+            with patch(
+                "sys.argv",
+                [
+                    "delegate.py",
+                    "--calibrate-quota",
+                    "--channel",
+                    "google-ai-pro-gemini",
+                    "--pct-before",
+                    "100.0",
+                    "--pct-after",
+                    "95.0",
+                    "--since",
+                    "2026-09-11",
+                ],
+            ):
+                delegate.main()
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    # non_cached = 10,000, delta = 5% => weekly = 10000 / 0.05 = 200,000
+    assert "200,000 weekly tokens" in captured.out
+
+    budgets = json.loads(delegate.BUDGETS.read_text())
+    assert budgets["weekly_token_quota"]["google-ai-pro-gemini"]["tokens"] == 200000

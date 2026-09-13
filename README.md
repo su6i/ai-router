@@ -766,7 +766,15 @@ Schema (see `budgets.example.json` in the repo root):
   "per_session_usd": 0.50,
   "per_project_monthly_usd": {},
   "daily_calls": {"google-ai-pro": 50},
-  "daily_token_budget": {"google-ai-pro-gemini": 20000000}
+  "daily_token_budget": {"google-ai-pro-gemini": 20000000},
+  "daily_quota_fraction": {"google-ai-pro-gemini": 0.15},
+  "weekly_token_quota": {
+    "google-ai-pro-gemini": {
+      "tokens": 200000000,
+      "calibrated_at": "2026-09-01",
+      "evidence": "example only -- run --calibrate-quota to derive a real figure"
+    }
+  }
 }
 ```
 
@@ -775,15 +783,14 @@ subscription/free channels always report `cost_usd=0`, so USD caps never brake
 them; their scarce unit is daily quota. Over the cap aborts loudly; at ≥80% a
 warning is printed. A missing key means uncapped. Cache hits don't count.
 
-`daily_token_budget` (T-960) caps *tokens* per `quota_channel` per calendar
-day, same cache-hits-excluded rule, same loud-abort/≥80%-warning behaviour —
-this is the one that actually would have stopped the 2026-09-06 quota loss,
-since a handful of calls can each burn millions of tokens without ever
-tripping a call-count cap. Any channel not listed here stays uncapped
-**except** one starting with `google-ai-pro`, which falls back to a coded
-default of 20,000,000/day even with no `budgets.json` entry at all — silent
-overspend by omission is still silent overspend. See "Token circuit breaker"
-above.
+`daily_token_budget` (T-960/T-995) caps *non-cached tokens* (`non_cached_in + out`)
+per `quota_channel` per calendar day — cache reads stay in the ledger and are shown
+separately in `--estimate`, but do not count toward the cap. For `google-ai-pro*`
+channels, the cap is derived as `daily_quota_fraction × weekly_token_quota` (coded
+default fraction 0.15 per owner rule D-250), falling back to 20,000,000/day with a
+logged warning if uncalibrated; an explicit `daily_token_budget` entry overrides both.
+Run `delegate.py --calibrate-quota --channel <ch> --pct-before <n> --pct-after <n> --since <ts>`
+to derive weekly tokens from observed non-cached spend over a percentage delta.
 
 Use `--estimate` to dry-run a call: prints estimated tokens, cost, current
 budget usage, and today's per-channel call counts without calling the provider
