@@ -4,5 +4,13 @@
   "per_session_usd": 0.50,
   "per_project_monthly_usd": {},
   "daily_calls": {"google-ai-pro": 50, "gemini-free": 400},
-  "daily_token_budget": {"google-ai-pro-gemini": 20000000}
+  "daily_token_budget": {"google-ai-pro-gemini": 20000000},
+  "daily_quota_fraction": {"google-ai-pro-gemini": 0.15},
+  "weekly_token_quota": {
+    "google-ai-pro-gemini": {
+      "tokens": 200000000,
+      "calibrated_at": "2026-09-01",
+      "evidence": "example only -- run --calibrate-quota to derive a real figure"
+    }
+  }
 }

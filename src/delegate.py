@@ -865,6 +865,7 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
     copilot_monthly = budgets.get("copilot_premium_requests_month")
     daily_calls_count = {}
     daily_tokens_count = {}
+    daily_cache_count = {}
 
     if AUDIT.exists():
         with AUDIT.open("r") as fh:
@@ -885,8 +886,14 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                 # Cache HITs never reached the provider — they consume no quota.
                 if ts_local is not None and ts_local.date() == today and channel and not rec.get("cached"):
                     daily_calls_count[channel] = daily_calls_count.get(channel, 0) + 1
-                    run_tokens = (rec.get("in") or 0) + (rec.get("out") or 0) + (rec.get("cache") or 0)
+                    c_in, c_out, c_cache = rec.get("in") or 0, rec.get("out") or 0, rec.get("cache") or 0
+                    if channel.startswith("google-ai-pro"):
+                        non_cached_in = c_in
+                    else:
+                        non_cached_in = max(0, c_in - c_cache)
+                    run_tokens = non_cached_in + c_out
                     daily_tokens_count[channel] = daily_tokens_count.get(channel, 0) + run_tokens
+                    daily_cache_count[channel] = daily_cache_count.get(channel, 0) + c_cache
 
                 cost = rec.get("cost_usd", 0.0)
                 if not cost:
@@ -941,17 +948,27 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
                     print(f"    {ch}: {count} / (uncapped)")
 
         daily_token_caps_cfg = budgets.get("daily_token_budget", {})
-        if daily_tokens_count or daily_token_caps_cfg:
+        weekly_quotas_cfg = budgets.get("weekly_token_quota", {})
+        fractions_cfg = budgets.get("daily_quota_fraction", {})
+        all_channels = sorted(set(list(daily_tokens_count.keys()) + list(daily_token_caps_cfg.keys()) + list(weekly_quotas_cfg.keys())))
+        if daily_tokens_count or daily_token_caps_cfg or weekly_quotas_cfg:
             print("  Daily tokens vs caps:")
-            for ch in set(list(daily_tokens_count.keys()) + list(daily_token_caps_cfg.keys())):
+            for ch in all_channels:
                 spent = daily_tokens_count.get(ch, 0)
                 cap = daily_token_caps_cfg.get(ch)
                 if cap is None and ch.startswith("google-ai-pro"):
-                    cap = DEFAULT_DAILY_TOKEN_BUDGET
+                    weekly_data = weekly_quotas_cfg.get(ch)
+                    if weekly_data and "tokens" in weekly_data:
+                        fraction = fractions_cfg.get(ch, 0.15)
+                        cap = int(fraction * weekly_data["tokens"])
+                    else:
+                        cap = DEFAULT_DAILY_TOKEN_BUDGET
+                cache_tokens = daily_cache_count.get(ch, 0)
+                cache_suffix = f" (cache: {cache_tokens:,})" if cache_tokens else ""
                 if cap is not None:
-                    print(f"    {ch}: {spent:,} / {cap:,}")
+                    print(f"    {ch}: {spent:,} / {cap:,}{cache_suffix}")
                 else:
-                    print(f"    {ch}: {spent:,} / (uncapped)")
+                    print(f"    {ch}: {spent:,} / (uncapped){cache_suffix}")
 
         sys.exit(0)
 
@@ -995,20 +1012,34 @@ def check_budget(project: str, session: str, estimate_cost: float = 0.0, print_e
     # T-960: daily per-channel TOKEN cap — the real fix for the 2026-09-06
     # quota loss (a single conversation growing unbounded, not call COUNT).
     daily_token_caps = budgets.get("daily_token_budget", {})
+    weekly_quotas = budgets.get("weekly_token_quota", {})
+    fractions = budgets.get("daily_quota_fraction", {})
     if current_channel:
         token_cap = daily_token_caps.get(current_channel)
+        weekly_quota_source = "manual override" if token_cap is not None else None
+        fraction = fractions.get(current_channel, 0.15)
         if token_cap is None and current_channel.startswith("google-ai-pro"):
-            token_cap = DEFAULT_DAILY_TOKEN_BUDGET
+            weekly_data = weekly_quotas.get(current_channel)
+            if weekly_data and "tokens" in weekly_data:
+                token_cap = int(fraction * weekly_data["tokens"])
+                weekly_quota_source = f"calibrated {weekly_data.get('calibrated_at', 'unknown date')}"
+            else:
+                token_cap = DEFAULT_DAILY_TOKEN_BUDGET
+                weekly_quota_source = "uncalibrated default"
+                if not print_estimate:
+                    logger.warning(
+                        f"⚠️  TOKEN BUDGET WARN: {current_channel} missing weekly calibration — falling back to {token_cap:,} cap"
+                    )
         tokens_spent_today = daily_tokens_count.get(current_channel, 0)
         if token_cap is not None:
             if tokens_spent_today > token_cap:
                 reset_at = (now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
                 sys.exit(
-                    f"❌ TOKEN BUDGET ABORT: daily token budget exceeded for "
-                    f"{current_channel} ({tokens_spent_today:,} > {token_cap:,} tokens) — "
-                    f"resets at {reset_at.strftime('%Y-%m-%d %H:%M %Z')}. Override for "
-                    f"today via budgets.json \"daily_token_budget\".\"{current_channel}\", "
-                    f"or wait for the reset."
+                    f"❌ TOKEN BUDGET ABORT: daily token budget exceeded for {current_channel}. "
+                    f"non-cached spent: {tokens_spent_today:,} > cap: {token_cap:,}. "
+                    f"Fraction: {fraction}, weekly quota source: {weekly_quota_source}. "
+                    f"Cache tokens excluded. "
+                    f"Resets at {reset_at.strftime('%Y-%m-%d %H:%M %Z')}."
                 )
             elif tokens_spent_today >= token_cap * 0.8:
                 logger.warning(
@@ -3427,6 +3458,10 @@ def main():
     ap.add_argument("--enable", help="enable a channel in channels.json")
     ap.add_argument("--disable", help="disable a channel in channels.json")
     ap.add_argument("--cache-prune", action="store_true", help="prune old/excess cache rows and exit")
+    ap.add_argument("--calibrate-quota", action="store_true", help="derive weekly token quota from a measured percentage delta")
+    ap.add_argument("--channel", help="channel to calibrate for --calibrate-quota")
+    ap.add_argument("--pct-before", type=float, help="quota percentage before the run")
+    ap.add_argument("--pct-after", type=float, help="quota percentage after the run")
     ap.add_argument("--estimate", action="store_true", help="print estimated cost and caps, without calling the provider")
     ap.add_argument("--since", help="YYYY-MM-DD to filter cost report")
     ap.add_argument("--today", action="store_true", help="shortcut for --since today")
@@ -3528,6 +3563,63 @@ def main():
         print(f"✅ scored {rec['model_asked']} {rec['quality']}/5"
               + (f" for {rec['task']}" if rec.get("task") else ""))
         return
+    if a.calibrate_quota:
+        if not a.channel or a.pct_before is None or a.pct_after is None or not a.since:
+            sys.exit("❌ --calibrate-quota requires --channel, --pct-before, --pct-after, and --since")
+        delta = abs(a.pct_after - a.pct_before)
+        if delta < 2.0:
+            sys.exit(f"❌ Refusing calibration: delta {delta:.2f}% is < 2 points (too noisy)")
+
+        since_dt = _ts_local(a.since)
+        if not since_dt:
+            sys.exit("❌ Invalid --since timestamp")
+
+        non_cached_spent = 0
+        if AUDIT.exists():
+            with AUDIT.open("r") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        ts = _ts_local(rec.get("ts", ""))
+                        if ts and ts >= since_dt and rec.get("quota_channel") == a.channel and not rec.get("cached"):
+                            c_in = rec.get("in") or 0
+                            c_out = rec.get("out") or 0
+                            c_cache = rec.get("cache") or 0
+                            if a.channel.startswith("google-ai-pro"):
+                                non_cached_in = c_in
+                            else:
+                                non_cached_in = max(0, c_in - c_cache)
+                            non_cached_spent += non_cached_in + c_out
+                    except Exception:  # noqa: BLE001, S112
+                        pass
+
+        if non_cached_spent == 0:
+            sys.exit("❌ No tokens spent in the given window")
+
+        weekly_tokens = int(non_cached_spent / (delta / 100.0))
+        print(f"Calibration: {non_cached_spent} tokens / {delta:.2f}% = {weekly_tokens:,} weekly tokens")
+
+        budgets = {}
+        if BUDGETS.exists():
+            try:
+                budgets = json.loads(BUDGETS.read_text())
+            except Exception:  # noqa: BLE001, S112
+                pass
+
+        today_str = dt.datetime.now().astimezone().strftime("%Y-%m-%d")
+        budgets.setdefault("weekly_token_quota", {})[a.channel] = {
+            "tokens": weekly_tokens,
+            "calibrated_at": today_str,
+            "evidence": f"Calibrated from {non_cached_spent} tokens over {delta:.2f}% delta since {a.since}",
+        }
+
+        BUDGETS.parent.mkdir(parents=True, exist_ok=True)
+        BUDGETS.write_text(json.dumps(budgets, indent=2) + "\n")
+        sys.exit(0)
+
     if a.scorecard:
         import scorecard
         since = dt.datetime.now().astimezone().isoformat()[:10] if a.today else a.since

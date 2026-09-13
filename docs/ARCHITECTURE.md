@@ -182,11 +182,20 @@ up, and it has no equivalent for non-agy providers (`gemini`/`openai`), which ge
 only a post-run `⚠️ TOKEN ALARM` in the returned summary once the total is already
 known. The actual defense against a repeat of the 2026-09-05/06 quota loss is a
 second, independent breaker in `check_budget()`: a rolling daily total per
-`quota_channel` (cache hits excluded, same rule as the existing daily-call count)
-that aborts BEFORE the provider call once `daily_token_budget` (`budgets.json`, or a
-coded 20,000,000/day fallback for any `google-ai-pro*` channel with no config at
-all) is exceeded — every normal day in the ledger topped out at 12,893,374 tokens on
-that channel; the two crisis days hit 147,514,702 and 106,191,856. `AGY_WORKER_TIMEOUT_S`
+`quota_channel` counted strictly on non-cached tokens (`non_cached_in + out`;
+cache reads stay in the ledger and status output but are excluded from the comparison;
+T-995). The cap is derived as `daily_quota_fraction × weekly_token_quota` (coded default
+fraction `0.15` for any `google-ai-pro*` channel, pacing spend across 7 days per
+owner rule D-250), falling back to 20,000,000/day with a logged warning when uncalibrated;
+an explicit `daily_token_budget` entry overrides both. `--calibrate-quota` derives
+`weekly_token_quota` from non-cached ledger spend over a known quota-percentage delta.
+Calibration is manual by necessity: **`agy` exposes no machine-readable quota**
+(checked 2026-09-13 against `agy --help` — the subcommands are
+`agent(s)/changelog/help/install/mcp/mic-serve/plugin(s)/remote-control/update`, with no
+quota or usage command), so the owner supplies the observed percentage delta and the
+router derives the weekly figure from its own ledger rather than querying the provider.
+Every normal day in the ledger topped out at 12,893,374 tokens on that channel; the
+two crisis days hit 147,514,702 and 106,191,856. `AGY_WORKER_TIMEOUT_S`
 also dropped 900s → 600s, re-measured against the ledger's own latency distribution
 (p95=319s, p99=531.7s). The ledger records
 `verify_present`, `no_verify_reason`, and `files_written_count` per run, and
