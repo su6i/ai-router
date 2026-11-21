@@ -1,6 +1,23 @@
-# ai-router
+<div align="center">
 
-[فارسی](docs/fa/README.fa.md) · **[Architecture](docs/ARCHITECTURE.md)**
+<img src="assets/project_logo_horizontal.jpg" width="600" alt="ai-router Logo">
+
+<h1>ai-router 🚀</h1>
+
+<p align="center">
+  <a href="docs/ARCHITECTURE.md"><img src="https://img.shields.io/badge/Docs-Architecture-orange.svg" alt="Architecture Docs"></a>
+  <a href="docs/fa/README.fa.md"><img src="https://img.shields.io/badge/Docs-Persian-teal.svg" alt="Persian Docs"></a>
+  <img src="https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/deps-uv-DE5FE9" alt="uv">
+  <a href="https://linkedin.com/in/su6i"><img src="assets/linkedin_su6i.svg" height="20" alt="LinkedIn" style="vertical-align: middle;"></a>
+</p>
+
+<strong>Cost-accounting LLM gateway: one door to every model, every call tagged, budgeted and ledgered.</strong><br>
+<sub>Companion infrastructure for multi-agent projects that need cost-per-task as a SQL query instead of a guess.</sub>
+
+</div>
+
+---
 
 Cost-accounting LLM gateway: one door to every model, every call tagged,
 budgeted and ledgered. Companion infrastructure for multi-agent projects that
